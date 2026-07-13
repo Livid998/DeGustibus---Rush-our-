@@ -54,7 +54,7 @@ const PANEL := Color("#4a2521e8")
 
 func setup(value: SessionState) -> void:
 	session = value
-	layer = 10
+	layer = 100
 	root = Control.new()
 	root.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	root.theme = _make_theme()

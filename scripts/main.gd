@@ -410,7 +410,7 @@ func _deliver_plate(station: KitchenStation) -> void:
 			_finish_table_delivery(order, quality, price)
 		else:
 			ui.toast("Piatto sul pass: Nico lo porta fisicamente al Tavolo %d." % order.table, 2.8)
-			var table_target: Vector3 = world.table_positions[int(order.table)] + Vector3(-0.65, 0, 0)
+			var table_target: Vector3 = world.table_positions[int(order.table)] + Vector3(0, 0, 0.72)
 			staff_agents.waiter.start_delivery(table_target, _finish_table_delivery.bind(order, quality, price))
 	session.carried_item = ""
 	player.set_carried_visual("")
@@ -437,7 +437,7 @@ func _on_order_created(order: Dictionary) -> void:
 	ui.toast("Nuova comanda · Tavolo %d · %s" % [order.table, GameData.recipe_name(order.recipe)])
 	var customer := CustomerAgent.new()
 	var color: Color = world.customer_colors[(int(order.id) - 1) % world.customer_colors.size()]
-	customer.position = world.table_positions[int(order.table)] + Vector3(0.62, 0.0, 0.0)
+	customer.position = world.table_positions[int(order.table)] + Vector3(0, 0.0, 1.04)
 	world.add_child(customer)
 	customer.setup(self, int(order.id), int(order.table), color, bool(order.invalid))
 	customers_by_order[order.id] = customer

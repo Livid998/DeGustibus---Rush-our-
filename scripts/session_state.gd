@@ -39,7 +39,7 @@ var settings := {
 	"music": 0.55,
 	"sfx": 0.75,
 	"camera_sensitivity": 0.20,
-	"camera_distance": 6.8,
+	"camera_distance": 6.2,
 	"camera_fov": 68.0,
 	"subtitles": true,
 }

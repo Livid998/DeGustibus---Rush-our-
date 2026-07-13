@@ -9,6 +9,8 @@ var disorder := 0.0
 var game: Node
 var base_color := Color.WHITE
 var body_mesh: MeshInstance3D
+var model_root: Node3D
+var highlight_ring: MeshInstance3D
 var label: Label3D
 var clutter: Array[MeshInstance3D] = []
 var highlighted := false
@@ -19,7 +21,7 @@ var processing_elapsed := 0.0
 var processing_duration := 0.0
 var ready_elapsed := 0.0
 var burn_window := 8.0
-var food_visual: MeshInstance3D
+var food_visual: Node3D
 var status_label: Label3D
 var particles: GPUParticles3D
 var particle_material: StandardMaterial3D
@@ -39,6 +41,15 @@ func setup(id: String, title: String, color: Color, size: Vector3, owner_game: N
 	body_mesh.position.y = size.y * 0.5
 	body_mesh.material_override = _material(color)
 	add_child(body_mesh)
+	highlight_ring = MeshInstance3D.new()
+	var ring_mesh := TorusMesh.new()
+	ring_mesh.inner_radius = maxf(size.x, size.z) * 0.48
+	ring_mesh.outer_radius = maxf(size.x, size.z) * 0.56
+	highlight_ring.mesh = ring_mesh
+	highlight_ring.position.y = 0.055
+	highlight_ring.material_override = _material(color.lightened(0.32), true)
+	highlight_ring.visible = false
+	add_child(highlight_ring)
 	var collision := CollisionShape3D.new()
 	var shape := BoxShape3D.new()
 	shape.size = size
@@ -48,6 +59,7 @@ func setup(id: String, title: String, color: Color, size: Vector3, owner_game: N
 	label = Label3D.new()
 	label.text = title.to_upper()
 	label.font_size = 44
+	label.pixel_size = 0.0035
 	label.outline_size = 10
 	label.modulate = Color("#fff3d6")
 	label.position = Vector3(0.0, size.y + 0.42, 0.0)
@@ -65,6 +77,14 @@ func setup(id: String, title: String, color: Color, size: Vector3, owner_game: N
 		add_child(prop)
 		clutter.append(prop)
 	_build_processing_feedback()
+
+func set_visual_model(path: String, scale_factor: Variant = 1.0, rotation_y := 0.0, offset := Vector3.ZERO) -> void:
+	if is_instance_valid(model_root):
+		model_root.queue_free()
+	var model_scale: Vector3 = scale_factor if scale_factor is Vector3 else Vector3.ONE * float(scale_factor)
+	model_root = AssetLibrary.add_model(self, path, offset, model_scale, Vector3(0, rotation_y, 0))
+	if model_root:
+		body_mesh.visible = false
 
 func _process(delta: float) -> void:
 	if processing_state == "idle":
@@ -93,7 +113,7 @@ func _process(delta: float) -> void:
 			status_label.modulate = Color("#ff5a4f")
 			particle_material.albedo_color = Color("#4b4545d0")
 			if is_instance_valid(food_visual):
-				food_visual.material_override = _material(Color("#28211e"), true)
+				AssetLibrary.set_burnt(food_visual)
 			processing_changed.emit(self, processing_state)
 	elif processing_state == "burnt":
 		status_label.text = "BRUCIATO · RIMUOVI"
@@ -108,15 +128,12 @@ func start_processing(input_item: String, result_item: String, duration: float, 
 	ready_elapsed = 0.0
 	burn_window = burn_after
 	processing_state = "cooking"
-	food_visual = MeshInstance3D.new()
-	var mesh := CylinderMesh.new()
-	mesh.top_radius = 0.30
-	mesh.bottom_radius = 0.32
-	mesh.height = 0.12
-	food_visual.mesh = mesh
-	food_visual.position = Vector3(0, visual_height + 0.15, 0)
-	food_visual.material_override = _material(_food_color(input_item), true)
+	food_visual = Node3D.new()
+	food_visual.position = Vector3(0, visual_height + 0.12, 0)
 	add_child(food_visual)
+	var food_model := AssetLibrary.add_food(food_visual, input_item, Vector3.ZERO, 1.05)
+	if food_model:
+		AssetLibrary.set_model_tint(food_model, _food_color(input_item), true)
 	particles.emitting = true
 	status_label.visible = true
 	processing_changed.emit(self, processing_state)
@@ -200,7 +217,9 @@ func set_highlighted(value: bool) -> void:
 		return
 	highlighted = value
 	var color := base_color.lightened(0.28) if value else base_color
-	body_mesh.material_override = _material(color, value)
+	if body_mesh.visible:
+		body_mesh.material_override = _material(color, value)
+	highlight_ring.visible = value
 	label.modulate = Color.WHITE if value else Color("#fff3d6")
 
 func add_disorder(amount: float) -> void:

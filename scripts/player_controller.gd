@@ -17,12 +17,11 @@ var focused: Node
 var interacting := false
 var mouse_sensitivity := 0.20
 var visual: Node3D
-var arms: Array[MeshInstance3D] = []
-var legs: Array[MeshInstance3D] = []
+var character: AnimatedCharacter
 var carry_socket: Node3D
 var carry_visual: Node3D
 var animation_time := 0.0
-var target_zoom := 6.8
+var target_zoom := 6.2
 var shoulder_side := 1.0
 
 func setup(owner_game: Node) -> void:
@@ -41,62 +40,17 @@ func _build_body() -> void:
 	add_child(collision)
 	visual = Node3D.new()
 	add_child(visual)
-	var torso := MeshInstance3D.new()
-	var capsule := CapsuleMesh.new()
-	capsule.radius = 0.43
-	capsule.height = 1.35
-	torso.mesh = capsule
-	torso.position.y = 0.88
-	torso.material_override = _material(Color("#d84f3f"))
-	visual.add_child(torso)
-	var apron := MeshInstance3D.new()
-	var apron_mesh := BoxMesh.new()
-	apron_mesh.size = Vector3(0.72, 0.78, 0.10)
-	apron.mesh = apron_mesh
-	apron.position = Vector3(0, 0.92, -0.39)
-	apron.material_override = _material(Color("#fff0d5"))
-	visual.add_child(apron)
-	var head := MeshInstance3D.new()
-	var sphere := SphereMesh.new()
-	sphere.radius = 0.36
-	sphere.height = 0.72
-	head.mesh = sphere
-	head.position.y = 1.88
-	head.material_override = _material(Color("#efb28f"))
-	visual.add_child(head)
-	var hat := MeshInstance3D.new()
-	var hat_mesh := CylinderMesh.new()
-	hat_mesh.top_radius = 0.36
-	hat_mesh.bottom_radius = 0.43
-	hat_mesh.height = 0.48
-	hat.mesh = hat_mesh
-	hat.position.y = 2.27
-	hat.material_override = _material(Color("#fff9e9"))
-	visual.add_child(hat)
-	for side in [-1.0, 1.0]:
-		var arm := MeshInstance3D.new()
-		var arm_mesh := BoxMesh.new()
-		arm_mesh.size = Vector3(0.22, 0.78, 0.24)
-		arm.mesh = arm_mesh
-		arm.position = Vector3(0.56 * side, 1.08, 0)
-		arm.material_override = _material(Color("#efb28f"))
-		visual.add_child(arm)
-		arms.append(arm)
-		var leg := MeshInstance3D.new()
-		var leg_mesh := BoxMesh.new()
-		leg_mesh.size = Vector3(0.28, 0.72, 0.32)
-		leg.mesh = leg_mesh
-		leg.position = Vector3(0.23 * side, 0.35, 0)
-		leg.material_override = _material(Color("#3d3542"))
-		visual.add_child(leg)
-		legs.append(leg)
+	character = AnimatedCharacter.new()
+	visual.add_child(character)
+	character.setup(Color("#f05a43"), false, true)
 	carry_socket = Node3D.new()
-	carry_socket.position = Vector3(0, 1.13, -0.72)
+	carry_socket.position = Vector3(0, 1.10, -0.62)
 	visual.add_child(carry_socket)
 
 func _build_camera() -> void:
 	camera_pivot = Node3D.new()
 	camera_pivot.position = Vector3(0, 1.55, 0)
+	camera_pivot.rotation = Vector3(-0.23, -0.36, 0)
 	add_child(camera_pivot)
 	spring_arm = SpringArm3D.new()
 	spring_arm.spring_length = target_zoom
@@ -131,6 +85,7 @@ func _unhandled_input(event: InputEvent) -> void:
 		camera_pivot.rotation.y -= event.relative.x * mouse_sensitivity * 0.01
 		camera_pivot.rotation.x = clampf(camera_pivot.rotation.x - event.relative.y * mouse_sensitivity * 0.01, -0.75, 0.58)
 	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT and event.pressed:
+		character.play_action("Punch_Jab", 0.55)
 		slapstick_requested.emit()
 	if event is InputEventMouseButton and event.pressed:
 		if event.button_index == MOUSE_BUTTON_WHEEL_UP:
@@ -142,10 +97,12 @@ func _unhandled_input(event: InputEvent) -> void:
 			if interacting:
 				interaction_cancelled.emit()
 			elif focused and focused.has_method("begin_interaction"):
+				character.play_action("Interact", 0.7)
 				focused.begin_interaction(self)
 		elif event.physical_keycode == KEY_Q and interacting:
 			interaction_cancelled.emit()
 		elif event.physical_keycode == KEY_SPACE:
+			character.play_action("Punch_Jab", 0.55)
 			slapstick_requested.emit()
 		elif event.physical_keycode == KEY_C:
 			shoulder_side *= -1.0
@@ -185,18 +142,9 @@ func _physics_process(delta: float) -> void:
 	_update_focus()
 
 func _animate_chef(delta: float, movement_amount: float) -> void:
-	var pace := 10.0 if Input.is_physical_key_pressed(KEY_SHIFT) else 7.0
-	var swing := sin(animation_time * pace) * 0.62 * movement_amount
-	visual.position.y = lerpf(visual.position.y, abs(sin(animation_time * pace * 2.0)) * 0.045 * movement_amount, delta * 12.0)
-	for i in legs.size():
-		legs[i].rotation.x = lerpf(legs[i].rotation.x, swing * (-1.0 if i == 0 else 1.0), delta * 12.0)
 	var holding := is_instance_valid(carry_visual)
-	for i in arms.size():
-		var target_rot := -0.82 if holding else swing * (1.0 if i == 0 else -1.0)
-		if interacting:
-			target_rot = -0.95 + sin(animation_time * 13.0 + i) * 0.18
-		arms[i].rotation.x = lerpf(arms[i].rotation.x, target_rot, delta * 14.0)
-		arms[i].rotation.z = lerpf(arms[i].rotation.z, (-0.18 if i == 0 else 0.18) if holding else 0.0, delta * 10.0)
+	character.set_locomotion(movement_amount > 0.08, Input.is_physical_key_pressed(KEY_SHIFT), interacting, holding)
+	visual.position.y = lerpf(visual.position.y, 0.0, delta * 10.0)
 
 func set_carried_visual(item: String) -> void:
 	if is_instance_valid(carry_visual):
@@ -206,33 +154,10 @@ func set_carried_visual(item: String) -> void:
 		return
 	carry_visual = Node3D.new()
 	carry_socket.add_child(carry_visual)
-	var plate := MeshInstance3D.new()
-	var plate_mesh := CylinderMesh.new()
-	plate_mesh.top_radius = 0.42
-	plate_mesh.bottom_radius = 0.36
-	plate_mesh.height = 0.08
-	plate.mesh = plate_mesh
-	plate.material_override = _material(Color("#fff4db") if item.ends_with("_ready") else Color("#b78d62"))
-	carry_visual.add_child(plate)
-	var food := MeshInstance3D.new()
-	if item.begins_with("pasta"):
-		var mesh := TorusMesh.new()
-		mesh.inner_radius = 0.12
-		mesh.outer_radius = 0.29
-		food.mesh = mesh
-	elif item.begins_with("burger"):
-		var mesh := CylinderMesh.new()
-		mesh.top_radius = 0.28
-		mesh.bottom_radius = 0.30
-		mesh.height = 0.22
-		food.mesh = mesh
-	else:
-		var mesh := BoxMesh.new()
-		mesh.size = Vector3(0.42, 0.18, 0.32)
-		food.mesh = mesh
-	food.position.y = 0.13
-	food.material_override = _material(_item_color(item))
-	carry_visual.add_child(food)
+	AssetLibrary.add_model(carry_visual, AssetLibrary.FOOD + "plate-dinner.glb", Vector3.ZERO, Vector3.ONE * 1.25)
+	var food := AssetLibrary.add_food(carry_visual, item, Vector3(0, 0.08, 0), 0.92)
+	if food and not item.ends_with("_ready"):
+		AssetLibrary.set_model_tint(food, _item_color(item))
 
 func _item_color(item: String) -> Color:
 	if item.begins_with("burger"): return Color("#c95739") if "raw" in item else Color("#8d482f")

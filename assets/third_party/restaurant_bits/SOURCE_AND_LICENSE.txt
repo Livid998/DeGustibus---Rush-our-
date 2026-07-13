@@ -1,0 +1,7 @@
+Restaurant Bits
+Author: Kay Lousberg
+Source: https://poly.pizza/bundle/Restaurant-Bits-ejkcnWf78Q
+License: CC0 1.0 / Public Domain
+
+The source page permits personal and commercial use without attribution.
+This note is retained to make the origin and license of the distributed GLB files explicit.

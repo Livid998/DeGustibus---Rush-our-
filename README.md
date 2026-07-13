@@ -54,11 +54,11 @@ Per cucinare, selezionare una ricetta e seguire il flusso delle postazioni:
 
 - Controller third-person animato, camera orbitale con collisione, zoom 3.4–10.5 m, cambio spalla, ricentraggio, FOV e sensibilità regolabili.
 - Onboarding iniziale, comanda attiva selezionabile, obiettivo persistente e beacon 3D sulla prossima postazione.
-- Ristorante 3D unico con cucina, porta fisica, sala, cassa, attesa, sei tavoli e oggetti di scena procedurali.
+- Ristorante 3D unico con cucina attrezzata, sala arredata, cassa, attesa, sei tavoli e oltre 300 asset importati disponibili per l'espansione del layout.
 - Tre ricette complete con ingredienti visibili nelle mani, posa fisica, cotture asincrone, vapore, stato pronto, bruciatura, assemblaggio, qualità e spreco.
 - Comande ordinate per anzianità con tavolo, modifica, validità, responsabile, pazienza e stato.
 - Prep, briefing a capacità limitata e distinzione fra quantità speciale reale, stimata, comunicata e promessa.
-- Tre dipendenti fisici animati con statistiche differenti, percorsi, stress, umore, memoria, apprendimento e Ordine realmente simulato; il cameriere prende il piatto dal pass e raggiunge davvero il tavolo.
+- Chef, tre dipendenti e clienti con scheletro a 65 ossa e animazioni dedicate per idle, locomozione, corsa, trasporto, interazione, seduta, dialogo e reazioni; il cameriere prende il piatto dal pass e raggiunge davvero il tavolo.
 - Debito operativo visibile per postazione: clutter progressivo, rallentamento, errori/stress e reset temporizzato.
 - Cinque archetipi di cliente e quattro interruzioni fisiche: catering, richieste progressive, cambio, “non siamo graditi”.
 - Rabbia progressiva con bonus/penalità, drop ad alta rabbia e modalità slapstick non cruenta con penalità per bersagli errati.
@@ -97,7 +97,7 @@ SMOKE PASS | recipes=3 cooking=async+burn waiter=physical interruptions=4 cateri
 
 ## Limiti noti e placeholder
 
-- Geometrie e personaggi sono procedurali/cartoon; locomozione, trasporto, lavorazione, cottura, consegna e slapstick sono animati ma non usano ancora uno scheletro/mocap definitivo.
+- I modelli sono low-poly coerenti e già sostituiscono il greybox; outfit e accessori di ruolo sono ancora assemblati a runtime e richiederebbero modelli dedicati per una direzione artistica finale.
 - I dipendenti seguono route operative leggibili, non una navigazione con avoidance completa.
 - Il dialogo catering produce un contratto futuro nel salvataggio e nel summary; il livello catering non fa parte della slice.
 - Le modifiche ordine influenzano filtraggio, rabbia ed economia, ma non generano varianti visive separate del piatto.
@@ -112,4 +112,8 @@ Per una produzione completa: convertire le tabelle di `GameData` in `Resource` e
 
 - Codice del progetto: licenza MIT, vedi `LICENSE`.
 - Engine: Godot 4.7 stable, licenza MIT. La build portabile include il runtime Godot non modificato.
-- Nessun asset, font, texture, modello o audio di terze parti. Materiali, mesh, UI e audio sono generati dal progetto.
+- Restaurant Bits di Kay Lousberg: modelli cucina/ristorante, CC0; origine e licenza in `assets/third_party/restaurant_bits/SOURCE_AND_LICENSE.txt`.
+- Kenney Food Kit: cibo e utensili, CC0; licenza in `assets/third_party/kenney_food/LICENSE.txt`.
+- KayKit Furniture Bits: arredi, CC0; licenza in `assets/third_party/kaykit_furniture/LICENSE.txt`.
+- Quaternius Universal Base Characters e Universal Animation Library 1/2: personaggi e animazioni, CC0; licenze in `assets/third_party/quaternius/`.
+- Gli asset sorgente restano nei formati GLB oppure glTF + BIN + texture. Il runtime usa le risorse importate da Godot; le versioni delle animazioni scelte sono quelle senza root motion, perché lo spostamento è autoritativo nel controller.

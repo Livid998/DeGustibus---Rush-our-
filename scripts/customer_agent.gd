@@ -10,7 +10,7 @@ var patience := 100.0
 var active := true
 var body_color := Color.WHITE
 var label: Label3D
-var body: MeshInstance3D
+var body: AnimatedCharacter
 var anim_time := 0.0
 
 func setup(owner_game: Node, id: int, table: int, color: Color, is_problematic := false, event := {}) -> void:
@@ -26,34 +26,15 @@ func setup(owner_game: Node, id: int, table: int, color: Color, is_problematic :
 	_build_visual()
 
 func _build_visual() -> void:
-	body = MeshInstance3D.new()
-	var capsule := CapsuleMesh.new()
-	capsule.radius = 0.36
-	capsule.height = 1.18
-	body.mesh = capsule
-	body.position.y = 0.79
-	body.material_override = _material(body_color)
+	body = AnimatedCharacter.new()
 	add_child(body)
-	var head := MeshInstance3D.new()
-	var sphere := SphereMesh.new()
-	sphere.radius = 0.31
-	sphere.height = 0.62
-	head.mesh = sphere
-	head.position.y = 1.67
-	head.material_override = _material(Color("#eeb18b"))
-	add_child(head)
-	var hair := MeshInstance3D.new()
-	var hair_mesh := SphereMesh.new()
-	hair_mesh.radius = 0.32
-	hair_mesh.height = 0.35
-	hair.mesh = hair_mesh
-	hair.position.y = 1.88
-	hair.material_override = _material(body_color.darkened(0.45))
-	add_child(hair)
+	body.setup(body_color.lightened(0.24), customer_id % 2 == 1)
+	body.play_state("Idle_Talking" if problematic or not interruption.is_empty() else "Sitting_Idle")
 	label = Label3D.new()
 	label.font_size = 34
+	label.pixel_size = 0.0035
 	label.outline_size = 9
-	label.position.y = 2.35
+	label.position.y = 2.18
 	label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
 	label.text = "! %s" % interruption.get("title", "PROBLEMATICO") if problematic else "TAVOLO %d" % table_id
 	label.modulate = Color("#ff725e") if problematic else Color("#fff4da")
@@ -69,9 +50,7 @@ func _build_visual() -> void:
 func _process(delta: float) -> void:
 	if not active: return
 	anim_time += delta
-	body.position.y = 0.79 + sin(anim_time * (5.5 if problematic else 2.6) + customer_id) * (0.055 if problematic else 0.025)
-	body.rotation.z = sin(anim_time * 4.2 + customer_id) * (0.09 if problematic else 0.018)
-	label.position.y = 2.35 + sin(anim_time * 2.3) * 0.045
+	label.position.y = 2.18 + sin(anim_time * 2.3) * 0.045
 
 func get_prompt() -> String:
 	if not interruption.is_empty():
@@ -92,6 +71,7 @@ func slapstick_hit(direction: Vector3) -> void:
 	if not active:
 		return
 	active = false
+	body.play_action("Death01", 0.75)
 	var target := global_position + direction.normalized() * 7.0 + Vector3.UP * 2.5
 	var tween := create_tween().set_parallel(true)
 	tween.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_IN)
