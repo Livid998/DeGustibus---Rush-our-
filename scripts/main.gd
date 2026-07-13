@@ -15,6 +15,12 @@ var interaction := {}
 var system_timer := 0.0
 var hud_timer := 0.0
 var paused := false
+var guidance_beacon: Node3D
+var guidance_label: Label3D
+var guidance_station_id := ""
+var guidance_ring: MeshInstance3D
+var staff_agents := {}
+var onboarding_open := false
 
 func _ready() -> void:
 	process_mode = Node.PROCESS_MODE_ALWAYS
@@ -29,10 +35,14 @@ func _ready() -> void:
 	world = WorldBuilder.new()
 	add_child(world)
 	world.setup(self)
+	_build_guidance_beacon()
 	player = PlayerController.new()
 	player.position = Vector3(-5.2, 0.05, -5.6)
 	add_child(player)
 	player.setup(self)
+	player.set_mouse_sensitivity(float(session.settings.camera_sensitivity))
+	player.set_camera_distance(float(session.settings.camera_distance))
+	player.set_camera_fov(float(session.settings.camera_fov))
 	_spawn_staff()
 	audio = ProceduralAudio.new()
 	add_child(audio)
@@ -59,12 +69,15 @@ func _connect_signals() -> void:
 	ui.restart_pressed.connect(_restart_run)
 	ui.resume_pressed.connect(func(): _set_paused(false))
 	ui.settings_changed.connect(_apply_settings)
+	ui.tutorial_closed.connect(_on_tutorial_closed)
 	player.focus_changed.connect(_on_focus_changed)
 	player.interaction_cancelled.connect(_cancel_interaction)
 	player.slapstick_requested.connect(_perform_slapstick)
-	order_manager.orders_changed.connect(func(): ui.update_orders(order_manager.active_orders()))
+	order_manager.orders_changed.connect(_refresh_orders_ui)
 	order_manager.order_created.connect(_on_order_created)
 	order_manager.order_failed.connect(_on_order_failed)
+	for station in world.stations.values():
+		station.processing_changed.connect(_on_station_processing_changed)
 
 func _setup_input() -> void:
 	for action in ["move_forward", "move_back", "move_left", "move_right", "sprint", "interact", "cancel", "slapstick", "pause"]:
@@ -73,6 +86,8 @@ func _setup_input() -> void:
 
 func _process(delta: float) -> void:
 	if paused:
+		return
+	if onboarding_open:
 		return
 	if session.phase == SessionState.Phase.PREP:
 		session.prep_time_left = maxf(0.0, session.prep_time_left - delta)
@@ -96,7 +111,10 @@ func _process(delta: float) -> void:
 		hud_timer = 0.15
 		if ui.hud.visible:
 			ui.update_hud()
+			_update_guidance()
 			audio.set_pressure(maxf(session.anger, _average_staff_stress()))
+	if is_instance_valid(guidance_beacon) and guidance_beacon.visible:
+		guidance_beacon.rotation.y += delta * 1.8
 
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and not event.echo:
@@ -111,6 +129,8 @@ func _unhandled_input(event: InputEvent) -> void:
 			_select_recipe("pasta")
 		elif event.physical_keycode == KEY_3:
 			_select_recipe("special")
+		elif event.physical_keycode == KEY_TAB and session.phase == SessionState.Phase.SERVICE:
+			_cycle_selected_order()
 		elif event.physical_keycode == KEY_ENTER and session.phase == SessionState.Phase.PREP:
 			_open_briefing()
 
@@ -122,10 +142,13 @@ func _on_start_pressed() -> void:
 
 func _on_prep_selected(profile: String) -> void:
 	session.configure_prep(profile)
+	world.set_mise_count(session.mise_en_place)
 	session.set_phase(SessionState.Phase.PREP)
 	player.global_position = Vector3(-5.2, 0.05, -5.6)
-	player.set_active(true)
+	player.set_active(false)
 	ui.show_prep_hud()
+	onboarding_open = true
+	ui.show_tutorial()
 	for station in world.stations.values():
 		station.add_disorder(float(GameData.PREP_PROFILES[profile].disorder) * (0.45 if station.station_id == "sink" else 1.0))
 
@@ -133,6 +156,8 @@ func _open_briefing() -> void:
 	if session.phase != SessionState.Phase.PREP:
 		return
 	_cancel_interaction()
+	ui.hide_tutorial()
+	onboarding_open = false
 	session.set_phase(SessionState.Phase.BRIEFING)
 	player.set_active(false)
 	ui.show_briefing()
@@ -146,7 +171,13 @@ func _on_briefing_confirmed(directives: Array[String]) -> void:
 	order_manager.reset()
 	order_manager.create_order("pasta")
 	order_manager.create_order("burger")
+	_select_first_available_order()
 	audio.cue("order")
+
+func _on_tutorial_closed() -> void:
+	onboarding_open = false
+	if session.phase in [SessionState.Phase.PREP, SessionState.Phase.SERVICE]:
+		player.set_active(true)
 
 func _select_recipe(recipe: String) -> void:
 	if session.phase != SessionState.Phase.PREP and session.phase != SessionState.Phase.SERVICE:
@@ -155,7 +186,52 @@ func _select_recipe(recipe: String) -> void:
 	ui.update_hud()
 	audio.cue("interact")
 
+func _select_order(order_id: int) -> void:
+	for order in order_manager.active_orders():
+		if int(order.id) == order_id:
+			session.selected_order_id = order_id
+			session.selected_recipe = str(order.recipe)
+			_refresh_orders_ui()
+			_update_guidance()
+			ui.toast("Comanda attiva: Tavolo %d · %s" % [order.table, GameData.recipe_name(order.recipe)], 1.8)
+			return
+
+func _select_first_available_order() -> void:
+	var active := order_manager.active_orders()
+	if active.is_empty():
+		session.selected_order_id = 0
+		return
+	_select_order(int(active[0].id))
+
+func _cycle_selected_order() -> void:
+	var active := order_manager.active_orders()
+	if active.is_empty(): return
+	var index := 0
+	for i in active.size():
+		if int(active[i].id) == session.selected_order_id:
+			index = (i + 1) % active.size()
+			break
+	_select_order(int(active[index].id))
+
+func _refresh_orders_ui() -> void:
+	ui.update_orders(order_manager.active_orders(), session.selected_order_id)
+
+func _selected_order() -> Dictionary:
+	for order in order_manager.active_orders():
+		if int(order.id) == session.selected_order_id:
+			return order
+	return {}
+
 func get_station_action(station: KitchenStation) -> Dictionary:
+	if station.processing_state == "burnt":
+		return {"code": "clear_burnt", "label": "Rimuovi cibo bruciato da %s" % station.display_name, "duration": 2.6}
+	if station.processing_state == "cooking":
+		var remaining := maxf(0.0, station.processing_duration - station.processing_elapsed)
+		return {"code": "blocked", "label": "%s cuoce davvero · torna fra %.1fs" % [station.display_name, remaining], "duration": 0.0}
+	if station.processing_state == "ready":
+		if not session.carried_item.is_empty():
+			return {"code": "blocked", "label": "Il cibo è pronto, ma hai le mani occupate", "duration": 0.0}
+		return {"code": "collect_cooked", "label": "Raccogli da %s · brucia fra %.0fs" % [station.display_name, maxf(0.0, station.burn_window - station.ready_elapsed)], "duration": 0.65}
 	if station.disorder >= 78.0 and station.station_id not in ["trash", "cash"]:
 		return {"code": "reset", "label": "RESET POSTAZIONE · disordine %d%%" % int(station.disorder), "duration": 5.2}
 	if session.phase == SessionState.Phase.PREP:
@@ -173,22 +249,28 @@ func get_station_action(station: KitchenStation) -> Dictionary:
 				return {"code": "blocked", "label": "SPECIALE TERMINATO", "duration": 0.0}
 			return {"code": "take_%s" % session.selected_recipe, "label": "Prendi ingredienti · %s" % GameData.recipe_name(session.selected_recipe), "duration": 1.3}
 		"grill":
-			if item == "burger_raw": return {"code": "cook_burger", "label": "Cuoci la carne", "duration": 4.2}
+			if item == "burger_raw": return {"code": "start_burger", "label": "Posa la carne sulla piastra", "duration": 0.7}
 		"fryer":
-			if item == "burger_patty": return {"code": "fry_fries", "label": "Friggi le patatine", "duration": 3.5}
-			if item == "special_raw": return {"code": "fry_special", "label": "Friggi il pollo", "duration": 5.0}
+			if item == "burger_patty": return {"code": "start_fries", "label": "Immergi il cestello delle patatine", "duration": 0.8}
+			if item == "special_raw": return {"code": "start_special", "label": "Immergi il pollo nella friggitrice", "duration": 0.8}
 		"stove":
-			if item == "pasta_raw": return {"code": "cook_pasta", "label": "Cuoci pasta e salsa", "duration": 4.0}
+			if item == "pasta_raw": return {"code": "start_pasta", "label": "Versa la pasta nella pentola", "duration": 0.75}
 		"assembly":
 			if item == "burger_components": return {"code": "plate_burger", "label": "Assembla burger e contorno", "duration": 2.8}
 			if item == "pasta_cooked": return {"code": "plate_pasta", "label": "Termina e impiatta", "duration": 2.0}
 			if item == "special_crispy": return {"code": "plate_special", "label": "Impiatta lo speciale", "duration": 2.6}
 		"pass":
-			if item.ends_with("_ready"): return {"code": "deliver", "label": "Consegna al pass", "duration": 1.2}
+			if item.ends_with("_ready"):
+				if staff_agents.has("waiter") and staff_agents.waiter.delivery_active:
+					return {"code": "blocked", "label": "Pass occupato: Nico sta servendo un altro tavolo", "duration": 0.0}
+				return {"code": "deliver", "label": "Appoggia il piatto al pass per Nico", "duration": 1.2}
 		"sink": return {"code": "reset", "label": "Riordina e lava", "duration": 4.4}
 		"trash":
 			if not item.is_empty(): return {"code": "discard", "label": "Butta %s" % item, "duration": 0.8}
-	return {"code": "blocked", "label": "Nessuna azione utile qui", "duration": 0.0}
+	var destination := world.stations.get(guidance_station_id) as KitchenStation
+	var direction_hint := "segui il segnale arancione"
+	if destination: direction_hint = "vai a %s" % destination.display_name.to_upper()
+	return {"code": "blocked", "label": "Qui non serve · %s" % direction_hint, "duration": 0.0}
 
 func request_station_interaction(station: KitchenStation, _interactor: PlayerController) -> void:
 	if not interaction.is_empty():
@@ -232,6 +314,7 @@ func _complete_station_action(station: KitchenStation, code: String) -> void:
 	match code:
 		"prep_mise":
 			session.mise_en_place = mini(4, session.mise_en_place + 1)
+			world.set_mise_count(session.mise_en_place)
 			station.add_disorder(5.0)
 			ui.toast("Base pronta. Il servizio inizierà un po' più fluido.")
 		"inspect":
@@ -248,6 +331,22 @@ func _complete_station_action(station: KitchenStation, code: String) -> void:
 			_set_carried("special_raw")
 			_consume_mise()
 			station.add_disorder(4.0)
+		"start_burger": _start_station_cooking(station, "burger_raw", "burger_patty", 7.0, 8.0)
+		"start_fries": _start_station_cooking(station, "burger_patty", "burger_components", 5.8, 7.0)
+		"start_special": _start_station_cooking(station, "special_raw", "special_crispy", 8.2, 7.0)
+		"start_pasta": _start_station_cooking(station, "pasta_raw", "pasta_cooked", 6.5, 5.5)
+		"collect_cooked":
+			var cooked := station.collect_result()
+			if not cooked.is_empty():
+				_set_carried(cooked)
+				ui.toast("Raccolto al momento giusto: %s" % ui._friendly_item(cooked), 2.0)
+		"clear_burnt":
+			station.clear_processing()
+			station.add_disorder(18.0)
+			session.waste_cost += 8
+			session.dishes_failed += 1
+			session.add_anger(8.0, "%s ha bruciato una preparazione lasciata incustodita" % station.display_name)
+			ui.toast("Preparazione bruciata rimossa · -€8 · postazione sporca")
 		"cook_burger": _set_carried("burger_patty"); station.add_disorder(8.0)
 		"fry_fries": _set_carried("burger_components"); station.add_disorder(12.0)
 		"fry_special": _set_carried("special_crispy"); station.add_disorder(14.0)
@@ -258,10 +357,12 @@ func _complete_station_action(station: KitchenStation, code: String) -> void:
 		"deliver": _deliver_plate(station)
 		"discard":
 			session.carried_item = ""
+			player.set_carried_visual("")
 			session.waste_cost += 5
 			ui.toast("Spreco registrato: -€5")
 	if session.phase == SessionState.Phase.SERVICE and session.anger >= 76.0 and rng.randf() < 0.12 and not session.carried_item.is_empty():
 		session.carried_item = ""
+		player.set_carried_visual("")
 		session.waste_cost += 8
 		session.dishes_failed += 1
 		session.add_anger(5.0, "Con la rabbia alta lo chef ha fatto cadere una preparazione")
@@ -274,10 +375,21 @@ func _complete_station_action(station: KitchenStation, code: String) -> void:
 func _set_carried(item: String) -> void:
 	session.carried_item = item
 	session.carried_since = session.service_elapsed
+	player.set_carried_visual(item)
+
+func _start_station_cooking(station: KitchenStation, expected: String, result: String, duration: float, burn_after: float) -> void:
+	if session.carried_item != expected:
+		return
+	if station.start_processing(expected, result, duration, burn_after):
+		session.carried_item = ""
+		player.set_carried_visual("")
+		station.add_disorder(5.0)
+		ui.toast("%s è in cottura. Puoi occuparti di altro e tornare quando diventa verde." % station.display_name, 3.2)
 
 func _consume_mise() -> void:
 	if session.mise_en_place > 0:
 		session.mise_en_place -= 1
+		world.set_mise_count(session.mise_en_place)
 
 func _deliver_plate(station: KitchenStation) -> void:
 	var recipe := session.carried_item.trim_suffix("_ready")
@@ -292,15 +404,27 @@ func _deliver_plate(station: KitchenStation) -> void:
 	else:
 		var price := int(GameData.RECIPES[recipe].price)
 		if order.invalid: price -= 3
-		session.money += price
-		session.dishes_succeeded += 1
-		session.customers_happy += 1
-		session.reputation = clampf(session.reputation + quality * 0.012, 0.0, 100.0)
 		if order.invalid:
 			session.add_anger(4.0, "È arrivata al pass una richiesta assurda accettata dalla sala")
-		ui.toast("Tavolo %d servito · qualità %d%% · +€%d" % [order.table, int(quality), price])
-		_remove_customer_for_order(order.id, true)
+		if OS.get_environment("DEGUSTIBUS_SMOKE") == "1" or "--smoke-test" in OS.get_cmdline_user_args():
+			_finish_table_delivery(order, quality, price)
+		else:
+			ui.toast("Piatto sul pass: Nico lo porta fisicamente al Tavolo %d." % order.table, 2.8)
+			var table_target: Vector3 = world.table_positions[int(order.table)] + Vector3(-0.65, 0, 0)
+			staff_agents.waiter.start_delivery(table_target, _finish_table_delivery.bind(order, quality, price))
 	session.carried_item = ""
+	player.set_carried_visual("")
+	if not order.is_empty() and int(order.id) == session.selected_order_id:
+		_select_first_available_order()
+
+func _finish_table_delivery(order: Dictionary, quality: float, price: int) -> void:
+	session.money += price
+	session.dishes_succeeded += 1
+	session.customers_happy += 1
+	session.reputation = clampf(session.reputation + quality * 0.012, 0.0, 100.0)
+	ui.toast("Nico serve il Tavolo %d · qualità %d%% · +€%d" % [order.table, int(quality), price])
+	_remove_customer_for_order(int(order.id), true)
+	audio.cue("success")
 
 func _on_focus_changed(target: Node) -> void:
 	if target and target.has_method("get_prompt"):
@@ -317,6 +441,8 @@ func _on_order_created(order: Dictionary) -> void:
 	world.add_child(customer)
 	customer.setup(self, int(order.id), int(order.table), color, bool(order.invalid))
 	customers_by_order[order.id] = customer
+	if session.selected_order_id == 0:
+		_select_order(int(order.id))
 
 func _on_order_failed(order: Dictionary) -> void:
 	session.customers_fled += 1
@@ -326,6 +452,19 @@ func _on_order_failed(order: Dictionary) -> void:
 	ui.toast(order.failure_reason)
 	audio.cue("error")
 	_remove_customer_for_order(order.id, false)
+	if int(order.id) == session.selected_order_id:
+		_select_first_available_order()
+
+func _on_station_processing_changed(station: KitchenStation, state: String) -> void:
+	if state == "ready":
+		ui.toast("%s: preparazione PRONTA. Il segnale è verde, raccoglila prima che bruci." % station.display_name, 3.4)
+		audio.cue("success")
+	elif state == "burnt":
+		session.add_anger(5.0, "Una preparazione è bruciata su %s" % station.display_name)
+		station.add_disorder(10.0)
+		ui.toast("FUMO! La preparazione su %s è bruciata fisicamente." % station.display_name, 4.0)
+		audio.cue("error")
+	_update_guidance()
 
 func _remove_customer_for_order(order_id: int, happy: bool) -> void:
 	if not customers_by_order.has(order_id): return
@@ -559,7 +698,12 @@ func _clear_dynamic_world() -> void:
 	interruption_index = 0
 	interaction.clear()
 	order_manager.reset()
+	session.selected_order_id = 0
+	session.carried_item = ""
+	world.set_mise_count(0)
+	if is_instance_valid(player): player.set_carried_visual("")
 	for station in world.stations.values():
+		station.clear_processing()
 		station.disorder = 0.0
 		station.add_disorder(0.0)
 
@@ -574,6 +718,7 @@ func _spawn_staff() -> void:
 		agent.position = routes[key][0]
 		world.add_child(agent)
 		agent.setup(key, GameData.STAFF[key], session.staff_state[key], routes[key])
+		staff_agents[key] = agent
 
 func _set_paused(value: bool) -> void:
 	paused = value
@@ -584,7 +729,106 @@ func _set_paused(value: bool) -> void:
 func _apply_settings() -> void:
 	audio.apply_settings()
 	player.set_mouse_sensitivity(float(session.settings.camera_sensitivity))
+	player.set_camera_distance(float(session.settings.camera_distance))
+	player.set_camera_fov(float(session.settings.camera_fov))
 	session.save_progress()
+
+func _build_guidance_beacon() -> void:
+	guidance_beacon = Node3D.new()
+	world.add_child(guidance_beacon)
+	guidance_ring = MeshInstance3D.new()
+	var ring_mesh := TorusMesh.new()
+	ring_mesh.inner_radius = 0.52
+	ring_mesh.outer_radius = 0.66
+	guidance_ring.mesh = ring_mesh
+	guidance_ring.rotation.x = PI * 0.5
+	var ring_mat := StandardMaterial3D.new()
+	ring_mat.albedo_color = Color("#ffad35")
+	ring_mat.emission_enabled = true
+	ring_mat.emission = Color("#ff8c24")
+	ring_mat.emission_energy_multiplier = 2.2
+	guidance_ring.material_override = ring_mat
+	guidance_beacon.add_child(guidance_ring)
+	var arrow := MeshInstance3D.new()
+	var arrow_mesh := CylinderMesh.new()
+	arrow_mesh.top_radius = 0.0
+	arrow_mesh.bottom_radius = 0.23
+	arrow_mesh.height = 0.52
+	arrow.mesh = arrow_mesh
+	arrow.position.y = -0.46
+	arrow.material_override = ring_mat
+	guidance_beacon.add_child(arrow)
+	guidance_label = Label3D.new()
+	guidance_label.font_size = 37
+	guidance_label.outline_size = 10
+	guidance_label.position.y = 0.48
+	guidance_label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+	guidance_label.modulate = Color("#ffd26b")
+	guidance_beacon.add_child(guidance_label)
+	guidance_beacon.visible = false
+
+func _update_guidance() -> void:
+	if not is_instance_valid(ui) or not is_instance_valid(guidance_beacon): return
+	if session.phase == SessionState.Phase.PREP:
+		_set_guidance_target("fridge", "PREPARAZIONE · MISE EN PLACE", "FRIGO  →  prepara basi fisiche", "Segui il segnale arancione e premi E. Invio apre il briefing.")
+		return
+	if session.phase != SessionState.Phase.SERVICE:
+		guidance_beacon.visible = false
+		return
+	var order := _selected_order()
+	if order.is_empty():
+		_set_guidance_target("sink", "CUCINA IN PAUSA", "Riordina mentre aspetti una comanda", "Il debito operativo rallenta davvero le interazioni.")
+		return
+	var recipe := str(order.recipe)
+	var item := session.carried_item
+	if not item.is_empty():
+		recipe = item.get_slice("_", 0)
+	var station_id := "fridge"
+	match item:
+		"burger_raw": station_id = "grill"
+		"burger_patty": station_id = "fryer"
+		"burger_components", "pasta_cooked", "special_crispy": station_id = "assembly"
+		"pasta_raw": station_id = "stove"
+		"special_raw": station_id = "fryer"
+		"burger_ready", "pasta_ready", "special_ready": station_id = "pass"
+	if item.is_empty():
+		for candidate in ["grill", "stove", "fryer"]:
+			var station: KitchenStation = world.stations[candidate]
+			if station.has_processing() and (station.processing_input.begins_with(recipe) or station.processing_result.begins_with(recipe)):
+				station_id = candidate
+				break
+	var target: KitchenStation = world.stations[station_id]
+	var action_text := target.display_name.to_upper()
+	var hint := "Raggiungi il segnale e premi E per continuare la preparazione."
+	if target.processing_state == "cooking":
+		var remaining := maxf(0.0, target.processing_duration - target.processing_elapsed)
+		action_text = "%s STA CUOCENDO · %.1fs" % [target.display_name.to_upper(), remaining]
+		hint = "La cottura continua senza tenere premuto. TAB passa a un'altra comanda."
+	elif target.processing_state == "ready":
+		action_text = "%s È PRONTO · %.0fs AL BRUCIATO" % [target.display_name.to_upper(), maxf(0.0, target.burn_window - target.ready_elapsed)]
+		hint = "Raccoglilo ora con E: il cibo è visibile sulla postazione."
+	elif target.processing_state == "burnt":
+		action_text = "%s È BRUCIATO" % target.display_name.to_upper()
+		hint = "Rimuovilo fisicamente prima di poter riutilizzare la postazione."
+	var steps: Array = GameData.RECIPES[recipe].steps
+	var chain := "  ›  ".join(steps)
+	_set_guidance_target(station_id, "T%d · %s · %s" % [order.table, GameData.RECIPES[recipe].short, action_text], chain, hint)
+
+func _set_guidance_target(station_id: String, title: String, steps: String, hint: String) -> void:
+	if not world.stations.has(station_id):
+		guidance_beacon.visible = false
+		return
+	var station: KitchenStation = world.stations[station_id]
+	guidance_station_id = station_id
+	guidance_beacon.visible = true
+	guidance_beacon.global_position = station.global_position + Vector3(0, station.visual_height + 1.45 + sin(Time.get_ticks_msec() * 0.004) * 0.12, 0)
+	guidance_label.text = "PROSSIMO · %s" % station.display_name.to_upper()
+	var ready := station.processing_state == "ready"
+	guidance_label.modulate = Color("#7dff9d") if ready else Color("#ffd26b")
+	var mat := guidance_ring.material_override as StandardMaterial3D
+	mat.albedo_color = Color("#58df7b") if ready else Color("#ffad35")
+	mat.emission = Color("#43e778") if ready else Color("#ff8c24")
+	ui.set_objective(title, steps, hint)
 
 func _run_smoke_test() -> void:
 	# Deterministic end-to-end verification used by scripts/test_project.ps1.
@@ -614,13 +858,25 @@ func _run_smoke_test() -> void:
 		_spawn_interruption(event)
 		var agent: CustomerAgent = pending_interruptions[-1].agent
 		_resolve_interruption(1 if event.id == "catering" else 0, agent)
+	var async_station: KitchenStation = world.stations.grill
+	async_station.clear_processing()
+	assert(async_station.start_processing("burger_raw", "burger_patty", 0.1, 0.1), "Cooking station must accept a physical item")
+	async_station._process(0.11)
+	assert(async_station.processing_state == "ready", "Cooking must become ready asynchronously")
+	async_station._process(0.11)
+	assert(async_station.processing_state == "burnt", "Unattended food must physically burn")
+	async_station.clear_processing()
+	var waiter_check := [false]
+	staff_agents.waiter.start_delivery(staff_agents.waiter.global_position + Vector3(0.1, 0, 0), func(): waiter_check[0] = true)
+	staff_agents.waiter._process(0.1)
+	assert(waiter_check[0], "Waiter must physically complete a table delivery")
 	assert(session.dishes_succeeded >= 3, "All three recipe paths must deliver")
 	assert(not session.catering_contract.is_empty(), "Catering choice must create a future contract")
 	assert(pending_interruptions.size() == 4, "All interruption archetypes must spawn")
 	_finish_service()
 	_open_debrief()
 	_resolve_debrief("Correttivo")
-	var result := "SMOKE PASS | recipes=3 interruptions=4 catering=yes summary=yes debrief=yes score=%d" % session.score()
+	var result := "SMOKE PASS | recipes=3 cooking=async+burn waiter=physical interruptions=4 catering=yes summary=yes debrief=yes score=%d" % session.score()
 	var report := FileAccess.open("res://.smoke-test-result", FileAccess.WRITE)
 	if report:
 		report.store_string(result)
@@ -630,13 +886,23 @@ func _run_smoke_test() -> void:
 func _capture_preview() -> void:
 	var capture_mode := OS.get_environment("DEGUSTIBUS_CAPTURE")
 	var output_name := "main_menu.png"
-	if capture_mode == "service":
+	if capture_mode == "tutorial":
+		_on_start_pressed()
+		_on_prep_selected("standard")
+		output_name = "tutorial.png"
+	elif capture_mode in ["service", "cooking"]:
 		_on_start_pressed()
 		_on_prep_selected("standard")
 		_open_briefing()
 		_on_briefing_confirmed(["promote_pasta", "special_estimate", "update_tables"])
-		output_name = "service.png"
-	await get_tree().process_frame
+		if capture_mode == "cooking":
+			world.stations.grill.start_processing("burger_raw", "burger_patty", 7.0, 8.0)
+			player.global_position = Vector3(-5.7, 0.05, -5.1)
+			output_name = "cooking.png"
+		else:
+			output_name = "service.png"
+	for _i in 12:
+		await get_tree().process_frame
 	await RenderingServer.frame_post_draw
 	var image := get_viewport().get_texture().get_image()
 	image.save_png("res://artifacts/%s" % output_name)

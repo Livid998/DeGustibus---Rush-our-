@@ -12,10 +12,18 @@ var gravity := 18.0
 var active := false
 var camera_pivot: Node3D
 var camera: Camera3D
+var spring_arm: SpringArm3D
 var focused: Node
 var interacting := false
 var mouse_sensitivity := 0.20
 var visual: Node3D
+var arms: Array[MeshInstance3D] = []
+var legs: Array[MeshInstance3D] = []
+var carry_socket: Node3D
+var carry_visual: Node3D
+var animation_time := 0.0
+var target_zoom := 6.8
+var shoulder_side := 1.0
 
 func setup(owner_game: Node) -> void:
 	game = owner_game
@@ -65,20 +73,40 @@ func _build_body() -> void:
 	hat.position.y = 2.27
 	hat.material_override = _material(Color("#fff9e9"))
 	visual.add_child(hat)
+	for side in [-1.0, 1.0]:
+		var arm := MeshInstance3D.new()
+		var arm_mesh := BoxMesh.new()
+		arm_mesh.size = Vector3(0.22, 0.78, 0.24)
+		arm.mesh = arm_mesh
+		arm.position = Vector3(0.56 * side, 1.08, 0)
+		arm.material_override = _material(Color("#efb28f"))
+		visual.add_child(arm)
+		arms.append(arm)
+		var leg := MeshInstance3D.new()
+		var leg_mesh := BoxMesh.new()
+		leg_mesh.size = Vector3(0.28, 0.72, 0.32)
+		leg.mesh = leg_mesh
+		leg.position = Vector3(0.23 * side, 0.35, 0)
+		leg.material_override = _material(Color("#3d3542"))
+		visual.add_child(leg)
+		legs.append(leg)
+	carry_socket = Node3D.new()
+	carry_socket.position = Vector3(0, 1.13, -0.72)
+	visual.add_child(carry_socket)
 
 func _build_camera() -> void:
 	camera_pivot = Node3D.new()
 	camera_pivot.position = Vector3(0, 1.55, 0)
 	add_child(camera_pivot)
-	var spring := SpringArm3D.new()
-	spring.spring_length = 6.8
-	spring.margin = 0.25
-	spring.collision_mask = 1
-	camera_pivot.add_child(spring)
+	spring_arm = SpringArm3D.new()
+	spring_arm.spring_length = target_zoom
+	spring_arm.margin = 0.28
+	spring_arm.collision_mask = 1
+	camera_pivot.add_child(spring_arm)
 	camera = Camera3D.new()
 	camera.fov = 68.0
-	camera.position.y = 0.35
-	spring.add_child(camera)
+	camera.position = Vector3(0.55, 0.35, 0)
+	spring_arm.add_child(camera)
 
 func set_active(value: bool) -> void:
 	active = value
@@ -90,6 +118,12 @@ func set_active(value: bool) -> void:
 func set_mouse_sensitivity(value: float) -> void:
 	mouse_sensitivity = value
 
+func set_camera_distance(value: float) -> void:
+	target_zoom = clampf(value, 3.4, 10.5)
+
+func set_camera_fov(value: float) -> void:
+	camera.fov = clampf(value, 55.0, 85.0)
+
 func _unhandled_input(event: InputEvent) -> void:
 	if not active:
 		return
@@ -98,6 +132,11 @@ func _unhandled_input(event: InputEvent) -> void:
 		camera_pivot.rotation.x = clampf(camera_pivot.rotation.x - event.relative.y * mouse_sensitivity * 0.01, -0.75, 0.58)
 	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT and event.pressed:
 		slapstick_requested.emit()
+	if event is InputEventMouseButton and event.pressed:
+		if event.button_index == MOUSE_BUTTON_WHEEL_UP:
+			target_zoom = clampf(target_zoom - 0.75, 3.4, 10.5)
+		elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
+			target_zoom = clampf(target_zoom + 0.75, 3.4, 10.5)
 	if event is InputEventKey and event.pressed and not event.echo:
 		if event.physical_keycode == KEY_E:
 			if interacting:
@@ -108,11 +147,19 @@ func _unhandled_input(event: InputEvent) -> void:
 			interaction_cancelled.emit()
 		elif event.physical_keycode == KEY_SPACE:
 			slapstick_requested.emit()
+		elif event.physical_keycode == KEY_C:
+			shoulder_side *= -1.0
+		elif event.physical_keycode == KEY_R:
+			camera_pivot.rotation.x = -0.18
+			camera_pivot.rotation.y = visual.rotation.y
 
 func _physics_process(delta: float) -> void:
 	if not active:
 		velocity = Vector3.ZERO
 		return
+	animation_time += delta
+	spring_arm.spring_length = lerpf(spring_arm.spring_length, target_zoom, delta * 7.0)
+	camera.position.x = lerpf(camera.position.x, 0.58 * shoulder_side, delta * 8.0)
 	if not is_on_floor():
 		velocity.y -= gravity * delta
 	else:
@@ -133,8 +180,65 @@ func _physics_process(delta: float) -> void:
 	velocity.z = move_toward(velocity.z, direction.z * actual_speed, delta * 18.0)
 	if direction.length_squared() > 0.02:
 		visual.rotation.y = lerp_angle(visual.rotation.y, atan2(direction.x, direction.z) + PI, delta * 12.0)
+	_animate_chef(delta, direction.length())
 	move_and_slide()
 	_update_focus()
+
+func _animate_chef(delta: float, movement_amount: float) -> void:
+	var pace := 10.0 if Input.is_physical_key_pressed(KEY_SHIFT) else 7.0
+	var swing := sin(animation_time * pace) * 0.62 * movement_amount
+	visual.position.y = lerpf(visual.position.y, abs(sin(animation_time * pace * 2.0)) * 0.045 * movement_amount, delta * 12.0)
+	for i in legs.size():
+		legs[i].rotation.x = lerpf(legs[i].rotation.x, swing * (-1.0 if i == 0 else 1.0), delta * 12.0)
+	var holding := is_instance_valid(carry_visual)
+	for i in arms.size():
+		var target_rot := -0.82 if holding else swing * (1.0 if i == 0 else -1.0)
+		if interacting:
+			target_rot = -0.95 + sin(animation_time * 13.0 + i) * 0.18
+		arms[i].rotation.x = lerpf(arms[i].rotation.x, target_rot, delta * 14.0)
+		arms[i].rotation.z = lerpf(arms[i].rotation.z, (-0.18 if i == 0 else 0.18) if holding else 0.0, delta * 10.0)
+
+func set_carried_visual(item: String) -> void:
+	if is_instance_valid(carry_visual):
+		carry_visual.queue_free()
+	carry_visual = null
+	if item.is_empty():
+		return
+	carry_visual = Node3D.new()
+	carry_socket.add_child(carry_visual)
+	var plate := MeshInstance3D.new()
+	var plate_mesh := CylinderMesh.new()
+	plate_mesh.top_radius = 0.42
+	plate_mesh.bottom_radius = 0.36
+	plate_mesh.height = 0.08
+	plate.mesh = plate_mesh
+	plate.material_override = _material(Color("#fff4db") if item.ends_with("_ready") else Color("#b78d62"))
+	carry_visual.add_child(plate)
+	var food := MeshInstance3D.new()
+	if item.begins_with("pasta"):
+		var mesh := TorusMesh.new()
+		mesh.inner_radius = 0.12
+		mesh.outer_radius = 0.29
+		food.mesh = mesh
+	elif item.begins_with("burger"):
+		var mesh := CylinderMesh.new()
+		mesh.top_radius = 0.28
+		mesh.bottom_radius = 0.30
+		mesh.height = 0.22
+		food.mesh = mesh
+	else:
+		var mesh := BoxMesh.new()
+		mesh.size = Vector3(0.42, 0.18, 0.32)
+		food.mesh = mesh
+	food.position.y = 0.13
+	food.material_override = _material(_item_color(item))
+	carry_visual.add_child(food)
+
+func _item_color(item: String) -> Color:
+	if item.begins_with("burger"): return Color("#c95739") if "raw" in item else Color("#8d482f")
+	if item.begins_with("pasta"): return Color("#f0c84e")
+	if item.begins_with("special"): return Color("#e0a03e")
+	return Color("#dfc08d")
 
 func _update_focus() -> void:
 	var candidate: Node = null
@@ -159,4 +263,3 @@ func _material(color: Color) -> StandardMaterial3D:
 	mat.albedo_color = color
 	mat.roughness = 0.78
 	return mat
-

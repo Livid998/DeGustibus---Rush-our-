@@ -12,6 +12,7 @@ var service_time_left := 420.0
 var service_elapsed := 0.0
 var directives: Array[String] = []
 var selected_recipe := "burger"
+var selected_order_id := 0
 var carried_item := ""
 var carried_since := 0.0
 var anger := 0.0
@@ -38,6 +39,8 @@ var settings := {
 	"music": 0.55,
 	"sfx": 0.75,
 	"camera_sensitivity": 0.20,
+	"camera_distance": 6.8,
+	"camera_fov": 68.0,
 	"subtitles": true,
 }
 var persistent := {
@@ -56,6 +59,7 @@ func reset_run() -> void:
 	service_elapsed = 0.0
 	directives.clear()
 	selected_recipe = "burger"
+	selected_order_id = 0
 	carried_item = ""
 	carried_since = 0.0
 	anger = 0.0
@@ -136,4 +140,3 @@ func load_save() -> void:
 		persistent[key] = cfg.get_value("progress", key, persistent[key])
 	for key in settings:
 		settings[key] = cfg.get_value("settings", key, settings[key])
-

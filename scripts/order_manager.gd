@@ -56,7 +56,7 @@ func create_order(forced_recipe := "") -> Dictionary:
 	if available.is_empty():
 		available = ["pasta"]
 	var recipe: String = forced_recipe if not forced_recipe.is_empty() else available[rng.randi_range(0, available.size() - 1)]
-	if "promote_pasta" in session.directives and rng.randf() < 0.42:
+	if forced_recipe.is_empty() and "promote_pasta" in session.directives and rng.randf() < 0.42:
 		recipe = "pasta"
 	var recipe_data: Dictionary = GameData.RECIPES[recipe]
 	var invalid_chance := 0.13 + float(session.staff_state.cassiera.stress) * 0.002
@@ -139,4 +139,3 @@ func _first_free_table() -> int:
 		if not occupied:
 			return table
 	return rng.randi_range(1, 6)
-

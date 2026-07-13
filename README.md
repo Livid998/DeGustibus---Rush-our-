@@ -4,6 +4,8 @@ Vertical slice 3D giocabile di un gestionale d'azione in terza persona ambientat
 
 ![HUD della rush hour](artifacts/service.png)
 
+La nuova HUD evidenzia una **comanda attiva**, la catena della ricetta e una destinazione 3D nel ristorante. Le cotture avvengono sulla postazione in tempo reale: è possibile allontanarsi, tornare quando il segnale diventa verde oppure lasciare bruciare fisicamente il cibo.
+
 ## Avvio rapido
 
 Requisiti per il progetto sorgente: **Godot 4.7 stable** standard (GDScript, non .NET).
@@ -20,20 +22,24 @@ Il launcher cerca Godot tramite `GODOT4`, installazione in `PATH` o toolchain lo
 |---|---|
 | `WASD` / frecce | Movimento dello chef |
 | Mouse | Rotazione camera |
+| Rotella | Zoom continuo della camera |
+| `C` | Cambia spalla |
+| `R` | Ricentra la visuale dietro lo chef |
 | `Shift` | Corsa leggera |
 | `E` | Interazione contestuale |
 | `Q` | Annulla interazione lunga |
+| `Tab` | Cambia comanda attiva |
 | `1`, `2`, `3` | Seleziona Burger, Pasta, Speciale |
 | Click sinistro / `Spazio` | Azione slapstick durante il breakdown |
 | `Invio` | Termina prima la prep fisica |
-| `Esc` | Pausa, audio, sottotitoli e sensibilità camera |
+| `Esc` | Pausa, audio, sottotitoli, distanza, FOV e sensibilità camera |
 
 ## Ciclo della demo
 
 1. Menu principale e scelta fra prep breve, standard e lunga.
 2. Prep fisica di 45 secondi: il frigo crea mise en place; lavaggio e postazioni permettono controllo/riordino.
 3. Briefing: massimo tre direttive, con informazione volutamente incompleta.
-4. Rush hour di sette minuti con comande, pazienza, errori del personale, disordine e stress.
+4. Rush hour di sette minuti con comanda guidata, cotture asincrone, pazienza, errori del personale, disordine e stress.
 5. Quattro interruzioni fisiche alla cassa, inclusa l'opportunità catering.
 6. Eventuale punto di rottura: espellere tre bersagli rossi, evitando clienti tranquilli.
 7. Riepilogo economico/gestionale e debriefing su un episodio della brigata.
@@ -46,12 +52,13 @@ Per cucinare, selezionare una ricetta e seguire il flusso delle postazioni:
 
 ## Sistemi implementati
 
-- Controller third-person reattivo, camera orbitale, corsa, focus e prompt contestuale.
+- Controller third-person animato, camera orbitale con collisione, zoom 3.4–10.5 m, cambio spalla, ricentraggio, FOV e sensibilità regolabili.
+- Onboarding iniziale, comanda attiva selezionabile, obiettivo persistente e beacon 3D sulla prossima postazione.
 - Ristorante 3D unico con cucina, porta fisica, sala, cassa, attesa, sei tavoli e oggetti di scena procedurali.
-- Tre ricette complete con stati trasportati, timing, qualità, decadimento, rischio di spreco e valore economico.
+- Tre ricette complete con ingredienti visibili nelle mani, posa fisica, cotture asincrone, vapore, stato pronto, bruciatura, assemblaggio, qualità e spreco.
 - Comande ordinate per anzianità con tavolo, modifica, validità, responsabile, pazienza e stato.
 - Prep, briefing a capacità limitata e distinzione fra quantità speciale reale, stimata, comunicata e promessa.
-- Tre dipendenti fisici con statistiche differenti, percorsi, stress, umore, memoria, apprendimento e Ordine realmente simulato.
+- Tre dipendenti fisici animati con statistiche differenti, percorsi, stress, umore, memoria, apprendimento e Ordine realmente simulato; il cameriere prende il piatto dal pass e raggiunge davvero il tavolo.
 - Debito operativo visibile per postazione: clutter progressivo, rallentamento, errori/stress e reset temporizzato.
 - Cinque archetipi di cliente e quattro interruzioni fisiche: catering, richieste progressive, cambio, “non siamo graditi”.
 - Rabbia progressiva con bonus/penalità, drop ad alta rabbia e modalità slapstick non cruenta con penalità per bersagli errati.
@@ -85,12 +92,12 @@ Da PowerShell:
 Lo script esegue import/compilazione headless e uno smoke test deterministico del ciclo verticale: tutte le ricette, quattro interruzioni, catering, riepilogo e debriefing. Esito atteso:
 
 ```text
-SMOKE PASS | recipes=3 interruptions=4 catering=yes summary=yes debrief=yes
+SMOKE PASS | recipes=3 cooking=async+burn waiter=physical interruptions=4 catering=yes summary=yes debrief=yes
 ```
 
 ## Limiti noti e placeholder
 
-- Geometrie, personaggi e animazioni sono procedurali/cartoon: non usano un pacchetto artistico definitivo.
+- Geometrie e personaggi sono procedurali/cartoon; locomozione, trasporto, lavorazione, cottura, consegna e slapstick sono animati ma non usano ancora uno scheletro/mocap definitivo.
 - I dipendenti seguono route operative leggibili, non una navigazione con avoidance completa.
 - Il dialogo catering produce un contratto futuro nel salvataggio e nel summary; il livello catering non fa parte della slice.
 - Le modifiche ordine influenzano filtraggio, rabbia ed economia, ma non generano varianti visive separate del piatto.

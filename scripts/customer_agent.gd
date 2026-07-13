@@ -11,6 +11,7 @@ var active := true
 var body_color := Color.WHITE
 var label: Label3D
 var body: MeshInstance3D
+var anim_time := 0.0
 
 func setup(owner_game: Node, id: int, table: int, color: Color, is_problematic := false, event := {}) -> void:
 	game = owner_game
@@ -65,6 +66,13 @@ func _build_visual() -> void:
 	collision.position.y = 0.78
 	add_child(collision)
 
+func _process(delta: float) -> void:
+	if not active: return
+	anim_time += delta
+	body.position.y = 0.79 + sin(anim_time * (5.5 if problematic else 2.6) + customer_id) * (0.055 if problematic else 0.025)
+	body.rotation.z = sin(anim_time * 4.2 + customer_id) * (0.09 if problematic else 0.018)
+	label.position.y = 2.35 + sin(anim_time * 2.3) * 0.045
+
 func get_prompt() -> String:
 	if not interruption.is_empty():
 		return "Gestisci: %s" % interruption.title
@@ -96,4 +104,3 @@ func _material(color: Color) -> StandardMaterial3D:
 	mat.albedo_color = color
 	mat.roughness = 0.75
 	return mat
-

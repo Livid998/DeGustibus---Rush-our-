@@ -9,6 +9,11 @@ var target_index := 0
 var pause := 0.0
 var body: MeshInstance3D
 var stress_ring: MeshInstance3D
+var anim_time := 0.0
+var delivery_active := false
+var delivery_target := Vector3.ZERO
+var delivery_callback: Callable
+var delivery_plate: MeshInstance3D
 
 func setup(id: String, staff_data: Dictionary, staff_state: Dictionary, points: Array) -> void:
 	staff_id = id
@@ -58,12 +63,26 @@ func setup(id: String, staff_data: Dictionary, staff_state: Dictionary, points: 
 	stress_ring.material_override = _material(Color("#ff5d55"), true)
 	stress_ring.visible = false
 	add_child(stress_ring)
+	delivery_plate = MeshInstance3D.new()
+	var plate_mesh := CylinderMesh.new()
+	plate_mesh.top_radius = 0.34
+	plate_mesh.bottom_radius = 0.30
+	plate_mesh.height = 0.08
+	delivery_plate.mesh = plate_mesh
+	delivery_plate.position = Vector3(0, 1.18, -0.55)
+	delivery_plate.material_override = _material(Color("#fff0cc"), true)
+	delivery_plate.visible = false
+	add_child(delivery_plate)
 
 func _process(delta: float) -> void:
 	if waypoints.is_empty():
 		return
 	stress_ring.visible = float(state.stress) >= 58.0
 	stress_ring.rotation.y += delta * 2.0
+	anim_time += delta
+	if delivery_active:
+		_process_delivery(delta)
+		return
 	if pause > 0.0:
 		pause -= delta
 		return
@@ -76,7 +95,30 @@ func _process(delta: float) -> void:
 		return
 	var speed := float(data.speed) * 0.022 * clampf(1.15 - float(state.stress) * 0.007, 0.45, 1.0)
 	global_position = global_position.move_toward(flat, speed * delta)
+	body.position.y = 0.85 + abs(sin(anim_time * 7.5)) * 0.065
+	body.rotation.z = sin(anim_time * 7.5) * 0.035
 	look_at(flat, Vector3.UP, true)
+
+func start_delivery(target: Vector3, callback: Callable) -> void:
+	delivery_active = true
+	delivery_target = target
+	delivery_callback = callback
+	delivery_plate.visible = true
+	pause = 0.0
+
+func _process_delivery(delta: float) -> void:
+	var target := Vector3(delivery_target.x, global_position.y, delivery_target.z)
+	var distance := global_position.distance_to(target)
+	if distance < 0.28:
+		delivery_active = false
+		delivery_plate.visible = false
+		if delivery_callback.is_valid():
+			delivery_callback.call()
+		return
+	var speed := float(data.speed) * 0.028 * clampf(1.1 - float(state.stress) * 0.006, 0.52, 1.0)
+	global_position = global_position.move_toward(target, speed * delta)
+	body.position.y = 0.85 + abs(sin(anim_time * 9.0)) * 0.065
+	look_at(target, Vector3.UP, true)
 
 func _material(color: Color, emission := false) -> StandardMaterial3D:
 	var mat := StandardMaterial3D.new()

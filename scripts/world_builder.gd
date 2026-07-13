@@ -8,6 +8,8 @@ var table_positions := {
 	4: Vector3(4.0, 0, -1.2), 5: Vector3(8.0, 0, -1.2), 6: Vector3(12.0, 0, -1.2),
 }
 var customer_colors := [Color("#e37b65"), Color("#67a9cf"), Color("#d29b54"), Color("#8fc17a"), Color("#aa7bc1"), Color("#e86e96")]
+var mise_visuals: Array[MeshInstance3D] = []
+var mise_label: Label3D
 
 func setup(owner_game: Node) -> void:
 	game = owner_game
@@ -72,6 +74,27 @@ func _build_kitchen() -> void:
 		_add_visual_box(Vector3(x, 2.65, -8.75), Vector3(1.5, 0.14, 0.45), Color("#7e4035"))
 		for i in 3:
 			_add_visual_box(Vector3(x - 0.35 + i * 0.35, 2.86, -8.72), Vector3(0.22, 0.32 + i * 0.08, 0.22), [Color("#f1bd58"), Color("#75a97d"), Color("#d96855")][i])
+	mise_label = Label3D.new()
+	mise_label.text = "BASI PRONTE  0"
+	mise_label.font_size = 32
+	mise_label.outline_size = 8
+	mise_label.position = Vector3(-7.1, 1.62, -3.9)
+	mise_label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+	mise_label.modulate = Color("#8dffac")
+	add_child(mise_label)
+
+func set_mise_count(count: int) -> void:
+	for visual in mise_visuals:
+		if is_instance_valid(visual):
+			remove_child(visual)
+			visual.queue_free()
+	mise_visuals.clear()
+	for i in count:
+		var tray := _add_visual_box(Vector3(-7.82 + i * 0.46, 1.16 + (i % 2) * 0.10, -3.9), Vector3(0.40, 0.12, 0.68), [Color("#73c98b"), Color("#f1c75b"), Color("#e97654")][i % 3])
+		mise_visuals.append(tray)
+	if is_instance_valid(mise_label):
+		mise_label.text = "BASI PRONTE  %d" % count
+		mise_label.visible = count > 0
 
 func _build_dining_room() -> void:
 	for table_id in table_positions:
@@ -149,4 +172,3 @@ func _material(color: Color) -> StandardMaterial3D:
 	mat.albedo_color = color
 	mat.roughness = 0.82
 	return mat
-

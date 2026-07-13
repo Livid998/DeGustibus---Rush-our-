@@ -1,6 +1,8 @@
 class_name KitchenStation
 extends StaticBody3D
 
+signal processing_changed(station: KitchenStation, state: String)
+
 var station_id := ""
 var display_name := ""
 var disorder := 0.0
@@ -10,12 +12,25 @@ var body_mesh: MeshInstance3D
 var label: Label3D
 var clutter: Array[MeshInstance3D] = []
 var highlighted := false
+var processing_state := "idle"
+var processing_input := ""
+var processing_result := ""
+var processing_elapsed := 0.0
+var processing_duration := 0.0
+var ready_elapsed := 0.0
+var burn_window := 8.0
+var food_visual: MeshInstance3D
+var status_label: Label3D
+var particles: GPUParticles3D
+var particle_material: StandardMaterial3D
+var visual_height := 1.2
 
 func setup(id: String, title: String, color: Color, size: Vector3, owner_game: Node) -> void:
 	station_id = id
 	display_name = title
 	base_color = color
 	game = owner_game
+	visual_height = size.y
 	add_to_group("interactable")
 	body_mesh = MeshInstance3D.new()
 	var mesh := BoxMesh.new()
@@ -49,6 +64,127 @@ func setup(id: String, title: String, color: Color, size: Vector3, owner_game: N
 		prop.visible = false
 		add_child(prop)
 		clutter.append(prop)
+	_build_processing_feedback()
+
+func _process(delta: float) -> void:
+	if processing_state == "idle":
+		return
+	if is_instance_valid(food_visual):
+		food_visual.rotation.y += delta * (1.7 if processing_state == "cooking" else 0.35)
+		food_visual.position.y = visual_height + 0.15 + sin(Time.get_ticks_msec() * 0.004) * 0.035
+	if processing_state == "cooking":
+		processing_elapsed += delta
+		var remaining := maxf(0.0, processing_duration - processing_elapsed)
+		status_label.text = "CUOCE  %.1fs" % remaining
+		status_label.modulate = Color("#ffe070")
+		if processing_elapsed >= processing_duration:
+			processing_state = "ready"
+			ready_elapsed = 0.0
+			status_label.text = "PRONTO!  [E]"
+			status_label.modulate = Color("#79ff9f")
+			particle_material.albedo_color = Color("#fff1cfb8")
+			processing_changed.emit(self, processing_state)
+	elif processing_state == "ready":
+		ready_elapsed += delta
+		status_label.text = "PRONTO  %.0fs" % maxf(0.0, burn_window - ready_elapsed)
+		if ready_elapsed >= burn_window:
+			processing_state = "burnt"
+			status_label.text = "BRUCIATO!"
+			status_label.modulate = Color("#ff5a4f")
+			particle_material.albedo_color = Color("#4b4545d0")
+			if is_instance_valid(food_visual):
+				food_visual.material_override = _material(Color("#28211e"), true)
+			processing_changed.emit(self, processing_state)
+	elif processing_state == "burnt":
+		status_label.text = "BRUCIATO · RIMUOVI"
+
+func start_processing(input_item: String, result_item: String, duration: float, burn_after := 8.0) -> bool:
+	if processing_state != "idle":
+		return false
+	processing_input = input_item
+	processing_result = result_item
+	processing_duration = duration
+	processing_elapsed = 0.0
+	ready_elapsed = 0.0
+	burn_window = burn_after
+	processing_state = "cooking"
+	food_visual = MeshInstance3D.new()
+	var mesh := CylinderMesh.new()
+	mesh.top_radius = 0.30
+	mesh.bottom_radius = 0.32
+	mesh.height = 0.12
+	food_visual.mesh = mesh
+	food_visual.position = Vector3(0, visual_height + 0.15, 0)
+	food_visual.material_override = _material(_food_color(input_item), true)
+	add_child(food_visual)
+	particles.emitting = true
+	status_label.visible = true
+	processing_changed.emit(self, processing_state)
+	return true
+
+func collect_result() -> String:
+	if processing_state != "ready":
+		return ""
+	var result := processing_result
+	clear_processing()
+	return result
+
+func clear_processing() -> void:
+	processing_state = "idle"
+	processing_input = ""
+	processing_result = ""
+	processing_elapsed = 0.0
+	ready_elapsed = 0.0
+	if is_instance_valid(food_visual):
+		food_visual.queue_free()
+	food_visual = null
+	particles.emitting = false
+	particle_material.albedo_color = Color("#fff4d6a8")
+	status_label.visible = false
+	processing_changed.emit(self, processing_state)
+
+func has_processing() -> bool:
+	return processing_state != "idle"
+
+func _build_processing_feedback() -> void:
+	status_label = Label3D.new()
+	status_label.font_size = 38
+	status_label.outline_size = 10
+	status_label.position = Vector3(0, visual_height + 0.82, 0)
+	status_label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+	status_label.visible = false
+	add_child(status_label)
+	particles = GPUParticles3D.new()
+	particles.position = Vector3(0, visual_height + 0.25, 0)
+	particles.amount = 18
+	particles.lifetime = 1.15
+	particles.randomness = 0.45
+	particles.emitting = false
+	var process_mat := ParticleProcessMaterial.new()
+	process_mat.direction = Vector3.UP
+	process_mat.spread = 24.0
+	process_mat.initial_velocity_min = 0.45
+	process_mat.initial_velocity_max = 1.1
+	process_mat.gravity = Vector3(0, 0.28, 0)
+	process_mat.scale_min = 0.25
+	process_mat.scale_max = 0.65
+	particles.process_material = process_mat
+	var particle_mesh := SphereMesh.new()
+	particle_mesh.radius = 0.055
+	particle_mesh.height = 0.11
+	particle_material = StandardMaterial3D.new()
+	particle_material.albedo_color = Color("#fff4d6a8")
+	particle_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	particle_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	particle_mesh.material = particle_material
+	particles.draw_pass_1 = particle_mesh
+	add_child(particles)
+
+func _food_color(item: String) -> Color:
+	if item.begins_with("burger"): return Color("#b64e36")
+	if item.begins_with("pasta"): return Color("#f0c349")
+	if item.begins_with("special"): return Color("#e6a947")
+	return Color("#e8d39b")
 
 func begin_interaction(player: Node) -> void:
 	if game and game.has_method("request_station_interaction"):
@@ -93,4 +229,3 @@ func _material(color: Color, glow := false) -> StandardMaterial3D:
 		mat.emission = color
 		mat.emission_energy_multiplier = 0.5
 	return mat
-

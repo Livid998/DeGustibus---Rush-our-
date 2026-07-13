@@ -11,6 +11,7 @@ signal debrief_choice(style: String)
 signal restart_pressed
 signal resume_pressed
 signal settings_changed
+signal tutorial_closed
 
 var session: SessionState
 var root: Control
@@ -38,6 +39,11 @@ var briefing_selected: Array[String] = []
 var briefing_counter: Label
 var briefing_buttons := {}
 var toast_tween: Tween
+var objective_title: Label
+var objective_steps: Label
+var objective_hint: Label
+var tutorial_panel: PanelContainer
+var controls_label: Label
 
 const CREAM := Color("#fff1d0")
 const INK := Color("#2b1715")
@@ -148,7 +154,7 @@ func show_main_menu() -> void:
 	start.custom_minimum_size.y = 58
 	start.pressed.connect(func(): start_pressed.emit())
 	box.add_child(start)
-	var controls := _copy("WASD muovi · Mouse camera · Shift corri · E interagisci\n1/2/3 ricetta · Q annulla · Click/Spazio slapstick · Esc pausa", 17)
+	var controls := _copy("WASD muovi · Mouse camera · Rotella zoom · C cambia spalla · R ricentra\nE interagisci · Tab comanda · Q annulla · Click/Spazio slapstick · Esc pausa", 17)
 	controls.add_theme_color_override("font_color", Color("#d4bea0"))
 	box.add_child(controls)
 	box.add_child(_copy("Vertical slice · Godot 4.7 · Nessun asset esterno", 14))
@@ -266,6 +272,23 @@ func _build_hud() -> void:
 	anger_bar.show_percentage = false
 	anger_bar.custom_minimum_size.y = 18
 	anger_box.add_child(anger_bar)
+	var objective_panel := PanelContainer.new()
+	objective_panel.set_anchors_preset(Control.PRESET_CENTER_TOP)
+	objective_panel.position = Vector2(-310, 94)
+	objective_panel.custom_minimum_size = Vector2(620, 126)
+	objective_panel.add_theme_stylebox_override("panel", _panel_style(Color("#301614e9"), 16))
+	hud.add_child(objective_panel)
+	var objective_box := VBoxContainer.new()
+	objective_box.add_theme_constant_override("separation", 3)
+	objective_panel.add_child(objective_box)
+	objective_title = _copy("OBIETTIVO", 22)
+	objective_title.add_theme_color_override("font_color", ORANGE)
+	objective_box.add_child(objective_title)
+	objective_steps = _copy("", 17)
+	objective_box.add_child(objective_steps)
+	objective_hint = _copy("", 14)
+	objective_hint.add_theme_color_override("font_color", Color("#d8bea0"))
+	objective_box.add_child(objective_hint)
 
 	var orders_panel := PanelContainer.new()
 	orders_panel.position = Vector2(18, 96)
@@ -343,9 +366,48 @@ func _build_hud() -> void:
 	prep_done_button.custom_minimum_size = Vector2(320, 56)
 	prep_done_button.pressed.connect(func(): prep_finished.emit())
 	hud.add_child(prep_done_button)
+	controls_label = _copy("WASD muovi  ·  E usa  ·  TAB comanda  ·  Rotella zoom  ·  C spalla  ·  R ricentra", 14)
+	controls_label.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
+	controls_label.position = Vector2(18, -144)
+	controls_label.custom_minimum_size = Vector2(520, 38)
+	controls_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	controls_label.add_theme_stylebox_override("normal", _panel_style(Color("#24110fd8"), 9))
+	hud.add_child(controls_label)
 	_build_event_panel()
 	_build_pause_panel()
+	_build_tutorial_panel()
 	hud.visible = false
+
+func _build_tutorial_panel() -> void:
+	tutorial_panel = PanelContainer.new()
+	tutorial_panel.set_anchors_preset(Control.PRESET_CENTER)
+	tutorial_panel.position = Vector2(-370, -255)
+	tutorial_panel.custom_minimum_size = Vector2(740, 510)
+	tutorial_panel.add_theme_stylebox_override("panel", _panel_style(Color("#351917fa"), 26))
+	tutorial_panel.visible = false
+	tutorial_panel.process_mode = Node.PROCESS_MODE_ALWAYS
+	root.add_child(tutorial_panel)
+
+func show_tutorial() -> void:
+	for child in tutorial_panel.get_children(): child.queue_free()
+	var box := VBoxContainer.new()
+	box.add_theme_constant_override("separation", 15)
+	tutorial_panel.add_child(box)
+	box.add_child(_title("IL PRIMO TURNO, SENZA PANICO", 37))
+	box.add_child(_copy("Non devi indovinare cosa fare: guarda sempre la COMANDA ATTIVA e segui il segnale arancione nel ristorante.", 21))
+	var steps := _copy("1  ·  WASD muove lo chef, il mouse gira la visuale\n2  ·  Rotella regola la distanza, C cambia spalla, R ricentra\n3  ·  TAB cambia comanda; E posa o raccoglie fisicamente\n4  ·  Le cotture continuano mentre ti muovi: torna quando sono verdi\n5  ·  Se aspetti troppo, il piatto brucia davvero sulla postazione", 19)
+	steps.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	steps.add_theme_color_override("font_color", Color("#ffe0a0"))
+	box.add_child(steps)
+	var button := Button.new()
+	button.text = "HO CAPITO · ENTRA IN CUCINA"
+	button.custom_minimum_size.y = 58
+	button.pressed.connect(func(): tutorial_panel.visible = false; tutorial_closed.emit())
+	box.add_child(button)
+	tutorial_panel.visible = true
+
+func hide_tutorial() -> void:
+	tutorial_panel.visible = false
 
 func _build_event_panel() -> void:
 	event_panel = PanelContainer.new()
@@ -388,16 +450,19 @@ func _build_pause_panel() -> void:
 	box.add_theme_constant_override("separation", 14)
 	pause_panel.add_child(box)
 	box.add_child(_title("PAUSA", 42))
-	box.add_child(_copy("Comandi: WASD · Mouse · Shift · E · Q · 1/2/3 · Click/Spazio"))
-	for setting_data in [["Musica", "music"], ["Effetti", "sfx"], ["Sensibilità camera", "camera_sensitivity"]]:
+	box.add_child(_copy("WASD · Mouse · Rotella zoom · C spalla · R ricentra · Shift · E · TAB · Q · Click/Spazio"))
+	for setting_data in [["Musica", "music"], ["Effetti", "sfx"], ["Sensibilità camera", "camera_sensitivity"], ["Distanza camera", "camera_distance"], ["Campo visivo (FOV)", "camera_fov"]]:
 		var row := HBoxContainer.new()
 		var label := _copy(setting_data[0], 18)
 		label.custom_minimum_size.x = 220
 		row.add_child(label)
 		var slider := HSlider.new()
 		slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		slider.min_value = 0.0 if setting_data[1] != "camera_sensitivity" else 0.08
-		slider.max_value = 1.0 if setting_data[1] != "camera_sensitivity" else 0.5
+		match setting_data[1]:
+			"camera_sensitivity": slider.min_value = 0.08; slider.max_value = 0.5
+			"camera_distance": slider.min_value = 3.4; slider.max_value = 10.5
+			"camera_fov": slider.min_value = 55.0; slider.max_value = 85.0
+			_: slider.min_value = 0.0; slider.max_value = 1.0
 		slider.step = 0.01
 		slider.value = float(session.settings[setting_data[1]])
 		var key: String = setting_data[1]
@@ -430,18 +495,19 @@ func update_hud() -> void:
 	carried_label.text = "MANI LIBERE" if session.carried_item.is_empty() else _friendly_item(session.carried_item)
 	_update_staff()
 
-func update_orders(orders: Array[Dictionary]) -> void:
+func update_orders(orders: Array[Dictionary], selected_id := 0) -> void:
 	for child in orders_box.get_children(): child.queue_free()
 	if orders.is_empty():
 		orders_box.add_child(_copy("Nessuna comanda.\nRespira finché puoi.", 17))
 		return
 	for order in orders:
 		var ticket := PanelContainer.new()
-		ticket.add_theme_stylebox_override("panel", _panel_style(Color("#f5dfb9"), 9))
+		var selected := int(order.id) == selected_id
+		ticket.add_theme_stylebox_override("panel", _panel_style(Color("#ffd27a") if selected else Color("#f5dfb9"), 9))
 		var box := VBoxContainer.new()
 		ticket.add_child(box)
 		var header := Label.new()
-		header.text = "T%d  ·  %s  ·  %ds" % [order.table, GameData.RECIPES[order.recipe].short, int(order.elapsed)]
+		header.text = "%sT%d  ·  %s  ·  %ds" % ["▶ " if selected else "", order.table, GameData.RECIPES[order.recipe].short, int(order.elapsed)]
 		header.add_theme_color_override("font_color", INK)
 		header.add_theme_font_size_override("font_size", 18)
 		box.add_child(header)
@@ -459,6 +525,11 @@ func update_orders(orders: Array[Dictionary]) -> void:
 		patience.modulate = RED if order.patience / order.max_patience < 0.33 else GREEN
 		box.add_child(patience)
 		orders_box.add_child(ticket)
+
+func set_objective(title: String, steps: String, hint: String) -> void:
+	objective_title.text = title
+	objective_steps.text = steps
+	objective_hint.text = hint
 
 func _update_staff() -> void:
 	var existing := staff_box.get_children()
