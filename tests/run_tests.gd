@@ -323,6 +323,13 @@ func _test_agent_navigation_and_appearance(world: RestaurantWorld) -> void:
 				face_recoloured = true
 	_expect(skin_recoloured and face_recoloured, "runtime character palette applies pink skin and dark facial features without recolouring clothes")
 	var employee_agent: EmployeeAgent = world.staff_agents.values()[0]
+	var standby_cells: Dictionary = {}
+	var standby_valid := true
+	for staff: EmployeeAgent in world.staff_agents.values():
+		var standby_cell := world.world_to_cell(staff.home_position)
+		standby_valid = standby_valid and world._open_neighbor_count(standby_cell) >= 2 and standby_cell.distance_to(world.entrance_cell) >= 3.0
+		standby_cells[standby_cell] = true
+	_expect(standby_valid and standby_cells.size() == world.staff_agents.size(), "every employee has a distinct role-aware standby tile outside entrances and one-cell bottlenecks")
 	var walk_loops := false
 	for player: AnimationPlayer in employee_agent.animation_players:
 		var walk_name := employee_agent.resolve_animation(player, "Walk")
@@ -406,6 +413,8 @@ func _test_customer_lifecycle(world: RestaurantWorld) -> void:
 	_expect(customer.state == "standing_to_leave" and world.customer_owns_table(customer, table_uid) and int(SimulationManager.stats.customers_served) == customer.group_size, "payment is idempotent and the table stays reserved while guests stand up")
 	customer._process(1.0)
 	_expect(customer.state == "leaving" and not world.customer_owns_table(customer, table_uid), "the table is released only after the whole party has left its chairs")
+	customer._set_state("waiting_table")
+	_expect(customer.state == "leaving", "departure is terminal and a customer can never return to waiting or seating")
 	SimulationManager.unregister_customer(customer, false)
 	customer._registered = false
 	customer.queue_free()

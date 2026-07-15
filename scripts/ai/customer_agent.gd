@@ -91,7 +91,7 @@ func _process(delta: float) -> void:
 		wait_time += scaled
 		var patience_pressure := clampf((state_elapsed - patience * 0.45) / maxf(patience, 1.0), 0.0, 1.0)
 		satisfaction = maxf(satisfaction - scaled * (0.0015 + patience_pressure * 0.007), 0.3)
-	if _seated and state in ["waiting_order", "waiting_food", "eating", "waiting_payment", "standing_to_leave"]:
+	if _seated and state in ["waiting_order", "waiting_food", "eating", "waiting_payment"]:
 		_maintain_seated_pose()
 	match state:
 		"entering":
@@ -691,6 +691,12 @@ func _owns_reserved_table() -> bool:
 
 
 func _set_state(value: String, reset_elapsed: bool = true) -> void:
+	# Departure is terminal. No delayed waiter callback, failed route or table
+	# retry may ever put a customer back into the dining lifecycle.
+	if state == "leaving" and value != "leaving":
+		return
+	if state == "standing_to_leave" and value not in ["standing_to_leave", "leaving"]:
+		return
 	if state == value and not reset_elapsed:
 		return
 	state = value

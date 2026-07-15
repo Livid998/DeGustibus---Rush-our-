@@ -16,12 +16,12 @@ var _thought: Label3D
 func setup(value: Dictionary, value_world: RestaurantWorld) -> void:
 	employee = value
 	world = value_world
-	home_position = global_position
 	name = "Employee_%s" % employee.id
 	movement_speed = 2.4 * float(employee.get("speed", 1.0))
 	var appearance := String(employee.get("appearance", "Worker_Male"))
 	add_character_model("res://assets/characters/%s.gltf" % appearance, Vector3.ZERO, skin_tone_for_key(String(employee.id)))
-	configure_navigation(0.40, 3 if String(employee.get("role", "")) == "waiter" else 2)
+	configure_navigation(0.40, _role_priority(false))
+	home_position = world.staff_standby_position(self, String(employee.get("role", "cook")))
 	_create_thought()
 	validate_animations()
 
@@ -41,15 +41,14 @@ func _process(delta: float) -> void:
 	employee.state = state
 	match state:
 		"idle":
+			navigation_priority = _role_priority(false)
 			idle_time += scaled
 			poll_time -= scaled
 			if poll_time <= 0.0:
 				poll_time = randf_range(0.25, 0.6)
 				_claim_task()
-			if state == "idle" and idle_time >= 0.9 and _flat_distance(global_position, home_position) > 0.28:
-				if move_to(home_position):
-					state = "returning_idle"
-					play_animation("Walk")
+			if state == "idle" and idle_time >= 0.35:
+				_begin_return_to_standby()
 		"returning_idle":
 			poll_time -= scaled
 			if poll_time <= 0.0:
@@ -58,11 +57,10 @@ func _process(delta: float) -> void:
 			if state == "moving":
 				pass
 			elif navigation_failed:
-				home_position = world.find_safe_agent_position(home_position, self)
-				state = "idle"
-				idle_time = 0.0
+				_begin_return_to_standby(true)
 			elif advance_path(scaled):
 				state = "idle"
+				navigation_priority = _role_priority(false)
 				idle_time = 0.0
 				poll_time = randf_range(0.08, 0.22)
 		"moving":
@@ -107,6 +105,7 @@ func _claim_task() -> void:
 			return
 		_thought.visible = true
 		state = "moving"
+		navigation_priority = _role_priority(true)
 		idle_time = 0.0
 		employee.current_task = String(active_task.get("recipe_step_id", active_task.get("action", "")))
 
@@ -141,10 +140,8 @@ func _finish_task() -> void:
 	active_task = {}
 	employee.current_task = ""
 	_thought.visible = false
-	state = "idle"
-	idle_time = 0.0
-	poll_time = randf_range(0.1, 0.35)
-	play_animation("Idle")
+	poll_time = randf_range(0.1, 0.25)
+	_begin_return_to_standby()
 
 
 func cancel_active_task() -> void:
@@ -156,6 +153,7 @@ func cancel_active_task() -> void:
 	active_task = {}
 	employee.current_task = ""
 	state = "idle"
+	navigation_priority = _role_priority(false)
 	idle_time = 0.0
 	velocity = Vector3.ZERO
 	navigation_active = false
@@ -167,6 +165,33 @@ func cancel_active_task() -> void:
 	play_animation("Idle")
 	if _thought:
 		_thought.visible = false
+	if GameState.restaurant_state != "closed":
+		_begin_return_to_standby()
+
+
+func _begin_return_to_standby(force_refresh: bool = false) -> void:
+	home_position = world.staff_standby_position(self, String(employee.get("role", "cook")), force_refresh)
+	idle_time = 0.0
+	navigation_priority = 5
+	if _flat_distance(global_position, home_position) > 0.28 and move_to(home_position):
+		state = "returning_idle"
+		play_animation("Walk")
+	else:
+		state = "idle"
+		navigation_priority = _role_priority(false)
+		play_animation("Idle")
+
+
+func _role_priority(active: bool) -> int:
+	if not active:
+		return 6
+	match String(employee.get("role", "cook")):
+		"waiter":
+			return 2
+		"cook":
+			return 3
+		_:
+			return 4
 
 
 func _active_task_is_actionable() -> bool:

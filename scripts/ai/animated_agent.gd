@@ -262,7 +262,7 @@ func _repath() -> bool:
 	if world == null:
 		navigation_failed = true
 		return false
-	path = world.find_path(global_position, destination)
+	path = world.find_path(global_position, destination, self)
 	path_index = 0
 	navigation_revision = world.navigation_revision
 	_skip_reached_waypoints()
@@ -348,10 +348,17 @@ func _move_with_collisions(motion: Vector3) -> void:
 		if step.length_squared() <= 0.000001:
 			break
 		if world != null and not world.can_agent_step(self, global_position, global_position + step):
-			var side := Vector3(-step.z, 0.0, step.x) * 0.72
-			if world.can_agent_step(self, global_position, global_position + side):
-				step = side
-			else:
+			var detour_found := false
+			# Try the agent's right-hand lane first, then the opposite side. The
+			# diagonal candidates preserve forward progress instead of repeatedly
+			# walking straight into the other capsule.
+			for angle: float in [-PI * 0.25, PI * 0.25, -PI * 0.5, PI * 0.5]:
+				var detour := step.rotated(Vector3.UP, angle)
+				if world.can_agent_step(self, global_position, global_position + detour):
+					step = detour
+					detour_found = true
+					break
+			if not detour_found:
 				velocity = velocity.move_toward(Vector3.ZERO, movement_acceleration * 0.08)
 				break
 		var collision := move_and_collide(step)

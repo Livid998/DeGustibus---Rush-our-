@@ -14,6 +14,7 @@ var staff_agents: Dictionary = {}
 var navigation_agents: Array[AnimatedAgent] = []
 var navigation_revision := 0
 var waiting_reservations: Dictionary = {}
+var staff_standby_reservations: Dictionary = {}
 var customer_root: Node3D
 var object_root: Node3D
 var preview_root: Node3D
@@ -198,6 +199,7 @@ func load_layout() -> void:
 	occupancy.clear()
 	table_occupants.clear()
 	waiting_reservations.clear()
+	staff_standby_reservations.clear()
 	_loading_layout = true
 	floor_tiles.clear()
 	for y: int in GRID_SIZE.y:
@@ -901,14 +903,95 @@ func _wall_blocks_step(from_cell: Vector2i, to_cell: Vector2i) -> bool:
 	return not blocking_uid.is_empty() and blocking_uid != _validation_ignored_edge_uid
 
 
-func find_path(from_world: Vector3, to_world: Vector3) -> PackedVector3Array:
+func _traffic_grid_path(from_cell: Vector2i, to_cell: Vector2i, agent: AnimatedAgent) -> Array[Vector2i]:
+	var empty: Array[Vector2i] = []
+	if from_cell == to_cell:
+		var same_cell: Array[Vector2i] = [from_cell]
+		return same_cell
+	var traffic := _traffic_cell_costs(agent)
+	traffic.erase(from_cell)
+	traffic.erase(to_cell)
+	var frontier: Array[Vector2i] = [from_cell]
+	var came_from: Dictionary = {from_cell: from_cell}
+	var distance: Dictionary = {from_cell: 0.0}
+	var closed: Dictionary = {}
+	while not frontier.is_empty():
+		var best_index := 0
+		var best_score := INF
+		for index: int in frontier.size():
+			var candidate := frontier[index]
+			var heuristic := absi(candidate.x - to_cell.x) + absi(candidate.y - to_cell.y)
+			var score := float(distance.get(candidate, INF)) + float(heuristic)
+			if score < best_score:
+				best_score = score
+				best_index = index
+		var current := frontier[best_index]
+		frontier.remove_at(best_index)
+		if current == to_cell:
+			break
+		if closed.has(current):
+			continue
+		closed[current] = true
+		var offsets: Array[Vector2i] = [Vector2i.RIGHT, Vector2i.DOWN, Vector2i.LEFT, Vector2i.UP]
+		if posmod(agent.get_instance_id(), 2) == 1:
+			offsets.reverse()
+		for offset: Vector2i in offsets:
+			var neighbor := current + offset
+			if not astar.is_in_boundsv(neighbor) or astar.is_point_solid(neighbor) or _wall_blocks_step(current, neighbor):
+				continue
+			var step_cost := 1.0 + float(traffic.get(neighbor, 0.0))
+			if came_from.has(current):
+				var previous := Vector2i(came_from[current])
+				if current - previous != offset:
+					step_cost += 0.08
+			var proposed := float(distance[current]) + step_cost
+			if proposed + 0.001 >= float(distance.get(neighbor, INF)):
+				continue
+			distance[neighbor] = proposed
+			came_from[neighbor] = current
+			if not frontier.has(neighbor):
+				frontier.append(neighbor)
+	if not came_from.has(to_cell):
+		return empty
+	var result: Array[Vector2i] = []
+	var cursor := to_cell
+	while cursor != from_cell:
+		result.append(cursor)
+		cursor = Vector2i(came_from[cursor])
+	result.append(from_cell)
+	result.reverse()
+	return result
+
+
+func _traffic_cell_costs(requesting_agent: AnimatedAgent) -> Dictionary:
+	var costs: Dictionary = {}
+	for other: AnimatedAgent in navigation_agents:
+		if other == requesting_agent or not is_instance_valid(other) or other.is_queued_for_deletion() or not other.is_collision_enabled():
+			continue
+		for point: Vector3 in other.get_avoidance_points():
+			_add_traffic_cost(costs, world_to_cell(point), 9.0)
+			for offset: Vector2i in [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]:
+				_add_traffic_cost(costs, world_to_cell(point) + offset, 2.6)
+		if other.navigation_active:
+			_add_traffic_cost(costs, world_to_cell(other.destination), 4.5)
+			for path_index: int in range(other.path_index, other.path.size()):
+				_add_traffic_cost(costs, world_to_cell(other.path[path_index]), 1.15)
+	return costs
+
+
+func _add_traffic_cost(costs: Dictionary, cell: Vector2i, amount: float) -> void:
+	if astar.is_in_boundsv(cell):
+		costs[cell] = float(costs.get(cell, 0.0)) + amount
+
+
+func find_path(from_world: Vector3, to_world: Vector3, agent: AnimatedAgent = null) -> PackedVector3Array:
 	var from_cell := _nearest_open_cell(world_to_cell(from_world))
 	var requested_cell := world_to_cell(to_world)
 	var to_cell := _nearest_open_cell(requested_cell)
-	var ids := _grid_path(from_cell, to_cell)
+	var ids := _traffic_grid_path(from_cell, to_cell, agent) if agent != null else _grid_path(from_cell, to_cell)
 	if ids.is_empty():
 		to_cell = _nearest_reachable_cell(requested_cell, from_cell)
-		ids = _grid_path(from_cell, to_cell)
+		ids = _traffic_grid_path(from_cell, to_cell, agent) if agent != null else _grid_path(from_cell, to_cell)
 	var result := PackedVector3Array()
 	if ids.is_empty():
 		return result
@@ -997,6 +1080,7 @@ func register_navigation_agent(agent: AnimatedAgent) -> void:
 func unregister_navigation_agent(agent: AnimatedAgent) -> void:
 	navigation_agents.erase(agent)
 	release_waiting_position(agent)
+	staff_standby_reservations.erase(agent.get_instance_id())
 
 
 func can_agent_move(from_position: Vector3, to_position: Vector3, radius: float = 0.34) -> bool:
@@ -1136,6 +1220,89 @@ func find_safe_agent_position(preferred: Vector3, agent: AnimatedAgent = null) -
 		if free:
 			return position
 	return cell_to_world(preferred_cell)
+
+
+func staff_standby_position(agent: AnimatedAgent, role: String, force_refresh: bool = false) -> Vector3:
+	var key := agent.get_instance_id()
+	if force_refresh:
+		staff_standby_reservations.erase(key)
+	if staff_standby_reservations.has(key):
+		var reserved_cell := Vector2i(staff_standby_reservations[key])
+		if astar.is_in_boundsv(reserved_cell) and not astar.is_point_solid(reserved_cell):
+			return cell_to_world(reserved_cell)
+		staff_standby_reservations.erase(key)
+	var service_cells := _staff_service_cells()
+	var best_cell := _nearest_open_cell(world_to_cell(agent.global_position))
+	var best_score := INF
+	# First prefer open room cells. If the player's layout is extremely dense,
+	# allow a two-neighbour cell but never a one-cell doorway/dead end.
+	for minimum_neighbors: int in [3, 2]:
+		for y: int in GRID_SIZE.y:
+			for x: int in GRID_SIZE.x:
+				var cell := Vector2i(x, y)
+				if astar.is_point_solid(cell) or _open_neighbor_count(cell) < minimum_neighbors:
+					continue
+				if cell.distance_to(entrance_cell) < 3.0 or _grid_path(world_to_cell(agent.global_position), cell).is_empty():
+					continue
+				var too_close_to_work := false
+				for service_cell: Vector2i in service_cells:
+					if cell.distance_to(service_cell) <= 1.15:
+						too_close_to_work = true
+						break
+				if too_close_to_work:
+					continue
+				var reserved := false
+				for other_key: int in staff_standby_reservations:
+					if other_key != key and cell.distance_to(Vector2i(staff_standby_reservations[other_key])) < 1.5:
+						reserved = true
+						break
+				if reserved:
+					continue
+				var zone_y := 5.0 if role == "waiter" else 11.0
+				var wrong_zone := (role == "waiter" and y >= 8) or (role != "waiter" and y < 8)
+				var score := absf(float(y) - zone_y) * 2.0 + cell.distance_to(world_to_cell(agent.global_position)) * 0.12
+				if wrong_zone:
+					score += 30.0
+				# Stable per-worker horizontal preference spreads the brigade instead
+				# of selecting the first equally good tile for everyone.
+				var preferred_x := 2 + posmod(String(agent.name).hash(), GRID_SIZE.x - 4)
+				score += absf(float(x - preferred_x)) * 0.18
+				if score < best_score:
+					best_score = score
+					best_cell = cell
+		if best_score < INF:
+			break
+	staff_standby_reservations[key] = best_cell
+	return cell_to_world(best_cell)
+
+
+func _staff_service_cells() -> Array[Vector2i]:
+	var result: Array[Vector2i] = [entrance_cell]
+	for slot: Vector2i in [Vector2i(8, 1), Vector2i(7, 2), Vector2i(9, 2), Vector2i(6, 2), Vector2i(10, 2), Vector2i(8, 2)]:
+		if not result.has(slot):
+			result.append(slot)
+	for object: PlacedObject in placed_objects.values():
+		if not is_instance_valid(object):
+			continue
+		if not object.station_id.is_empty():
+			for cell: Vector2i in station_access_cells(object.definition, object.grid_cell, object.rotation_steps, object.support_uid, object.attachment_slot):
+				if not result.has(cell):
+					result.append(cell)
+		if String(object.definition.get("support_kind", "")) == "dining_table":
+			for position: Vector3 in _table_access_positions(object):
+				var cell := world_to_cell(position)
+				if not result.has(cell):
+					result.append(cell)
+	return result
+
+
+func _open_neighbor_count(cell: Vector2i) -> int:
+	var count := 0
+	for offset: Vector2i in [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]:
+		var neighbor := cell + offset
+		if astar.is_in_boundsv(neighbor) and not astar.is_point_solid(neighbor) and not _wall_blocks_step(cell, neighbor):
+			count += 1
+	return count
 
 
 func is_work_position_available(position: Vector3, employee_id: String) -> bool:
