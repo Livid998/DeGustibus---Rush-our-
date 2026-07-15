@@ -95,3 +95,10 @@ static func set_preview_tint(root: Node, color: Color) -> void:
 			overlay.albedo_color = color
 			child.material_overlay = overlay
 		set_preview_tint(child, color)
+
+
+static func set_shadow_casting(root: Node, mode: GeometryInstance3D.ShadowCastingSetting) -> void:
+	if root is GeometryInstance3D:
+		(root as GeometryInstance3D).cast_shadow = mode
+	for child: Node in root.get_children():
+		set_shadow_casting(child, mode)

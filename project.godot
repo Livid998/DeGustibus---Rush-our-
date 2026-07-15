@@ -24,6 +24,7 @@ EconomyManager="*res://scripts/autoload/economy_manager.gd"
 SimulationManager="*res://scripts/autoload/simulation_manager.gd"
 AudioManager="*res://scripts/autoload/audio_manager.gd"
 PwaUpdateManager="*res://scripts/autoload/pwa_update_manager.gd"
+WebPlatformProfile="*res://scripts/autoload/web_platform_profile.gd"
 
 [display]
 
@@ -34,6 +35,7 @@ window/size/window_height_override=720
 window/stretch/mode="canvas_items"
 window/stretch/aspect="expand"
 window/handheld/orientation=1
+window/dpi/allow_hidpi.web=false
 
 [input]
 
@@ -79,4 +81,8 @@ speed_4={
 renderer/rendering_method="mobile"
 renderer/rendering_method.web="gl_compatibility"
 lights_and_shadows/directional_shadow/size=2048
+lights_and_shadows/directional_shadow/size.web=512
+scaling_3d/scale.web=0.75
+textures/vram_compression/import_etc2_astc=true
+textures/vram_compression/import_s3tc_bptc=true
 environment/defaults/default_clear_color=Color(0.69, 0.86, 0.91, 1)

@@ -168,7 +168,32 @@ body {
 		<script>
 const GODOT_CONFIG = $GODOT_CONFIG;
 const GODOT_THREADS_ENABLED = $GODOT_THREADS_ENABLED;
+const mobilePointer = window.matchMedia && window.matchMedia('(pointer: coarse)').matches;
+const appleMobile = /iPad|iPhone|iPod/.test(navigator.userAgent)
+	|| (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
+window.degustibusMobileProfile = appleMobile || (/Android/.test(navigator.userAgent) && mobilePointer);
+window.degustibusSafeMode = sessionStorage.getItem('degustibus-webgl-safe') === '1'
+	|| new URLSearchParams(window.location.search).get('safe') === '1';
 const engine = new Engine(GODOT_CONFIG);
+
+(function setupWebGlRecovery() {
+	const canvas = document.getElementById('canvas');
+	canvas.addEventListener('webglcontextlost', (event) => {
+		event.preventDefault();
+		if (!window.degustibusSafeMode) {
+			sessionStorage.setItem('degustibus-webgl-safe', '1');
+			window.setTimeout(() => window.location.reload(), 180);
+			return;
+		}
+		const notice = document.getElementById('status-notice');
+		const overlay = document.getElementById('status');
+		if (notice && overlay) {
+			notice.textContent = 'Memoria grafica esaurita. Chiudi le altre schede del browser e riapri il gioco.';
+			notice.style.display = 'block';
+			overlay.style.visibility = 'visible';
+		}
+	}, false);
+}());
 
 (function setupPwaUpdates() {
 	const banner = document.getElementById('pwa-update');

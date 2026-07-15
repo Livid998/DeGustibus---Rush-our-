@@ -143,7 +143,7 @@ func _create_environment() -> void:
 	sun.rotation_degrees = Vector3(-58, -35, 0)
 	sun.light_color = Color("fff7e8")
 	sun.light_energy = 0.84
-	sun.shadow_enabled = true
+	sun.shadow_enabled = not WebPlatformProfile.low_memory_mode()
 	sun.directional_shadow_max_distance = 55.0
 	add_child(sun)
 
@@ -1266,6 +1266,7 @@ func set_floor_style(cell: Vector2i, item_id: String) -> void:
 	var tile := ModelFactory.instantiate_model(path)
 	tile.scale = Vector3.ONE * 0.5
 	tile.position = cell_to_world(cell)
+	ModelFactory.set_shadow_casting(tile, GeometryInstance3D.SHADOW_CASTING_SETTING_OFF)
 	floor_root.add_child(tile)
 	floor_tiles[cell] = tile
 

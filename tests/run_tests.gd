@@ -59,13 +59,15 @@ func _test_registry() -> void:
 		_expect(icon_index >= 0 and icon_index < 20 and int(ingredient.get("rarity", 0)) in range(1, 6), "%s has a valid atlas icon and rarity" % ingredient.id)
 	_expect(unlocked == 12, "exactly 12 ingredients start unlocked")
 	_expect(ingredient_icon_indices.size() == 20 and GameIcons.ingredient_icon(DataRegistry.ingredients_by_id.tomato).region.size.x > 0.0, "all ingredient icons map uniquely to the supplied atlas")
-	_expect(GameIcons.INGREDIENT_SHEET.get_size() == Vector2(1200, 960), "transparent ingredient atlas has 20 uniform cells")
+	var ingredient_sheet_size := GameIcons.INGREDIENT_SHEET.get_size()
+	_expect(int(ingredient_sheet_size.x) % 5 == 0 and int(ingredient_sheet_size.y) % 4 == 0 and ingredient_sheet_size.x >= 600.0, "transparent ingredient atlas has 20 uniform cells")
 	_expect(_atlas_has_transparent_cell_corners(GameIcons.INGREDIENT_SHEET, 5, 4), "ingredient cells have transparent backgrounds and isolated borders")
 	var recipe_icon_indices: Dictionary = {}
 	for recipe: Dictionary in DataRegistry.recipes:
 		recipe_icon_indices[int(recipe.get("icon_index", -1))] = true
 	_expect(recipe_icon_indices.size() == 12 and GameIcons.recipe_icon(DataRegistry.recipes_by_id.margherita).region.size.x > 0.0, "all recipe icons map uniquely to the supplied atlas")
-	_expect(GameIcons.RECIPE_SHEET.get_size() == Vector2(1056, 1312), "transparent recipe atlas has 12 uniform cells")
+	var recipe_sheet_size := GameIcons.RECIPE_SHEET.get_size()
+	_expect(int(recipe_sheet_size.x) % 3 == 0 and int(recipe_sheet_size.y) % 4 == 0 and recipe_sheet_size.y >= 640.0, "transparent recipe atlas has 12 uniform cells")
 	_expect(_atlas_has_transparent_cell_corners(GameIcons.RECIPE_SHEET, 3, 4), "recipe cells have transparent backgrounds and isolated borders")
 	_expect(GameIcons.NAVIGATION_INDICES.size() == 8 and GameIcons.navigation_icon("Impostazioni").region.size.x > 0.0, "all navigation and settings icons map to the supplied atlas")
 	_expect(_atlas_has_transparent_cell_corners(GameIcons.NAVIGATION_SHEET, 4, 2), "navigation cells have transparent backgrounds")

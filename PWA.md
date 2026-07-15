@@ -38,3 +38,9 @@ La prima volta, nel repository GitHub aprire `Settings > Pages` e scegliere `Git
 ## Installazione su iPad/iPhone
 
 Aprire l'indirizzo HTTPS in Safari, usare `Condividi` e scegliere `Aggiungi alla schermata Home`.
+
+## Modalita sicura su iPad
+
+La build Web riconosce automaticamente i dispositivi mobili e riduce il carico della GPU. Se iOS segnala comunque `WebGL context lost`, la pagina esegue una sola volta il riavvio in modalita sicura, con risoluzione 3D e frequenza ridotte.
+
+La modalita sicura puo essere attivata manualmente aggiungendo `?safe=1` alla fine dell'indirizzo della PWA. Prima di riprovare, chiudere le altre schede o applicazioni Web 3D aperte. Non cancellare i dati del sito: contengono anche il salvataggio locale.
