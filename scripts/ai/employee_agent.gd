@@ -201,7 +201,7 @@ func _active_task_is_actionable() -> bool:
 	if active_task.has("order_id"):
 		if not SimulationManager.tasks.has(task_id):
 			return false
-		return String(SimulationManager.tasks[task_id].get("state", "")) in ["reserved", "in_progress"]
+		return String(SimulationManager.tasks[task_id].get("state", "")) in ["reserved", "in_progress"] and SimulationManager.kitchen_task_reservation_is_valid(task_id, String(employee.get("id", "")))
 	if not SimulationManager.service_tasks.has(task_id):
 		return false
 	return String(SimulationManager.service_tasks[task_id].get("state", "")) in ["reserved", "in_progress"] and SimulationManager.service_task_is_actionable(SimulationManager.service_tasks[task_id])

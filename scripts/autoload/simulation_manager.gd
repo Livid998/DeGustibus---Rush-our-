@@ -101,7 +101,10 @@ func register_station(station_id: String, node: Node, capacity: int) -> void:
 		interaction_positions.append(node.get_interaction_position())
 	else:
 		interaction_positions.append(node.global_position)
-	var worker_capacity := maxi(mini(capacity, interaction_positions.size() * 2), 1)
+	# `capacity` is batch/storage throughput, not a number of cooks that may
+	# overlap on the same physical appliance. Every placed workstation has one
+	# exclusive operator; buying a second instance creates another work place.
+	var worker_capacity := 1
 	interaction_positions = _expanded_interaction_positions(interaction_positions, worker_capacity, node)
 	var physical_capacity := maxi(capacity, 1)
 	stations[station_id].append({
@@ -328,10 +331,17 @@ func begin_kitchen_task(task_id: String) -> bool:
 	var task: Dictionary = tasks[task_id]
 	if task.state != "reserved":
 		return false
-	if not bool(task.get("stock_consumed", false)) and not GameState.consume_stock(task.inputs):
-		task.state = "waiting_stock"
+	if not _station_reservation_is_owned(task):
+		task.state = "queued"
 		task.employee_id = ""
 		_release_station(task)
+		task.station_runtime = null
+		task_board_changed.emit()
+		return false
+	if not bool(task.get("stock_consumed", false)) and not GameState.consume_stock(task.inputs):
+		task.state = "waiting_stock"
+		_release_station(task)
+		task.employee_id = ""
 		task.station_runtime.blocked += 1 if task.station_runtime else 0
 		task.station_runtime = null
 		task_board_changed.emit()
@@ -390,8 +400,8 @@ func cancel_employee_task(employee_id: String) -> void:
 		if String(task.get("employee_id", "")) == employee_id and String(task.get("state", "")) in ["reserved", "in_progress"]:
 			var order: Dictionary = orders.get(String(task.get("order_id", "")), {})
 			task.state = "queued" if not order.is_empty() and String(order.get("state", "")) not in ["cancelled", "paid"] else "cancelled"
-			task.employee_id = ""
 			_release_station(task)
+			task.employee_id = ""
 			task.station_runtime = null
 	for task_id: String in service_tasks:
 		var service_task: Dictionary = service_tasks.get(task_id, {})
@@ -602,11 +612,30 @@ func _free_station_slot(runtime: Dictionary) -> int:
 func _release_station(task: Dictionary) -> void:
 	if task.station_runtime:
 		var slot := int(task.get("interaction_slot", -1))
-		if slot >= 0:
+		var owner_id := String(task.get("employee_id", ""))
+		if slot >= 0 and String(task.station_runtime.reservations.get(slot, "")) == owner_id:
 			task.station_runtime.reservations.erase(slot)
 		task.station_runtime.busy = task.station_runtime.reservations.size()
 		task.erase("interaction_slot")
 		task.erase("interaction_position")
+
+
+func kitchen_task_reservation_is_valid(task_id: String, employee_id: String) -> bool:
+	if not tasks.has(task_id):
+		return false
+	var task: Dictionary = tasks[task_id]
+	return String(task.get("employee_id", "")) == employee_id and _station_reservation_is_owned(task)
+
+
+func _station_reservation_is_owned(task: Dictionary) -> bool:
+	var runtime: Variant = task.get("station_runtime", null)
+	if not (runtime is Dictionary) or (runtime as Dictionary).is_empty():
+		return false
+	var slot := int(task.get("interaction_slot", -1))
+	var employee_id := String(task.get("employee_id", ""))
+	if slot < 0 or employee_id.is_empty():
+		return false
+	return String((runtime as Dictionary).get("reservations", {}).get(slot, "")) == employee_id
 
 
 func _stock_available(requirements: Dictionary) -> bool:

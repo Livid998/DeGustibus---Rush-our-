@@ -15,6 +15,8 @@ var navigation_agents: Array[AnimatedAgent] = []
 var navigation_revision := 0
 var waiting_reservations: Dictionary = {}
 var staff_standby_reservations: Dictionary = {}
+var corridor_reservations: Dictionary = {}
+var agent_corridor_reservations: Dictionary = {}
 var customer_root: Node3D
 var object_root: Node3D
 var preview_root: Node3D
@@ -200,6 +202,8 @@ func load_layout() -> void:
 	table_occupants.clear()
 	waiting_reservations.clear()
 	staff_standby_reservations.clear()
+	corridor_reservations.clear()
+	agent_corridor_reservations.clear()
 	_loading_layout = true
 	floor_tiles.clear()
 	for y: int in GRID_SIZE.y:
@@ -1011,7 +1015,11 @@ func find_path(from_world: Vector3, to_world: Vector3, agent: AnimatedAgent = nu
 		result.remove_at(0)
 	elif result.size() == 1 and can_agent_move(actual_start, result[0], 0.25) and actual_start.distance_to(result[0]) <= 0.12:
 		result[0] = actual_start
-	result = _simplify_world_path(result)
+	# Moving agents retain every grid cell. Besides making turns predictable in
+	# tight kitchens, these waypoints let the corridor arbiter reserve the whole
+	# one-person passage before an agent enters it.
+	if agent == null:
+		result = _simplify_world_path(result)
 	if show_paths:
 		_draw_debug_path(result)
 	return result
@@ -1081,6 +1089,110 @@ func unregister_navigation_agent(agent: AnimatedAgent) -> void:
 	navigation_agents.erase(agent)
 	release_waiting_position(agent)
 	staff_standby_reservations.erase(agent.get_instance_id())
+	_release_agent_corridor(agent)
+
+
+func can_agent_advance_route(agent: AnimatedAgent, route: PackedVector3Array, route_index: int) -> bool:
+	_cleanup_corridor_reservations()
+	var requested_key := _upcoming_corridor_key(agent, route, route_index)
+	var agent_id := agent.get_instance_id()
+	var previous_key := String(agent_corridor_reservations.get(agent_id, ""))
+	if requested_key.is_empty():
+		if not previous_key.is_empty() and not _agent_is_inside_corridor(agent, previous_key):
+			_release_agent_corridor(agent)
+		return true
+	if not previous_key.is_empty() and previous_key != requested_key and not _agent_is_inside_corridor(agent, previous_key):
+		_release_agent_corridor(agent)
+	var contenders: Array[AnimatedAgent] = []
+	var inside: Array[AnimatedAgent] = []
+	for other: AnimatedAgent in navigation_agents:
+		if not is_instance_valid(other) or other.is_queued_for_deletion() or not other.is_collision_enabled():
+			continue
+		if _agent_is_inside_corridor(other, requested_key):
+			inside.append(other)
+			contenders.append(other)
+		elif other.navigation_active and _upcoming_corridor_key(other, other.path, other.path_index) == requested_key:
+			contenders.append(other)
+	var candidates := inside if not inside.is_empty() else contenders
+	if candidates.is_empty():
+		candidates = [agent]
+	var winner: AnimatedAgent = candidates[0]
+	for candidate: AnimatedAgent in candidates:
+		if candidate.navigation_priority < winner.navigation_priority or (candidate.navigation_priority == winner.navigation_priority and candidate.get_instance_id() < winner.get_instance_id()):
+			winner = candidate
+	var owner_id := int(corridor_reservations.get(requested_key, 0))
+	var owner := instance_from_id(owner_id) as AnimatedAgent if owner_id != 0 else null
+	if owner != null and is_instance_valid(owner) and _agent_is_inside_corridor(owner, requested_key):
+		winner = owner
+	if winner != agent:
+		return false
+	corridor_reservations[requested_key] = agent_id
+	agent_corridor_reservations[agent_id] = requested_key
+	return true
+
+
+func _upcoming_corridor_key(agent: AnimatedAgent, route: PackedVector3Array, route_index: int) -> String:
+	for point: Vector3 in agent.get_avoidance_points():
+		var current_key := _corridor_key(world_to_cell(point))
+		if not current_key.is_empty():
+			return current_key
+	for index: int in range(route_index, mini(route_index + 4, route.size())):
+		var key := _corridor_key(world_to_cell(route[index]))
+		if not key.is_empty():
+			return key
+	return ""
+
+
+func _corridor_key(start: Vector2i) -> String:
+	if not _is_narrow_corridor_cell(start):
+		return ""
+	var cells: Array[Vector2i] = [start]
+	var visited: Dictionary = {start: true}
+	var head := 0
+	while head < cells.size():
+		var current := cells[head]
+		head += 1
+		for offset: Vector2i in [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]:
+			var neighbor := current + offset
+			if visited.has(neighbor) or not _is_narrow_corridor_cell(neighbor) or _wall_blocks_step(current, neighbor):
+				continue
+			visited[neighbor] = true
+			cells.append(neighbor)
+	cells.sort_custom(func(a: Vector2i, b: Vector2i): return a.y < b.y or (a.y == b.y and a.x < b.x))
+	var parts: PackedStringArray = []
+	for cell: Vector2i in cells:
+		parts.append("%d,%d" % [cell.x, cell.y])
+	return ";".join(parts)
+
+
+func _is_narrow_corridor_cell(cell: Vector2i) -> bool:
+	return astar.is_in_boundsv(cell) and not astar.is_point_solid(cell) and _open_neighbor_count(cell) <= 2
+
+
+func _agent_is_inside_corridor(agent: AnimatedAgent, key: String) -> bool:
+	if key.is_empty():
+		return false
+	for point: Vector3 in agent.get_avoidance_points():
+		if _corridor_key(world_to_cell(point)) == key:
+			return true
+	return false
+
+
+func _release_agent_corridor(agent: AnimatedAgent) -> void:
+	var agent_id := agent.get_instance_id()
+	var key := String(agent_corridor_reservations.get(agent_id, ""))
+	if not key.is_empty() and int(corridor_reservations.get(key, 0)) == agent_id:
+		corridor_reservations.erase(key)
+	agent_corridor_reservations.erase(agent_id)
+
+
+func _cleanup_corridor_reservations() -> void:
+	for key: String in corridor_reservations.keys():
+		var owner_id := int(corridor_reservations.get(key, 0))
+		var owner := instance_from_id(owner_id) as AnimatedAgent if owner_id != 0 else null
+		if owner == null or not is_instance_valid(owner) or owner.is_queued_for_deletion():
+			corridor_reservations.erase(key)
+			agent_corridor_reservations.erase(owner_id)
 
 
 func can_agent_move(from_position: Vector3, to_position: Vector3, radius: float = 0.34) -> bool:

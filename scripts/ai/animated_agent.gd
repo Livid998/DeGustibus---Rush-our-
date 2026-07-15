@@ -291,6 +291,13 @@ func advance_path(delta: float, carry: bool = false) -> bool:
 	if path_index >= path.size():
 		_complete_navigation()
 		return true
+	if world != null and not world.can_agent_advance_route(self, path, path_index):
+		# Waiting outside a reserved one-person corridor is intentional, not a
+		# navigation failure. Do not accumulate stuck time or repeatedly repath.
+		velocity = velocity.move_toward(Vector3.ZERO, movement_acceleration * delta)
+		stuck_time = 0.0
+		play_animation("Idle")
+		return false
 	var target := path[path_index]
 	var flat_target := Vector3(target.x, global_position.y, target.z)
 	var distance_to_target := global_position.distance_to(flat_target)

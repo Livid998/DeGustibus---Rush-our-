@@ -303,7 +303,7 @@ func _test_agent_navigation_and_appearance(world: RestaurantWorld) -> void:
 	var unique_positions: Dictionary = {}
 	for position: Vector3 in interaction_positions:
 		unique_positions[position] = true
-	_expect(interaction_positions.size() == int(multi_runtime.worker_capacity) and unique_positions.size() == interaction_positions.size() and int(multi_runtime.capacity) >= int(multi_runtime.worker_capacity), "multi-capacity stations expose distinct physical worker slots without confusing batch capacity")
+	_expect(int(multi_runtime.worker_capacity) == 1 and interaction_positions.size() == 1 and int(multi_runtime.capacity) >= 3, "batch capacity never creates overlapping worker slots on one physical appliance")
 	_expect(CustomerAgent.CUSTOMER_APPEARANCES.size() >= 15 and CustomerAgent.CUSTOMER_APPEARANCES.all(func(appearance: String): return ResourceLoader.exists("res://assets/characters/%s.gltf" % appearance)), "customer population uses at least fifteen valid character variants")
 	var sample_agent := AnimatedAgent.new()
 	world.add_child(sample_agent)
@@ -330,6 +330,39 @@ func _test_agent_navigation_and_appearance(world: RestaurantWorld) -> void:
 		standby_valid = standby_valid and world._open_neighbor_count(standby_cell) >= 2 and standby_cell.distance_to(world.entrance_cell) >= 3.0
 		standby_cells[standby_cell] = true
 	_expect(standby_valid and standby_cells.size() == world.staff_agents.size(), "every employee has a distinct role-aware standby tile outside entrances and one-cell bottlenecks")
+	var corridor_cell := Vector2i(-1, -1)
+	var open_cell := Vector2i(-1, -1)
+	for y: int in RestaurantWorld.GRID_SIZE.y:
+		for x: int in RestaurantWorld.GRID_SIZE.x:
+			var candidate := Vector2i(x, y)
+			if corridor_cell.x < 0 and world._is_narrow_corridor_cell(candidate):
+				corridor_cell = candidate
+			if open_cell.x < 0 and not world.astar.is_point_solid(candidate) and world._open_neighbor_count(candidate) >= 3:
+				open_cell = candidate
+	var priority_agent := AnimatedAgent.new()
+	var yielding_agent := AnimatedAgent.new()
+	world.add_child(priority_agent)
+	world.add_child(yielding_agent)
+	priority_agent.world = world
+	yielding_agent.world = world
+	priority_agent.global_position = world.cell_to_world(open_cell)
+	yielding_agent.global_position = world.cell_to_world(open_cell)
+	priority_agent.configure_navigation(0.4, 2)
+	yielding_agent.configure_navigation(0.4, 4)
+	var corridor_route := PackedVector3Array([world.cell_to_world(corridor_cell)])
+	priority_agent.path = corridor_route
+	yielding_agent.path = corridor_route
+	priority_agent.navigation_active = true
+	yielding_agent.navigation_active = true
+	world.corridor_reservations.clear()
+	world.agent_corridor_reservations.clear()
+	var lower_priority_blocked := not world.can_agent_advance_route(yielding_agent, corridor_route, 0)
+	var higher_priority_admitted := world.can_agent_advance_route(priority_agent, corridor_route, 0)
+	_expect(corridor_cell.x >= 0 and lower_priority_blocked and higher_priority_admitted, "one-person corridors grant deterministic right of way before either agent enters")
+	priority_agent.shutdown_navigation()
+	yielding_agent.shutdown_navigation()
+	priority_agent.queue_free()
+	yielding_agent.queue_free()
 	var walk_loops := false
 	for player: AnimationPlayer in employee_agent.animation_players:
 		var walk_name := employee_agent.resolve_animation(player, "Walk")
@@ -569,6 +602,11 @@ func _test_staff_scheduler_spread(world: RestaurantWorld) -> void:
 	var first_claim := SimulationManager.claim_kitchen_task({"id":"spread_cook_1", "role":"cook", "skills":{"spread_test":0.8}})
 	var second_claim := SimulationManager.claim_kitchen_task({"id":"spread_cook_2", "role":"cook", "skills":{"spread_test":0.8}})
 	_expect(not first_claim.is_empty() and not second_claim.is_empty() and first_claim.station_runtime.node != second_claim.station_runtime.node, "cooks choose an empty workstation instance before crowding an already occupied compatible one")
+	var released_station_node: Node = first_claim.station_runtime.node
+	SimulationManager.cancel_employee_task("spread_cook_1")
+	SimulationManager.tasks["spread_replacement"] = {"id":"spread_replacement", "order_id":"", "state":"queued", "station":"spread_test", "priority":1, "wait_age":0.0}
+	var replacement_claim := SimulationManager.claim_kitchen_task({"id":"spread_cook_3", "role":"cook", "skills":{"spread_test":0.8}})
+	_expect(not replacement_claim.is_empty() and replacement_claim.station_runtime.node == released_station_node and int(replacement_claim.station_runtime.busy) == 1, "cancelling a route releases exactly its workstation ownership for the next cook")
 	SimulationManager.stations = original_stations
 	SimulationManager.tasks = original_tasks
 	SimulationManager.orders = original_orders
