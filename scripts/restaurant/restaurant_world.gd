@@ -1137,7 +1137,20 @@ func spawn_customer_group() -> void:
 	var customer := CustomerAgent.new()
 	customer_root.add_child(customer)
 	customer.global_position = find_safe_agent_position(cell_to_world(entrance_cell), customer)
-	customer.setup(self, randi_range(1, 4))
+	customer.setup(self, _random_customer_group_size())
+
+
+func _random_customer_group_size() -> int:
+	# Parties of one or two are the norm; larger groups remain special events
+	# instead of filling the room with four-character blocks every few seconds.
+	var roll := randf()
+	if roll < 0.34:
+		return 1
+	if roll < 0.76:
+		return 2
+	if roll < 0.93:
+		return 3
+	return 4
 
 
 func request_table(customer: Node, group_size: int) -> Dictionary:
@@ -1150,8 +1163,8 @@ func request_table(customer: Node, group_size: int) -> Dictionary:
 		var table_object: PlacedObject = placed_objects.get(uid)
 		if table_object == null or not is_instance_valid(table_object):
 			continue
-		var seats := _seat_positions_for_table(table_object)
-		var capacity := seats.size()
+		var seat_assignments := _seat_assignments_for_table(table_object)
+		var capacity := seat_assignments.size()
 		if capacity < group_size:
 			continue
 		var access_positions := _table_access_positions(table_object)
@@ -1173,7 +1186,7 @@ func request_table(customer: Node, group_size: int) -> Dictionary:
 		candidates.append({
 			"uid": uid,
 			"object": table_object,
-			"seats": seats,
+			"seats": seat_assignments,
 			"capacity": capacity,
 			"approach": approach,
 			"score": float(capacity - group_size) * 4.0 + best_distance
@@ -1184,15 +1197,26 @@ func request_table(customer: Node, group_size: int) -> Dictionary:
 	var chosen: Dictionary = candidates[0]
 	table_occupants[String(chosen.uid)] = customer
 	var table_object: PlacedObject = chosen.object
+	var chosen_seats: Array = (chosen.seats as Array).slice(0, group_size)
+	var seat_positions: Array[Vector3] = []
+	for seat: Dictionary in chosen_seats:
+		seat_positions.append(Vector3(seat.position))
+	var table_bounds := ModelFactory.calculate_visual_bounds(table_object.visual_model, true)
 	return {
 		"uid": String(chosen.uid),
 		"seat_position": Vector3(chosen.approach),
 		"approach_position": Vector3(chosen.approach),
-		"seat_positions": (chosen.seats as Array).slice(0, group_size),
+		"seat_positions": seat_positions,
+		"seat_assignments": chosen_seats,
 		"table_center": table_object.global_position,
+		"table_surface_y": table_object.global_position.y + table_bounds.end.y + 0.035,
 		"service_position": Vector3(chosen.approach),
 		"capacity": int(chosen.capacity)
 	}
+
+
+func customer_owns_table(customer: Node, table_uid: String) -> bool:
+	return not table_uid.is_empty() and table_occupants.get(table_uid) == customer and is_instance_valid(placed_objects.get(table_uid))
 
 
 func release_table(customer: Node) -> void:
@@ -1237,6 +1261,13 @@ func release_waiting_position(customer: Node) -> void:
 
 func _seat_positions_for_table(table_object: PlacedObject) -> Array[Vector3]:
 	var result: Array[Vector3] = []
+	for assignment: Dictionary in _seat_assignments_for_table(table_object):
+		result.append(Vector3(assignment.position))
+	return result
+
+
+func _seat_assignments_for_table(table_object: PlacedObject) -> Array[Dictionary]:
+	var result: Array[Dictionary] = []
 	var candidates: Array[PlacedObject] = []
 	for object: PlacedObject in placed_objects.values():
 		if object.item_id not in ["chair", "stool"]:
@@ -1248,8 +1279,12 @@ func _seat_positions_for_table(table_object: PlacedObject) -> Array[Vector3]:
 		candidates.append(object)
 	candidates.sort_custom(func(a: PlacedObject, b: PlacedObject): return a.attachment_slot < b.attachment_slot)
 	for chair: PlacedObject in candidates:
-		var toward_table := chair.global_position.direction_to(table_object.global_position)
-		result.append(chair.global_position + toward_table * 0.22)
+		result.append({
+			"chair_uid": chair.uid,
+			"slot": chair.attachment_slot,
+			"position": chair.global_position,
+			"rotation": chair.rotation.y
+		})
 	return result
 
 

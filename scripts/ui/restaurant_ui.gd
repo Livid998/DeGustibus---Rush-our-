@@ -506,7 +506,7 @@ func _update_pass() -> void:
 	var active_count := 0
 	for order_id: String in SimulationManager.orders:
 		var order: Dictionary = SimulationManager.orders[order_id]
-		if order.state == "paid":
+		if String(order.get("state", "")) in ["paid", "cancelled"]:
 			continue
 		active_count += 1
 		var elapsed := GameState.service_seconds - float(order.created_at)

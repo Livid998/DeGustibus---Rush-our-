@@ -20,6 +20,7 @@ func _run() -> void:
 	_test_pathfinding_and_placement(world)
 	_test_builder_and_seating(world)
 	_test_agent_navigation_and_appearance(world)
+	_test_customer_lifecycle(world)
 	_test_camera_input(world)
 	_test_progression_and_menu_load(world)
 	_test_purchased_preparations()
@@ -338,6 +339,86 @@ func _test_completed_work_pruning() -> void:
 	SimulationManager.reset_service_stats()
 	GameState.deserialize(original_state)
 	GameState.service_seconds = original_seconds
+
+
+func _test_customer_lifecycle(world: RestaurantWorld) -> void:
+	GameState.reset_to_defaults(false)
+	SimulationManager.reset_service_stats()
+	GameState.set_restaurant_state("open")
+	var customer := CustomerAgent.new()
+	world.customer_root.add_child(customer)
+	customer.global_position = world.cell_to_world(world.entrance_cell)
+	customer.setup(world, 2)
+	customer.table = world.request_table(customer, 2)
+	_expect(not customer.table.is_empty() and customer._seat_group(), "a party reserves one valid table and one real chair per guest")
+	var table_uid := String(customer.table.get("uid", ""))
+	customer._set_state("waiting_order")
+	customer.service_completed("take_order", {})
+	var original_order_count := SimulationManager.orders.size()
+	customer.service_completed("take_order", {})
+	var diner_indices: Dictionary = {}
+	for order: Dictionary in customer.orders:
+		diner_indices[int(order.get("diner_index", -1))] = true
+	_expect(customer.orders.size() == customer.group_size and SimulationManager.orders.size() == original_order_count and diner_indices.size() == customer.group_size, "one immutable order is created per seated guest, even if service completion repeats")
+	_expect(SimulationManager.request_service(customer, "payment", customer.get_service_position()).is_empty(), "payment cannot be requested before every dish is served")
+	var first_order: Dictionary = customer.orders[0]
+	first_order.ready = true
+	first_order.state = "at_pass"
+	var stale_service := SimulationManager.request_service(customer, "serve", customer.get_service_position(), {"order_id": first_order.id})
+	first_order.state = "cancelled"
+	var waiter: Dictionary = GameState.employees.filter(func(entry: Dictionary): return String(entry.get("role", "")) == "waiter")[0]
+	_expect(SimulationManager.claim_service_task(waiter).is_empty() and String(stale_service.get("state", "")) == "cancelled", "a stale waiter action is cancelled instead of completing against an invalid order")
+	first_order.state = "at_pass"
+	for order: Dictionary in customer.orders:
+		order.ready = true
+		order.state = "at_pass"
+		var service := SimulationManager.request_service(customer, "serve", customer.get_service_position(), {"order_id": order.id})
+		var claimed := SimulationManager.claim_service_task(waiter)
+		_expect(not service.is_empty() and String(claimed.get("id", "")) == String(service.id) and SimulationManager.begin_service_task(String(service.id)), "each ready dish receives one exclusive delivery task")
+		SimulationManager.complete_service_task(String(service.id))
+	_expect(customer.state == "eating" and customer.served_order_ids.size() == customer.group_size and customer.dish_models.size() == customer.group_size, "the party starts eating only when every guest has a visible dish")
+	customer._set_state("waiting_payment")
+	var payment := SimulationManager.request_service(customer, "payment", customer.get_service_position(), {"order_ids": customer.orders.map(func(entry: Dictionary): return entry.id)})
+	var payment_claim := SimulationManager.claim_service_task(waiter)
+	SimulationManager.begin_service_task(String(payment_claim.get("id", "")))
+	SimulationManager.complete_service_task(String(payment.get("id", "")))
+	SimulationManager.complete_service_task(String(payment.get("id", "")))
+	_expect(customer.state == "standing_to_leave" and world.customer_owns_table(customer, table_uid) and int(SimulationManager.stats.customers_served) == customer.group_size, "payment is idempotent and the table stays reserved while guests stand up")
+	customer._process(1.0)
+	_expect(customer.state == "leaving" and not world.customer_owns_table(customer, table_uid), "the table is released only after the whole party has left its chairs")
+	SimulationManager.unregister_customer(customer, false)
+	customer._registered = false
+	customer.queue_free()
+	SimulationManager.reset_service_stats()
+	var abandoning := CustomerAgent.new()
+	world.customer_root.add_child(abandoning)
+	abandoning.global_position = world.cell_to_world(world.entrance_cell)
+	abandoning.setup(world, 2)
+	abandoning.table = world.request_table(abandoning, 2)
+	_expect(not abandoning.table.is_empty() and abandoning._seat_group(), "an abandonment scenario starts from a valid occupied table")
+	var abandoning_table_uid := String(abandoning.table.get("uid", ""))
+	abandoning._set_state("waiting_order")
+	abandoning.service_completed("take_order", {})
+	abandoning.patience = 1.0
+	abandoning.state_elapsed = 3.0
+	abandoning._process(0.1)
+	var all_cancelled := abandoning.orders.all(func(order: Dictionary): return String(order.get("state", "")) == "cancelled")
+	var replacement := CustomerAgent.new()
+	world.customer_root.add_child(replacement)
+	replacement.global_position = world.cell_to_world(world.entrance_cell)
+	replacement.setup(world, 2)
+	replacement.table = world.request_table(replacement, 2)
+	_expect(abandoning.state == "standing_to_leave" and all_cancelled and world.customer_owns_table(abandoning, abandoning_table_uid), "an impatient party atomically cancels its tickets but keeps its chairs while standing")
+	_expect(String(replacement.table.get("uid", "")) != abandoning_table_uid, "a replacement party cannot reserve a table whose previous guests are still visible")
+	abandoning._process(1.0)
+	_expect(not world.customer_owns_table(abandoning, abandoning_table_uid), "an abandoned table becomes available after the stand-up transition")
+	world.release_table(replacement)
+	for departing: CustomerAgent in [abandoning, replacement]:
+		SimulationManager.unregister_customer(departing, false)
+		departing._registered = false
+		departing.queue_free()
+	SimulationManager.reset_service_stats()
+	GameState.set_restaurant_state("closed")
 
 
 func _test_camera_input(world: RestaurantWorld) -> void:

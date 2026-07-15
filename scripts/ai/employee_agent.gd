@@ -7,6 +7,8 @@ var active_task: Dictionary = {}
 var poll_time := 0.0
 var work_time := 0.0
 var stress := 0.0
+var home_position := Vector3.ZERO
+var idle_time := 0.0
 
 var _thought: Label3D
 
@@ -14,6 +16,7 @@ var _thought: Label3D
 func setup(value: Dictionary, value_world: RestaurantWorld) -> void:
 	employee = value
 	world = value_world
+	home_position = global_position
 	name = "Employee_%s" % employee.id
 	movement_speed = 2.4 * float(employee.get("speed", 1.0))
 	var appearance := String(employee.get("appearance", "Worker_Male"))
@@ -38,10 +41,30 @@ func _process(delta: float) -> void:
 	employee.state = state
 	match state:
 		"idle":
+			idle_time += scaled
 			poll_time -= scaled
 			if poll_time <= 0.0:
 				poll_time = randf_range(0.25, 0.6)
 				_claim_task()
+			if state == "idle" and idle_time >= 0.9 and _flat_distance(global_position, home_position) > 0.28:
+				if move_to(home_position):
+					state = "returning_idle"
+					play_animation("Walk")
+		"returning_idle":
+			poll_time -= scaled
+			if poll_time <= 0.0:
+				poll_time = randf_range(0.2, 0.45)
+				_claim_task()
+			if state == "moving":
+				pass
+			elif navigation_failed:
+				home_position = world.find_safe_agent_position(home_position, self)
+				state = "idle"
+				idle_time = 0.0
+			elif advance_path(scaled):
+				state = "idle"
+				idle_time = 0.0
+				poll_time = randf_range(0.08, 0.22)
 		"moving":
 			if not _active_task_is_actionable():
 				cancel_active_task()
@@ -84,6 +107,7 @@ func _claim_task() -> void:
 			return
 		_thought.visible = true
 		state = "moving"
+		idle_time = 0.0
 		employee.current_task = String(active_task.get("recipe_step_id", active_task.get("action", "")))
 
 
@@ -118,6 +142,7 @@ func _finish_task() -> void:
 	employee.current_task = ""
 	_thought.visible = false
 	state = "idle"
+	idle_time = 0.0
 	poll_time = randf_range(0.1, 0.35)
 	play_animation("Idle")
 
@@ -131,6 +156,7 @@ func cancel_active_task() -> void:
 	active_task = {}
 	employee.current_task = ""
 	state = "idle"
+	idle_time = 0.0
 	velocity = Vector3.ZERO
 	navigation_active = false
 	navigation_failed = false
@@ -153,7 +179,7 @@ func _active_task_is_actionable() -> bool:
 		return String(SimulationManager.tasks[task_id].get("state", "")) in ["reserved", "in_progress"]
 	if not SimulationManager.service_tasks.has(task_id):
 		return false
-	return String(SimulationManager.service_tasks[task_id].get("state", "")) in ["reserved", "in_progress"] and is_instance_valid(active_task.get("customer"))
+	return String(SimulationManager.service_tasks[task_id].get("state", "")) in ["reserved", "in_progress"] and SimulationManager.service_task_is_actionable(SimulationManager.service_tasks[task_id])
 
 
 func _active_station_runtime() -> Dictionary:

@@ -12,14 +12,22 @@ var state_elapsed := 0.0
 var retry_time := 0.0
 var eat_time := 0.0
 var departure_failures := 0
+var table_route_failures := 0
 var table: Dictionary = {}
 var orders: Array[Dictionary] = []
 var served_order_ids: Dictionary = {}
 var group_models: Array[Node3D] = []
+var dish_models: Dictionary = {}
 
 var _thought: Label3D
 var _registered := false
 var _seated := false
+var _lost_departure := false
+var _take_order_committed := false
+var _payment_committed := false
+var _service_request_ids: Dictionary = {}
+var _position_trail: Array[Vector3] = []
+
 const CUSTOMER_APPEARANCES: Array[String] = [
 	"Casual_Male", "Casual_Female", "Casual2_Male", "Casual2_Female", "Casual3_Male", "Casual3_Female",
 	"Casual_Bald", "Suit_Male", "Suit_Female", "OldClassy_Male", "OldClassy_Female",
@@ -39,25 +47,27 @@ func setup(value_world: RestaurantWorld, size: int) -> void:
 	patience = randf_range(42.0, 68.0)
 	budget = randi_range(22, 48)
 	movement_speed = randf_range(2.1, 2.65)
-	configure_navigation(0.36 + float(group_size - 1) * 0.11, 1)
-	# A group is represented by one navigation body.  Let the front of a wider
-	# formation count as arrived instead of forcing its centre into an occupied
-	# interaction point.
-	arrival_tolerance = maxf(0.22, agent_radius * 0.65)
+	# The controller represents the party leader, not a circular body as wide
+	# as the whole group. Followers use the leader's trail visually.
+	configure_navigation(0.40 + float(group_size - 1) * 0.045, 1)
+	arrival_tolerance = 0.24
 	global_position = world.find_safe_agent_position(global_position, self)
 	_build_group_models()
 	_create_thought()
 	validate_animations()
+	_randomize_animation_phases()
+	_reset_position_trail()
 	SimulationManager.register_customer(self)
 	_registered = true
 	_set_state("entering")
 	if not move_to(world.waiting_position(self)):
-		_set_state("waiting_table")
+		_recover_at_waiting_position()
 	else:
 		play_animation("Walk")
 
 
 func _exit_tree() -> void:
+	_clear_dishes()
 	if _registered and SimulationManager.customers.has(self):
 		SimulationManager.unregister_customer(self, false)
 	if world != null:
@@ -68,14 +78,13 @@ func _exit_tree() -> void:
 func _process(delta: float) -> void:
 	var scaled := delta * SimulationManager.simulation_speed
 	state_elapsed += scaled
-	if GameState.restaurant_state == "closing" and not _seated and state in ["entering", "waiting_table", "walking_to_table"]:
+	if GameState.restaurant_state == "closing" and not _seated and state in ["entering", "waiting_table", "walking_to_table", "retrying_table_route", "seating"]:
 		_leave_for_closing()
-		return
 	if state in ["waiting_table", "waiting_order", "waiting_food", "waiting_payment"]:
 		wait_time += scaled
 		var patience_pressure := clampf((state_elapsed - patience * 0.45) / maxf(patience, 1.0), 0.0, 1.0)
 		satisfaction = maxf(satisfaction - scaled * (0.0015 + patience_pressure * 0.007), 0.3)
-	if _seated and state in ["waiting_order", "waiting_food", "eating", "waiting_payment"]:
+	if _seated and state in ["waiting_order", "waiting_food", "eating", "waiting_payment", "standing_to_leave"]:
 		_maintain_seated_pose()
 	match state:
 		"entering":
@@ -92,14 +101,18 @@ func _process(delta: float) -> void:
 				_leave_lost("TROPPA ATTESA")
 		"walking_to_table":
 			if navigation_failed:
-				_return_to_waiting_area()
+				_handle_table_route_failure()
 			elif advance_path(scaled):
-				_seat_group()
-				play_animation("SitDown")
-				_set_state("waiting_order")
-				_thought.text = "MENU"
-				_thought.visible = true
-				SimulationManager.request_service(self, "take_order", get_service_position())
+				_arrive_at_reserved_table()
+		"retrying_table_route":
+			retry_time -= scaled
+			if retry_time <= 0.0:
+				_retry_reserved_table_route()
+		"seating":
+			if not _owns_reserved_table() or not _table_seats_are_valid():
+				_return_to_waiting_area()
+			elif _advance_seating(scaled):
+				_complete_seating()
 		"waiting_order":
 			if state_elapsed > patience * 1.35:
 				_leave_lost("NESSUN CAMERIERE")
@@ -108,14 +121,17 @@ func _process(delta: float) -> void:
 				_leave_lost("TROPPA ATTESA")
 		"eating":
 			eat_time -= scaled
-			if eat_time <= 0.0:
+			if eat_time <= 0.0 and not _payment_committed:
 				_thought.text = "CONTO"
 				_thought.visible = true
-				SimulationManager.request_service(self, "payment", get_service_position(), {"order_ids": orders.map(func(entry: Dictionary): return entry.id)})
 				_set_state("waiting_payment")
+				_request_service_once("payment", {"order_ids": orders.map(func(entry: Dictionary): return entry.id)})
 		"waiting_payment":
 			if state_elapsed > patience * 1.7:
 				_leave_lost("CONTO IN RITARDO")
+		"standing_to_leave":
+			if state_elapsed >= 0.72:
+				_start_exit_walk()
 		"leaving":
 			if _flat_distance(global_position, world.cell_to_world(world.entrance_cell)) <= RestaurantWorld.CELL_SIZE * 0.72:
 				_finish_departure()
@@ -124,47 +140,61 @@ func _process(delta: float) -> void:
 				departure_failures += 1
 				if departure_failures >= 3 or not move_to(world.cell_to_world(world.entrance_cell)):
 					_finish_departure()
+					return
+				play_animation("Walk")
 			elif advance_path(scaled):
 				_finish_departure()
+				return
+	_update_group_visuals(scaled)
 
 
 func service_completed(action: String, payload: Dictionary) -> void:
 	match action:
 		"take_order":
-			if state != "waiting_order":
+			if state != "waiting_order" or not _seated or _take_order_committed or not _owns_reserved_table():
 				return
+			_take_order_committed = true
 			orders.clear()
-			for _guest: int in group_size:
+			served_order_ids.clear()
+			_clear_dishes()
+			for guest_index: int in group_size:
 				var recipe := _choose_recipe()
 				if recipe.is_empty():
 					continue
 				var order := SimulationManager.create_order(recipe.id, String(table.get("uid", "")), self)
 				if not order.is_empty():
+					order.diner_index = guest_index
 					orders.append(order)
-			if orders.is_empty():
+			if orders.size() != group_size:
 				_leave_lost("MENU NON DISPONIBILE")
 				return
 			_set_state("waiting_food")
 			_thought.text = "%d COMANDE" % orders.size()
 		"serve":
-			if state != "waiting_food":
+			if state != "waiting_food" or not _seated or not _owns_reserved_table():
 				return
 			var order_id := String(payload.get("order_id", ""))
-			if order_id.is_empty() or served_order_ids.has(order_id):
+			var order := _local_order(order_id)
+			if order.is_empty() or served_order_ids.has(order_id):
+				return
+			if not _order_is_ready_to_serve(order_id):
 				return
 			served_order_ids[order_id] = true
+			_show_dish(order)
 			_thought.text = "%d/%d SERVITI" % [served_order_ids.size(), orders.size()]
-			if served_order_ids.size() >= orders.size():
+			if served_order_ids.size() == orders.size():
 				_set_state("eating")
 				eat_time = randf_range(4.0, 7.0)
 				_thought.text = "BUONO!"
 		"payment":
-			if state != "waiting_payment" or orders.is_empty():
+			if state != "waiting_payment" or orders.is_empty() or _payment_committed or served_order_ids.size() != orders.size():
 				return
+			_payment_committed = true
 			var total := 0
 			for order: Dictionary in orders:
-				SimulationManager.complete_order_payment(order.id, satisfaction)
-				total += int(GameState.menu[order.recipe_id].price)
+				if SimulationManager.orders.has(String(order.id)):
+					SimulationManager.complete_order_payment(String(order.id), satisfaction)
+				total += int(GameState.menu.get(String(order.recipe_id), {}).get("price", 0))
 			_thought.text = "+%d" % total
 			var coin_tween := create_tween()
 			coin_tween.set_parallel(true)
@@ -175,13 +205,36 @@ func service_completed(action: String, payload: Dictionary) -> void:
 
 
 func get_service_position() -> Vector3:
-	if table.is_empty():
+	if table.is_empty() or not _owns_reserved_table():
 		return global_position
 	return Vector3(table.get("service_position", global_position))
 
 
+func accepts_service_action(action: String, payload: Dictionary = {}) -> bool:
+	match action:
+		"take_order":
+			return state == "waiting_order" and _seated and not _take_order_committed and _owns_reserved_table()
+		"serve":
+			var order_id := String(payload.get("order_id", ""))
+			return state == "waiting_food" and _seated and _owns_reserved_table() and not served_order_ids.has(order_id) and not _local_order(order_id).is_empty() and _order_is_ready_to_serve(order_id)
+		"payment":
+			return state == "waiting_payment" and _seated and not _payment_committed and served_order_ids.size() == orders.size() and not orders.is_empty()
+	return false
+
+
+func _request_service_once(action: String, payload: Dictionary = {}) -> void:
+	var previous_id := String(_service_request_ids.get(action, ""))
+	if not previous_id.is_empty() and SimulationManager.service_tasks.has(previous_id):
+		var previous: Dictionary = SimulationManager.service_tasks[previous_id]
+		if String(previous.get("state", "")) not in ["completed", "cancelled"]:
+			return
+	var task := SimulationManager.request_service(self, action, get_service_position(), payload)
+	if not task.is_empty():
+		_service_request_ids[action] = String(task.id)
+
+
 func _find_table() -> void:
-	if state not in ["entering", "waiting_table"]:
+	if state not in ["entering", "waiting_table"] or GameState.restaurant_state != "open":
 		return
 	table = world.request_table(self, group_size)
 	if table.is_empty():
@@ -189,20 +242,54 @@ func _find_table() -> void:
 		_thought.text = "ATTESA"
 		_thought.visible = true
 		return
+	table_route_failures = 0
 	_set_state("walking_to_table")
 	_thought.visible = false
 	if not move_to(Vector3(table.approach_position)):
-		_return_to_waiting_area()
+		_handle_table_route_failure()
 	else:
-		# Chaining entrance -> table happens in the same frame.  _complete_navigation
-		# briefly selected Idle, so explicitly keep the legs walking across the
-		# transition instead of letting the group slide for one rendered frame.
+		play_animation("Walk")
+
+
+func _arrive_at_reserved_table() -> void:
+	if not _owns_reserved_table() or not _table_seats_are_valid():
+		_return_to_waiting_area()
+		return
+	if not _begin_seating():
+		_return_to_waiting_area()
+		return
+	_set_state("seating")
+	play_animation("Walk")
+
+
+func _handle_table_route_failure() -> void:
+	table_route_failures += 1
+	navigation_active = false
+	navigation_failed = false
+	velocity = Vector3.ZERO
+	play_animation("Idle")
+	if table_route_failures > 3 or not _owns_reserved_table():
+		_return_to_waiting_area()
+		return
+	_set_state("retrying_table_route")
+	retry_time = 0.55 + float(table_route_failures) * 0.3
+
+
+func _retry_reserved_table_route() -> void:
+	if not _owns_reserved_table() or table_route_failures > 3:
+		_return_to_waiting_area()
+		return
+	_set_state("walking_to_table")
+	if not move_to(Vector3(table.approach_position)):
+		_handle_table_route_failure()
+	else:
 		play_animation("Walk")
 
 
 func _return_to_waiting_area() -> void:
 	world.release_table(self)
 	table = {}
+	table_route_failures = 0
 	_thought.text = "ATTESA"
 	_thought.visible = true
 	_set_state("entering")
@@ -213,10 +300,6 @@ func _return_to_waiting_area() -> void:
 
 
 func _recover_at_waiting_position() -> void:
-	# Local avoidance can occasionally leave a large group on the wrong side of
-	# a queue.  A failed route must never turn that group into a permanent
-	# obstacle: give it a fresh reserved slot and settle it on the nearest safe
-	# cell before resuming table search.
 	world.release_waiting_position(self)
 	var waiting_target := world.waiting_position(self)
 	global_position = world.find_safe_agent_position(waiting_target, self)
@@ -225,8 +308,9 @@ func _recover_at_waiting_position() -> void:
 	velocity = Vector3.ZERO
 	path.clear()
 	path_index = 0
+	_reset_position_trail()
 	_set_state("waiting_table")
-	retry_time = 0.6
+	retry_time = 0.7
 	play_animation("Idle")
 
 
@@ -268,35 +352,28 @@ func _choose_recipe() -> Dictionary:
 
 
 func _leave_lost(message: String) -> void:
-	if state == "leaving":
+	if state in ["standing_to_leave", "leaving"]:
 		return
 	_thought.text = message
 	_thought.visible = true
 	SimulationManager.cancel_customer_work(self)
-	if _registered:
-		SimulationManager.unregister_customer(self, true)
-		_registered = false
 	_begin_leaving(true)
 
 
-func _begin_leaving(_lost: bool) -> void:
-	play_animation("StandUp")
-	_stand_group_for_exit()
-	# Once everyone has stood up, the chairs are available.  Keeping the table
-	# reserved until the group reached the door stalled the entire dining room
-	# whenever outgoing and incoming formations met in an aisle.
-	world.release_table(self)
-	table = {}
-	_set_state("leaving")
-	departure_failures = 0
-	if not move_to(world.cell_to_world(world.entrance_cell)):
-		departure_failures = 1
-	else:
-		play_animation("Walk")
+func _begin_leaving(lost: bool) -> void:
+	if state in ["standing_to_leave", "leaving"]:
+		return
+	_lost_departure = _lost_departure or lost
+	_clear_dishes()
+	if _seated:
+		play_animation("StandUp")
+		_set_state("standing_to_leave")
+		return
+	_start_exit_walk()
 
 
 func _leave_for_closing() -> void:
-	if state == "leaving":
+	if state in ["standing_to_leave", "leaving"]:
 		return
 	_thought.text = "CHIUSURA"
 	_thought.visible = true
@@ -304,10 +381,29 @@ func _leave_for_closing() -> void:
 	_begin_leaving(false)
 
 
+func _start_exit_walk() -> void:
+	if _seated:
+		_stand_group_for_exit()
+	else:
+		world.release_waiting_position(self)
+		_arrange_waiting_formation(true)
+	world.release_table(self)
+	table = {}
+	_set_state("leaving")
+	departure_failures = 0
+	set_collision_enabled(true)
+	_reset_position_trail()
+	if not move_to(world.cell_to_world(world.entrance_cell)):
+		departure_failures = 1
+	else:
+		play_animation("Walk")
+
+
 func _finish_departure() -> void:
 	world.release_table(self)
+	_clear_dishes()
 	if _registered:
-		SimulationManager.unregister_customer(self, false)
+		SimulationManager.unregister_customer(self, _lost_departure)
 		_registered = false
 	queue_free()
 
@@ -323,44 +419,163 @@ func _build_group_models() -> void:
 		var appearance: String = available[index % available.size()] if not available.is_empty() else "Casual_Male"
 		var tone: Color = SKIN_TONES.pick_random()
 		var model: Node3D = add_character_model("res://assets/characters/%s.gltf" % appearance, Vector3.ZERO, tone)
+		model.top_level = true
 		model.set_meta("appearance", appearance)
 		model.set_meta("skin_tone", tone)
 		group_models.append(model)
-	_arrange_walking_formation()
+	_arrange_waiting_formation(true)
 
 
-func _arrange_walking_formation() -> void:
+func _randomize_animation_phases() -> void:
+	for player: AnimationPlayer in animation_players:
+		if player.current_animation.is_empty():
+			continue
+		var animation := player.get_animation(player.current_animation)
+		if animation != null and animation.length > 0.15:
+			player.seek(randf_range(0.0, minf(animation.length * 0.8, 0.65)), true)
+
+
+func _reset_position_trail() -> void:
+	_position_trail.clear()
+	for _index: int in 36:
+		_position_trail.append(global_position)
+
+
+func _update_group_visuals(delta: float) -> void:
+	if group_models.is_empty():
+		return
+	if state == "seating":
+		return
+	if _seated:
+		_enforce_seat_alignment()
+		return
+	if navigation_active and state in ["entering", "walking_to_table", "leaving"]:
+		if _position_trail.is_empty() or _position_trail.back().distance_to(global_position) >= 0.055:
+			_position_trail.append(global_position)
+			while _position_trail.size() > 64:
+				_position_trail.pop_front()
+		var last := _position_trail.size() - 1
+		for index: int in group_models.size():
+			var trail_index := maxi(last - index * 7, 0)
+			var target := _position_trail[trail_index]
+			var before := _position_trail[maxi(trail_index - 1, 0)]
+			var after := _position_trail[mini(trail_index + 1, last)]
+			var direction := before.direction_to(after)
+			direction.y = 0.0
+			if direction.length_squared() <= 0.001:
+				direction = Vector3(sin(rotation.y), 0.0, cos(rotation.y))
+			var lateral := Vector3(-direction.z, 0.0, direction.x)
+			if index > 0:
+				target += lateral * (0.16 if index % 2 == 0 else -0.16)
+			_move_group_model_toward(group_models[index], target, direction, delta, index == 0)
+	else:
+		_arrange_waiting_formation(false, delta)
+
+
+func _move_group_model_toward(model: Node3D, target: Vector3, direction: Vector3, delta: float, snap: bool = false) -> void:
+	target.y = 0.0
+	if snap or model.global_position.distance_to(target) > 2.5:
+		model.global_position = target
+	else:
+		model.global_position = model.global_position.lerp(target, 1.0 - exp(-delta * 10.0))
+	if direction.length_squared() > 0.001:
+		model.global_rotation.y = lerp_angle(model.global_rotation.y, atan2(direction.x, direction.z), 1.0 - exp(-delta * 12.0))
+
+
+func _arrange_waiting_formation(instant: bool = false, delta: float = 0.1) -> void:
+	var offsets := [Vector3.ZERO, Vector3(-0.34, 0.0, -0.32), Vector3(0.34, 0.0, -0.38), Vector3(0.0, 0.0, -0.78)]
 	for index: int in group_models.size():
-		var row := index / 2
-		var column := index % 2
-		group_models[index].position = Vector3((float(column) - 0.5) * 0.74 if group_size > 1 else 0.0, 0.0, float(row) * 0.64)
-		group_models[index].rotation = Vector3.ZERO
+		var target: Vector3 = global_position + Vector3(offsets[index]).rotated(Vector3.UP, rotation.y)
+		var direction := Vector3(sin(rotation.y), 0.0, cos(rotation.y))
+		_move_group_model_toward(group_models[index], target, direction, delta, instant)
 
 
-func _seat_group() -> void:
-	var seats: Array = table.get("seat_positions", [])
-	var center := Vector3(table.get("table_center", global_position))
+func _table_seats_are_valid() -> bool:
+	if not _owns_reserved_table():
+		return false
+	var assignments: Array = table.get("seat_assignments", [])
+	if assignments.size() != group_size:
+		return false
+	for assignment: Dictionary in assignments:
+		var chair := world.placed_objects.get(String(assignment.get("chair_uid", ""))) as PlacedObject
+		if chair == null or not is_instance_valid(chair) or chair.support_uid != String(table.uid):
+			return false
+	return true
+
+
+func _seat_group() -> bool:
+	if not _table_seats_are_valid():
+		return false
 	world.release_waiting_position(self)
 	set_collision_enabled(false)
-	global_position = center
-	for index: int in mini(group_models.size(), seats.size()):
-		var model := group_models[index]
-		model.global_position = Vector3(seats[index]) + Vector3.UP * 0.015
-		var direction := model.global_position.direction_to(center)
-		model.global_rotation.y = atan2(direction.x, direction.z)
+	global_position = Vector3(table.table_center)
 	_seated = true
+	_enforce_seat_alignment()
+	return true
+
+
+func _begin_seating() -> bool:
+	if not _table_seats_are_valid():
+		return false
+	world.release_waiting_position(self)
+	set_collision_enabled(false)
+	velocity = Vector3.ZERO
+	return true
+
+
+func _advance_seating(delta: float) -> bool:
+	var assignments: Array = table.get("seat_assignments", [])
+	var center := Vector3(table.get("table_center", global_position))
+	var all_arrived := assignments.size() == group_models.size()
+	for index: int in mini(group_models.size(), assignments.size()):
+		var model := group_models[index]
+		var target := Vector3(assignments[index].position)
+		target.y = 0.015
+		var distance := model.global_position.distance_to(target)
+		if distance > 0.045:
+			all_arrived = false
+			model.global_position = model.global_position.move_toward(target, minf(distance, movement_speed * delta * 0.92))
+		var direction := model.global_position.direction_to(center)
+		if direction.length_squared() > 0.001:
+			model.global_rotation.y = lerp_angle(model.global_rotation.y, atan2(direction.x, direction.z), 1.0 - exp(-delta * 10.0))
+	return all_arrived
+
+
+func _complete_seating() -> void:
+	global_position = Vector3(table.table_center)
+	_seated = true
+	_enforce_seat_alignment()
+	play_animation("SitDown")
+	_set_state("waiting_order")
+	_thought.text = "MENU"
+	_thought.visible = true
+	_request_service_once("take_order")
+
+
+func _enforce_seat_alignment() -> void:
+	var assignments: Array = table.get("seat_assignments", [])
+	var center := Vector3(table.get("table_center", global_position))
+	for index: int in mini(group_models.size(), assignments.size()):
+		var model := group_models[index]
+		var position := Vector3(assignments[index].position)
+		position.y = 0.015
+		model.global_position = position
+		var direction := position.direction_to(center)
+		model.global_rotation.y = atan2(direction.x, direction.z)
 
 
 func _stand_group_for_exit() -> void:
-	var approach := Vector3(table.get("approach_position", global_position)) if not table.is_empty() else global_position
+	var approach := Vector3(table.get("approach_position", global_position))
 	global_position = world.find_safe_agent_position(approach, self)
-	_arrange_walking_formation()
-	set_collision_enabled(true)
 	_seated = false
+	set_collision_enabled(true)
+	_arrange_waiting_formation(true)
+	_reset_position_trail()
 
 
 func _maintain_seated_pose() -> void:
-	if state_elapsed < 0.7:
+	_enforce_seat_alignment()
+	if state == "standing_to_leave" or state_elapsed < 0.7:
 		return
 	for player: AnimationPlayer in animation_players:
 		var animation_name := resolve_animation(player, "SitDown")
@@ -372,6 +587,60 @@ func _maintain_seated_pose() -> void:
 		if animation != null and (not player.is_playing() or player.current_animation_position >= animation.length - 0.04):
 			player.seek(animation.length, true)
 			player.pause()
+
+
+func _show_dish(order: Dictionary) -> void:
+	var order_id := String(order.get("id", ""))
+	if order_id.is_empty() or dish_models.has(order_id):
+		return
+	var recipe: Dictionary = DataRegistry.recipes_by_id.get(String(order.get("recipe_id", "")), {})
+	var model_path := ""
+	var steps: Array = recipe.get("steps", [])
+	for index: int in range(steps.size() - 1, -1, -1):
+		model_path = String(steps[index].get("model", ""))
+		if not model_path.is_empty():
+			break
+	if model_path.is_empty():
+		return
+	var dish := ModelFactory.instantiate_model(model_path, 0.55)
+	ModelFactory.align_visual_to_grid_origin(dish)
+	add_child(dish)
+	dish.top_level = true
+	var diner_index := clampi(int(order.get("diner_index", 0)), 0, group_size - 1)
+	var assignments: Array = table.get("seat_assignments", [])
+	var center := Vector3(table.get("table_center", global_position))
+	var seat_position := Vector3(assignments[diner_index].position) if diner_index < assignments.size() else center
+	var dish_position := center.lerp(seat_position, 0.43)
+	dish_position.y = float(table.get("table_surface_y", 1.0))
+	dish.global_position = dish_position
+	dish.global_rotation.y = atan2(center.direction_to(seat_position).x, center.direction_to(seat_position).z)
+	ModelFactory.set_shadow_casting(dish, GeometryInstance3D.SHADOW_CASTING_SETTING_OFF)
+	dish_models[order_id] = dish
+
+
+func _clear_dishes() -> void:
+	for dish: Node3D in dish_models.values():
+		if is_instance_valid(dish):
+			dish.queue_free()
+	dish_models.clear()
+
+
+func _local_order(order_id: String) -> Dictionary:
+	for order: Dictionary in orders:
+		if String(order.get("id", "")) == order_id:
+			return order
+	return {}
+
+
+func _order_is_ready_to_serve(order_id: String) -> bool:
+	if not SimulationManager.orders.has(order_id):
+		return false
+	var order: Dictionary = SimulationManager.orders[order_id]
+	return order.get("customer") == self and bool(order.get("ready", false)) and String(order.get("state", "")) == "at_pass"
+
+
+func _owns_reserved_table() -> bool:
+	return world != null and world.customer_owns_table(self, String(table.get("uid", "")))
 
 
 func _set_state(value: String, reset_elapsed: bool = true) -> void:

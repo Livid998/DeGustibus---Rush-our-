@@ -374,12 +374,18 @@ func cancel_employee_task(employee_id: String) -> void:
 	for task_id: String in service_tasks:
 		var service_task: Dictionary = service_tasks.get(task_id, {})
 		if String(service_task.get("employee_id", "")) == employee_id and String(service_task.get("state", "")) in ["reserved", "in_progress"]:
-			service_task.state = "queued" if is_instance_valid(service_task.get("customer")) else "cancelled"
+			service_task.state = "queued" if service_task_is_actionable(service_task) else "cancelled"
 			service_task.employee_id = ""
+			if service_task.state == "cancelled":
+				service_task.finished_at = GameState.service_seconds
 	task_board_changed.emit()
 
 
 func request_service(customer: Node, action: String, target: Vector3, payload: Dictionary = {}) -> Dictionary:
+	if not is_instance_valid(customer):
+		return {}
+	if customer.has_method("accepts_service_action") and not customer.accepts_service_action(action, payload):
+		return {}
 	for existing: Dictionary in service_tasks.values():
 		if existing.get("customer") == customer and String(existing.get("action", "")) == action and existing.get("payload", {}) == payload and String(existing.get("state", "")) not in ["completed", "cancelled"]:
 			return existing
@@ -408,7 +414,11 @@ func claim_service_task(employee: Dictionary, from_position: Variant = null) -> 
 	var score := -INF
 	for task_id: String in service_tasks:
 		var task: Dictionary = service_tasks.get(task_id, {})
-		if task.is_empty() or String(task.get("state", "")) != "queued" or not is_instance_valid(task.get("customer")):
+		if task.is_empty() or String(task.get("state", "")) != "queued":
+			continue
+		if not service_task_is_actionable(task):
+			task.state = "cancelled"
+			task.finished_at = GameState.service_seconds
 			continue
 		if _service_key_is_reserved(String(task.get("reservation_key", ""))):
 			continue
@@ -431,7 +441,11 @@ func begin_service_task(task_id: String) -> bool:
 	if not service_tasks.has(task_id):
 		return false
 	var task: Dictionary = service_tasks[task_id]
-	if String(task.get("state", "")) != "reserved" or not is_instance_valid(task.get("customer")):
+	if String(task.get("state", "")) != "reserved" or not service_task_is_actionable(task):
+		if String(task.get("state", "")) == "reserved":
+			task.state = "cancelled"
+			task.employee_id = ""
+			task.finished_at = GameState.service_seconds
 		return false
 	task.state = "in_progress"
 	return true
@@ -443,6 +457,12 @@ func complete_service_task(task_id: String) -> void:
 	var task: Dictionary = service_tasks[task_id]
 	if String(task.get("state", "")) not in ["reserved", "in_progress"]:
 		return
+	if not service_task_is_actionable(task):
+		task.state = "cancelled"
+		task.employee_id = ""
+		task.finished_at = GameState.service_seconds
+		task_board_changed.emit()
+		return
 	task.state = "completed"
 	task.finished_at = GameState.service_seconds
 	var employee_id := String(task.get("employee_id", ""))
@@ -450,6 +470,18 @@ func complete_service_task(task_id: String) -> void:
 		stats.employee_tasks[employee_id] = int(stats.employee_tasks.get(employee_id, 0)) + 1
 	if is_instance_valid(task.customer) and task.customer.has_method("service_completed"):
 		task.customer.service_completed(task.action, task.payload)
+	task_board_changed.emit()
+
+
+func service_task_is_actionable(task: Dictionary) -> bool:
+	if task.is_empty() or String(task.get("state", "")) in ["completed", "cancelled"]:
+		return false
+	var customer := task.get("customer") as Node
+	if customer == null or not is_instance_valid(customer) or customer.is_queued_for_deletion():
+		return false
+	if customer.has_method("accepts_service_action"):
+		return customer.accepts_service_action(String(task.get("action", "")), task.get("payload", {}))
+	return true
 
 
 func _service_key_is_reserved(key: String) -> bool:
