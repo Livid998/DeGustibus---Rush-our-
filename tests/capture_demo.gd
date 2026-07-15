@@ -36,6 +36,11 @@ func _ready() -> void:
 		await get_tree().process_frame
 	RenderingServer.force_draw()
 	_save_frame("res://artifacts/demo_statistics.png")
+	main.ui.show_screen("Impostazioni", false)
+	for _frame: int in 15:
+		await get_tree().process_frame
+	RenderingServer.force_draw()
+	_save_frame("res://artifacts/demo_settings.png")
 	main.ui.show_screen("Ristorante", false)
 	main.ui.open_builder()
 	main.ui.build_hud.current_category = "Cucina"

@@ -19,6 +19,7 @@ var reputation_label: Label
 var state_button: Button
 var clock_label: Label
 var customer_label: Label
+var speed_icon_rect: TextureRect
 var build_hud: BuildHUD
 var nav_buttons: Dictionary = {}
 var screen_title_label: Label
@@ -134,7 +135,11 @@ func refresh_screen() -> void:
 
 func make_button(text: String, callback: Callable, tone: String = "blue") -> Button:
 	var button := Button.new()
-	button.text = text
+	var display_text := text
+	if "●" in display_text:
+		button.icon = GameIcons.scaled_icon(GameIcons.currency_icon(), 24)
+		display_text = display_text.replace("●", "").strip_edges()
+	button.text = display_text
 	button.custom_minimum_size = Vector2(112, 48)
 	button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	button.tooltip_text = text
@@ -243,12 +248,20 @@ func _build_top_bar() -> void:
 	margin.add_child(row)
 	money_label = Label.new()
 	money_label.add_theme_font_override("font", GameFonts.bold())
-	money_label.custom_minimum_size.x = 118
 	money_label.add_theme_color_override("font_color", Color("f5fbf9"))
+	var money_group := HBoxContainer.new()
+	money_group.custom_minimum_size.x = 118
+	money_group.add_theme_constant_override("separation", 5)
+	money_group.add_child(_top_bar_icon(GameIcons.currency_icon()))
+	money_group.add_child(money_label)
 	reputation_label = Label.new()
 	reputation_label.add_theme_font_override("font", GameFonts.bold())
-	reputation_label.custom_minimum_size.x = 82
 	reputation_label.add_theme_color_override("font_color", Color("f5fbf9"))
+	var reputation_group := HBoxContainer.new()
+	reputation_group.custom_minimum_size.x = 82
+	reputation_group.add_theme_constant_override("separation", 5)
+	reputation_group.add_child(_top_bar_icon(GameIcons.reputation_icon()))
+	reputation_group.add_child(reputation_label)
 	state_button = make_button("CHIUSO", _toggle_restaurant, "red")
 	state_button.custom_minimum_size.x = 250
 	clock_label = Label.new()
@@ -260,13 +273,29 @@ func _build_top_bar() -> void:
 	var speed := OptionButton.new()
 	for label: String in ["1×", "2×", "4×"]:
 		speed.add_item(label)
-	speed.item_selected.connect(func(index: int): SimulationManager.set_speed([1.0, 2.0, 4.0][index]))
-	row.add_child(money_label)
-	row.add_child(reputation_label)
+	speed_icon_rect = _top_bar_icon(GameIcons.speed_icon(0))
+	speed.item_selected.connect(func(index: int):
+		SimulationManager.set_speed([1.0, 2.0, 4.0][index])
+		speed_icon_rect.texture = GameIcons.speed_icon(index)
+	)
+	row.add_child(money_group)
+	row.add_child(reputation_group)
 	row.add_child(state_button)
 	row.add_child(clock_label)
 	row.add_child(customer_label)
+	row.add_child(speed_icon_rect)
 	row.add_child(speed)
+
+
+func _top_bar_icon(texture: Texture2D) -> TextureRect:
+	var icon := TextureRect.new()
+	icon.texture = texture
+	icon.custom_minimum_size = Vector2(28, 28)
+	icon.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	icon.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	icon.texture_filter = CanvasItem.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
+	icon.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	return icon
 
 
 func _build_bottom_nav() -> void:
@@ -458,8 +487,8 @@ func _toggle_restaurant() -> void:
 func _update_top_bar() -> void:
 	if money_label == null:
 		return
-	money_label.text = "● %s" % _format_number(GameState.money)
-	reputation_label.text = "★ %.1f" % GameState.reputation
+	money_label.text = _format_number(GameState.money)
+	reputation_label.text = "%.1f" % GameState.reputation
 	var states := {"closed":"RISTORANTE CHIUSO", "open":"RISTORANTE APERTO", "closing":"IN CHIUSURA"}
 	state_button.text = states.get(GameState.restaurant_state, GameState.restaurant_state)
 	state_button.add_theme_stylebox_override("normal", _button_style("green" if GameState.restaurant_state == "open" else "yellow" if GameState.restaurant_state == "closing" else "red"))

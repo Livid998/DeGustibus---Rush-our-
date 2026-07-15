@@ -23,7 +23,7 @@ var layout: Array = []
 var deliveries: Array = []
 var purchased_preparations: Dictionary = {}
 var progress: Dictionary = {"customers_served": 0, "desserts_served": 0, "services_started": 0}
-var settings: Dictionary = {"music": true, "sound": true, "camera_zoom": 24.0}
+var settings: Dictionary = {"music": true, "sound": true, "camera_zoom": 24.0, "graphics_quality": "auto"}
 var tutorial: Dictionary = {"step": 0, "skipped": false, "complete": false}
 
 
@@ -63,7 +63,7 @@ func reset_to_defaults(emit_signals: bool = true) -> void:
 	deliveries.clear()
 	purchased_preparations.clear()
 	progress = {"customers_served": 0, "desserts_served": 0, "services_started": 0}
-	settings = {"music": true, "sound": true, "camera_zoom": 24.0}
+	settings = {"music": true, "sound": true, "camera_zoom": 24.0, "graphics_quality": "auto"}
 	tutorial = {"step": 0, "skipped": false, "complete": false}
 	if emit_signals:
 		_emit_all()

@@ -11,6 +11,7 @@ func _ready() -> void:
 func _run() -> void:
 	await get_tree().process_frame
 	_test_registry()
+	_test_graphics_profiles()
 	_test_stock_consumption()
 	_test_reorder()
 	var world := RestaurantWorld.new()
@@ -25,6 +26,7 @@ func _run() -> void:
 	_test_progression_and_menu_load(world)
 	_test_purchased_preparations()
 	_test_recipe_tasks_and_station_reservation()
+	_test_staff_scheduler_spread(world)
 	_test_service_assignment()
 	_test_price_margin()
 	_test_save_load()
@@ -76,7 +78,21 @@ func _test_registry() -> void:
 	var lock_image := GameIcons.LOCK_TEXTURE.get_image()
 	_expect(not lock_image.is_empty() and lock_image.get_pixel(0, 0).a < 0.01, "supplied lock icon has a transparent background")
 	_expect(ResourceLoader.exists("res://assets/ui/fonts/FredokaOne-Regular.ttf") and GameFonts.medium().variation_embolden < GameFonts.semibold().variation_embolden and GameFonts.semibold().variation_embolden < GameFonts.bold().variation_embolden, "Fredoka One is embedded with cartoony Medium, SemiBold and Bold hierarchy")
+	var preparation_icons := 0
+	for preparation: Dictionary in DataRegistry.preparations:
+		if not String(preparation.get("icon", "")).is_empty() and ResourceLoader.exists(String(preparation.icon)):
+			preparation_icons += 1
+	_expect(preparation_icons >= 12, "the supplied individual food pack provides dedicated icons for current market preparations")
 	_expect(DataRegistry.recipes_by_id.margherita.steps.size() >= 5, "margherita is a multi-step process")
+
+
+func _test_graphics_profiles() -> void:
+	var viewport := get_tree().root
+	WebPlatformProfile.apply_quality("ultra")
+	_expect(viewport.scaling_3d_scale >= 0.99 and viewport.msaa_3d == Viewport.MSAA_4X and WebPlatformProfile.shadows_enabled(), "maximum desktop quality enables native scale, 4x MSAA and full shadows")
+	WebPlatformProfile.apply_quality("low")
+	_expect(viewport.scaling_3d_scale < 0.7 and viewport.msaa_3d == Viewport.MSAA_DISABLED and not WebPlatformProfile.shadows_enabled(), "low quality reduces render load and disables expensive shadows")
+	WebPlatformProfile.apply_quality("auto")
 
 
 func _atlas_has_transparent_cell_corners(sheet: Texture2D, columns: int, rows: int) -> bool:
@@ -173,9 +189,13 @@ func _test_builder_and_seating(world: RestaurantWorld) -> void:
 	var layout_count := GameState.layout.size()
 	var attached_chairs := world.attached_objects(table.uid)
 	var chairs_face_table := attached_chairs.size() == 4
+	var separate_seat_anchors := true
 	for chair: PlacedObject in attached_chairs:
-		chairs_face_table = chairs_face_table and chair.rotation_steps == world.seat_rotation_for_slot(chair.attachment_slot, table.rotation_steps) and chair.position.distance_to(table.position) <= 1.5
+		chairs_face_table = chairs_face_table and chair.rotation_steps == world.seat_rotation_for_slot(chair.attachment_slot, table.rotation_steps) and chair.position.distance_to(table.position) <= 1.72
+		var assignment: Dictionary = world._seat_assignments_for_table(table).filter(func(entry: Dictionary): return String(entry.chair_uid) == chair.uid)[0]
+		separate_seat_anchors = separate_seat_anchors and absf(Vector3(assignment.chair_position).distance_to(table.position) - 1.67) < 0.02 and absf(Vector3(assignment.position).distance_to(table.position) - 1.45) < 0.02
 	_expect(chairs_face_table, "chairs occupy four explicit close-fit slots and face their table")
+	_expect(separate_seat_anchors, "chairs move outward while the seated customer anchor remains fixed at the original table distance")
 	var sample_chair := attached_chairs[0]
 	var chair_screen := world.camera_rig.camera.unproject_position(sample_chair.global_position + Vector3.UP * 0.9)
 	_expect(build._object_from_screen(chair_screen) == sample_chair, "ray selection prioritizes an attached chair over the overlapping table support")
@@ -214,7 +234,7 @@ func _test_builder_and_seating(world: RestaurantWorld) -> void:
 	var moved_chairs := world.attached_objects(table.uid)
 	var chairs_followed := moved_chairs.size() == 4
 	for chair: PlacedObject in moved_chairs:
-		chairs_followed = chairs_followed and chair.support_uid == table.uid and chair.position.distance_to(table.position) <= 1.5
+		chairs_followed = chairs_followed and chair.support_uid == table.uid and chair.position.distance_to(table.position) <= 1.72
 	_expect(GameState.layout.size() == layout_count and world.object_at_cell(Vector2i(6, 3)) == table and chairs_followed, "moving furniture preserves its UID, occupancy and attached chairs")
 	var second_table := world.placed_objects.get("table_2") as PlacedObject
 	_expect(world._seat_positions_for_table(second_table).size() == 4, "table capacity is derived from four real adjacent chairs")
@@ -517,6 +537,34 @@ func _test_recipe_tasks_and_station_reservation() -> void:
 		if SimulationManager.tasks[task_id].state == "completed":
 			duplicate_count += 1
 	_expect(duplicate_count == order.task_ids.size(), "each work task completes once")
+
+
+func _test_staff_scheduler_spread(world: RestaurantWorld) -> void:
+	var original_stations: Dictionary = SimulationManager.stations
+	var original_tasks: Dictionary = SimulationManager.tasks
+	var original_orders: Dictionary = SimulationManager.orders
+	SimulationManager.stations = {}
+	SimulationManager.tasks = {}
+	SimulationManager.orders = {}
+	var first_station := Node3D.new()
+	var second_station := Node3D.new()
+	world.add_child(first_station)
+	world.add_child(second_station)
+	first_station.global_position = Vector3(-2, 0, 2)
+	second_station.global_position = Vector3(2, 0, 2)
+	SimulationManager.register_station("spread_test", first_station, 2)
+	SimulationManager.register_station("spread_test", second_station, 2)
+	for index: int in 2:
+		var task_id := "spread_%d" % index
+		SimulationManager.tasks[task_id] = {"id":task_id, "order_id":"", "state":"queued", "station":"spread_test", "priority":1, "wait_age":0.0}
+	var first_claim := SimulationManager.claim_kitchen_task({"id":"spread_cook_1", "role":"cook", "skills":{"spread_test":0.8}})
+	var second_claim := SimulationManager.claim_kitchen_task({"id":"spread_cook_2", "role":"cook", "skills":{"spread_test":0.8}})
+	_expect(not first_claim.is_empty() and not second_claim.is_empty() and first_claim.station_runtime.node != second_claim.station_runtime.node, "cooks choose an empty workstation instance before crowding an already occupied compatible one")
+	SimulationManager.stations = original_stations
+	SimulationManager.tasks = original_tasks
+	SimulationManager.orders = original_orders
+	first_station.queue_free()
+	second_station.queue_free()
 
 
 func _test_purchased_preparations() -> void:

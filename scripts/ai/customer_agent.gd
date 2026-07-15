@@ -27,6 +27,7 @@ var _take_order_committed := false
 var _payment_committed := false
 var _service_request_ids: Dictionary = {}
 var _position_trail: Array[Vector3] = []
+var _seated_pose_locked := false
 
 const CUSTOMER_APPEARANCES: Array[String] = [
 	"Casual_Male", "Casual_Female", "Casual2_Male", "Casual2_Female", "Casual3_Male", "Casual3_Female",
@@ -244,6 +245,9 @@ func _find_table() -> void:
 		return
 	table_route_failures = 0
 	_set_state("walking_to_table")
+	# A customer with a reserved chair has right of way over staff in the aisle.
+	# World/furniture collisions remain active; only temporary agent blocking is soft.
+	collision_mask = 1
 	_thought.visible = false
 	if not move_to(Vector3(table.approach_position)):
 		_handle_table_route_failure()
@@ -288,6 +292,7 @@ func _retry_reserved_table_route() -> void:
 
 func _return_to_waiting_area() -> void:
 	world.release_table(self)
+	collision_mask = 3
 	table = {}
 	table_route_failures = 0
 	_thought.text = "ATTESA"
@@ -300,6 +305,7 @@ func _return_to_waiting_area() -> void:
 
 
 func _recover_at_waiting_position() -> void:
+	collision_mask = 3
 	world.release_waiting_position(self)
 	var waiting_target := world.waiting_position(self)
 	global_position = world.find_safe_agent_position(waiting_target, self)
@@ -392,6 +398,7 @@ func _start_exit_walk() -> void:
 	_set_state("leaving")
 	departure_failures = 0
 	set_collision_enabled(true)
+	collision_mask = 3
 	_reset_position_trail()
 	if not move_to(world.cell_to_world(world.entrance_cell)):
 		departure_failures = 1
@@ -544,6 +551,7 @@ func _advance_seating(delta: float) -> bool:
 func _complete_seating() -> void:
 	global_position = Vector3(table.table_center)
 	_seated = true
+	_seated_pose_locked = false
 	_enforce_seat_alignment()
 	play_animation("SitDown")
 	_set_state("waiting_order")
@@ -561,7 +569,12 @@ func _enforce_seat_alignment() -> void:
 		position.y = 0.015
 		model.global_position = position
 		var direction := position.direction_to(center)
-		model.global_rotation.y = atan2(direction.x, direction.z)
+		var facing := atan2(direction.x, direction.z)
+		# While there is no food, diners stay in a settled seated pose and make
+		# small conversational turns. No eating/pick-up loop is played without a dish.
+		if state in ["waiting_order", "waiting_food"] and group_size > 1:
+			facing += sin(state_elapsed * 0.72 + float(index) * 1.9) * 0.105
+		model.global_rotation.y = facing
 
 
 func _stand_group_for_exit() -> void:
@@ -577,16 +590,21 @@ func _maintain_seated_pose() -> void:
 	_enforce_seat_alignment()
 	if state == "standing_to_leave" or state_elapsed < 0.7:
 		return
+	var all_locked := true
 	for player: AnimationPlayer in animation_players:
 		var animation_name := resolve_animation(player, "SitDown")
 		if animation_name.is_empty():
 			continue
-		if player.current_animation != animation_name:
+		if not _seated_pose_locked and player.current_animation != animation_name:
 			player.play(animation_name)
 		var animation := player.get_animation(animation_name)
 		if animation != null and (not player.is_playing() or player.current_animation_position >= animation.length - 0.04):
 			player.seek(animation.length, true)
 			player.pause()
+		elif not _seated_pose_locked:
+			all_locked = false
+	if all_locked:
+		_seated_pose_locked = true
 
 
 func _show_dish(order: Dictionary) -> void:

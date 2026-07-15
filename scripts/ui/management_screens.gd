@@ -257,7 +257,7 @@ static func _album(content: VBoxContainer, ui: RestaurantUI) -> void:
 	banner_row.add_child(progress)
 	content.add_child(banner)
 	var hint := Label.new()
-	hint.text = "Collezione permanente · ★ = rarità · le scorte possono finire, gli ingredienti sbloccati restano nell'album."
+	hint.text = "Collezione permanente · le stelle indicano la rarità · le scorte possono finire, gli ingredienti sbloccati restano nell'album."
 	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	hint.add_theme_color_override("font_color", Color("52686b"))
 	content.add_child(hint)
@@ -347,13 +347,9 @@ static func _album(content: VBoxContainer, ui: RestaurantUI) -> void:
 			lock.tooltip_text = String(ingredient.get("unlock", "Da scoprire"))
 			lock.mouse_filter = Control.MOUSE_FILTER_IGNORE
 			visual.add_child(lock)
-		var stars := Label.new()
-		stars.add_theme_font_override("font", GameFonts.bold())
 		var rarity := int(ingredient.get("rarity", 1))
-		stars.text = "★".repeat(rarity) + "☆".repeat(5 - rarity)
-		stars.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		stars.add_theme_font_size_override("font_size", 17)
-		stars.add_theme_color_override("font_color", Color("c5444f"))
+		var stars := _new_icon(GameIcons.rarity_icon(rarity), Vector2(132, 24))
+		stars.tooltip_text = "Rarità %d/5" % rarity
 		box.add_child(stars)
 		var unlock_cost := int(ingredient.get("unlock_cost", 0))
 		if not is_unlocked and unlock_cost > 0:
@@ -455,7 +451,7 @@ static func _compatible_recipe_count(ingredient_id: String) -> int:
 static func _album_detail_text(ingredient: Dictionary, entry: Dictionary) -> String:
 	var rarity := int(ingredient.get("rarity", 1))
 	if not bool(entry.unlocked):
-		return "INGREDIENTE BLOCCATO · %s\nRarità %s · Fonte: %s" % [ingredient.category, "★".repeat(rarity) + "☆".repeat(5 - rarity), ingredient.get("unlock", "Da scoprire")]
+		return "INGREDIENTE BLOCCATO · %s\nRarità %d/5 · Fonte: %s" % [ingredient.category, rarity, ingredient.get("unlock", "Da scoprire")]
 	var recipes: Array[String] = []
 	for recipe: Dictionary in DataRegistry.recipes:
 		for step: Dictionary in recipe.steps:
@@ -466,7 +462,7 @@ static func _album_detail_text(ingredient: Dictionary, entry: Dictionary) -> Str
 	for preparation: Dictionary in DataRegistry.preparations:
 		if preparation.get("inputs", {}).has(ingredient.id):
 			preparations.append(String(preparation.name))
-	return "%s · %s · stock %d · rarità %s\nRicette: %s · Preparazioni: %s · Fonte: %s" % [ingredient.name, ingredient.category, int(entry.amount), "★".repeat(rarity) + "☆".repeat(5 - rarity), ", ".join(recipes) if not recipes.is_empty() else "nessuna", ", ".join(preparations) if not preparations.is_empty() else "nessuna", ingredient.get("unlock", "Sbloccato inizialmente")]
+	return "%s · %s · stock %d · rarità %d/5\nRicette: %s · Preparazioni: %s · Fonte: %s" % [ingredient.name, ingredient.category, int(entry.amount), rarity, ", ".join(recipes) if not recipes.is_empty() else "nessuna", ", ".join(preparations) if not preparations.is_empty() else "nessuna", ingredient.get("unlock", "Sbloccato inizialmente")]
 
 
 static func _missing_ingredients(recipe: Dictionary) -> Array[String]:
@@ -589,7 +585,12 @@ static func _market(content: VBoxContainer, ui: RestaurantUI) -> void:
 	for offer: Dictionary in ui.market_provider.get_offers():
 		var card := ui.make_card()
 		var row := HBoxContainer.new()
+		row.add_theme_constant_override("separation", 10)
 		card.add_child(row)
+		var offered_preparation: Dictionary = DataRegistry.preparations_by_id.get(String(offer.get("preparation_id", "")), {})
+		var offer_icon := _new_icon(GameIcons.preparation_icon(offered_preparation), Vector2(58, 58))
+		offer_icon.tooltip_text = String(offer.name)
+		row.add_child(offer_icon)
 		var label := Label.new()
 		label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		label.text = "%s\n%s ×%d · Qualità %d/3 · %.1f cad. · %ds" % [offer.seller, offer.name, int(offer.amount), int(offer.quality), float(offer.unit_price), int(offer.remaining)]
@@ -622,6 +623,10 @@ static func _market(content: VBoxContainer, ui: RestaurantUI) -> void:
 		for prep_id_value: String in shop.ids:
 			var prep: Dictionary = DataRegistry.preparations_by_id[prep_id_value]
 			var prep_row := HBoxContainer.new()
+			prep_row.add_theme_constant_override("separation", 8)
+			var prep_icon := _new_icon(GameIcons.preparation_icon(prep), Vector2(42, 42))
+			prep_icon.tooltip_text = String(prep.name)
+			prep_row.add_child(prep_icon)
 			var prep_label := Label.new()
 			prep_label.text = "%s · %.1f ● · disponibili %d" % [prep.name, float(prep.market_price), int(GameState.purchased_preparations.get(prep_id_value, 0))]
 			prep_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -761,6 +766,37 @@ static func _settings(content: VBoxContainer, ui: RestaurantUI) -> void:
 	var general_box := VBoxContainer.new()
 	general_box.add_theme_constant_override("separation", 12)
 	general.add_child(general_box)
+	var quality_title := Label.new()
+	quality_title.text = "QUALITÀ GRAFICA"
+	quality_title.add_theme_font_override("font", GameFonts.bold())
+	general_box.add_child(quality_title)
+	var quality := OptionButton.new()
+	var quality_presets := [
+		{"id":"auto", "name":"Automatica (consigliata)"},
+		{"id":"low", "name":"Bassa"},
+		{"id":"balanced", "name":"Bilanciata"},
+		{"id":"high", "name":"Alta"},
+		{"id":"ultra", "name":"Massima · PC"}
+	]
+	var selected_quality := String(GameState.settings.get("graphics_quality", "auto"))
+	for index: int in quality_presets.size():
+		quality.add_item(String(quality_presets[index].name))
+		quality.set_item_metadata(index, String(quality_presets[index].id))
+		if String(quality_presets[index].id) == selected_quality:
+			quality.select(index)
+	general_box.add_child(quality)
+	var quality_detail := Label.new()
+	quality_detail.text = "Scala 3D, antialiasing, ombre e limite FPS. Su iPad usa Automatica o Bilanciata; Massima è pensata per PC."
+	quality_detail.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	quality_detail.add_theme_color_override("font_color", Color("52686b"))
+	general_box.add_child(quality_detail)
+	quality.item_selected.connect(func(index: int):
+		var preset := String(quality.get_item_metadata(index))
+		GameState.settings.graphics_quality = preset
+		WebPlatformProfile.apply_quality(preset)
+		SaveManager.save_game()
+		ui.show_toast("Qualità grafica: %s" % quality.get_item_text(index), "info")
+	)
 	var sound := CheckBox.new()
 	sound.text = "Effetti sonori"
 	sound.button_pressed = bool(GameState.settings.get("sound", true))

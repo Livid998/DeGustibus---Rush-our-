@@ -1,11 +1,15 @@
 extends Node
 
+signal quality_changed(preset: String)
+
 ## Profilo conservativo per i browser mobili, in particolare WebKit su iPad.
 ## Riduce i render target e il carico continuo senza cambiare la build nativa.
 
 var mobile_browser := false
 var safe_mode := false
+var current_quality := "auto"
 var _quality_ceiling := 1.0
+var _adaptive_quality := true
 var _sample_time := 0.0
 var _sample_frames := 0
 var _slow_samples := 0
@@ -13,26 +17,56 @@ var _fast_samples := 0
 
 
 func _ready() -> void:
-	if not OS.has_feature("web"):
-		return
-	mobile_browser = _query_browser_flag("window.degustibusMobileProfile === true")
-	safe_mode = _query_browser_flag("window.degustibusSafeMode === true")
+	if OS.has_feature("web"):
+		mobile_browser = _query_browser_flag("window.degustibusMobileProfile === true")
+		safe_mode = _query_browser_flag("window.degustibusSafeMode === true")
+	apply_quality("auto")
+
+
+func apply_quality(preset: String) -> void:
+	if preset not in ["auto", "low", "balanced", "high", "ultra"]:
+		preset = "auto"
+	current_quality = preset
+	_adaptive_quality = preset == "auto" and OS.has_feature("web")
 	var viewport := get_tree().root
 	viewport.msaa_3d = Viewport.MSAA_DISABLED
 	viewport.screen_space_aa = Viewport.SCREEN_SPACE_AA_DISABLED
 	viewport.use_debanding = false
-	if mobile_browser or safe_mode:
-		_quality_ceiling = 0.55 if safe_mode else 0.68
-		viewport.scaling_3d_scale = _quality_ceiling
-		Engine.max_fps = 24 if safe_mode else 30
-	else:
-		_quality_ceiling = 0.85
-		viewport.scaling_3d_scale = _quality_ceiling
-		Engine.max_fps = 60
+	match preset:
+		"low":
+			_quality_ceiling = 0.62 if not OS.has_feature("web") else 0.54
+			Engine.max_fps = 30
+		"balanced":
+			_quality_ceiling = 0.82 if not OS.has_feature("web") else 0.68
+			viewport.screen_space_aa = Viewport.SCREEN_SPACE_AA_FXAA
+			Engine.max_fps = 60 if not mobile_browser else 30
+		"high":
+			_quality_ceiling = 1.0 if not OS.has_feature("web") else 0.82
+			viewport.msaa_3d = Viewport.MSAA_2X
+			viewport.use_debanding = true
+			Engine.max_fps = 90 if not OS.has_feature("web") else 60
+		"ultra":
+			_quality_ceiling = 1.0 if not OS.has_feature("web") else 0.9
+			viewport.msaa_3d = Viewport.MSAA_4X if not OS.has_feature("web") else Viewport.MSAA_2X
+			viewport.use_debanding = true
+			Engine.max_fps = 120 if not OS.has_feature("web") else 60
+		_:
+			if OS.has_feature("web"):
+				_quality_ceiling = 0.55 if safe_mode else 0.68 if mobile_browser else 0.85
+				Engine.max_fps = 24 if safe_mode else 30 if mobile_browser else 60
+			else:
+				_quality_ceiling = 1.0
+				viewport.msaa_3d = Viewport.MSAA_2X
+				viewport.use_debanding = true
+				Engine.max_fps = 120
+	viewport.scaling_3d_scale = _quality_ceiling
+	_slow_samples = 0
+	_fast_samples = 0
+	quality_changed.emit(current_quality)
 
 
 func _process(delta: float) -> void:
-	if not OS.has_feature("web") or delta > 0.25:
+	if not _adaptive_quality or delta > 0.25:
 		return
 	_sample_time += delta
 	_sample_frames += 1
@@ -62,7 +96,15 @@ func _process(delta: float) -> void:
 
 
 func low_memory_mode() -> bool:
-	return OS.has_feature("web") and (mobile_browser or safe_mode)
+	return current_quality == "low" or (OS.has_feature("web") and (mobile_browser or safe_mode))
+
+
+func shadows_enabled() -> bool:
+	return current_quality != "low" and not (OS.has_feature("web") and safe_mode)
+
+
+func shadow_distance() -> float:
+	return {"low": 0.0, "balanced": 38.0, "high": 58.0, "ultra": 72.0}.get(current_quality, 55.0)
 
 
 func _query_browser_flag(expression: String) -> bool:

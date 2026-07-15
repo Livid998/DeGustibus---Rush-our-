@@ -261,6 +261,7 @@ func claim_kitchen_task(employee: Dictionary, from_position: Variant = null) -> 
 	var best_runtime: Dictionary = {}
 	var best_slot := -1
 	var best_position := Vector3.ZERO
+	var preferred_station := _effective_preferred_station(employee)
 	for task_id: String in tasks:
 		var task: Dictionary = tasks.get(task_id, {})
 		if task.is_empty() or String(task.get("state", "")) != "queued":
@@ -276,9 +277,14 @@ func claim_kitchen_task(employee: Dictionary, from_position: Variant = null) -> 
 			if from_position is Vector3 and world != null and world.has_method("find_path") and world.find_path(Vector3(from_position), interaction_position).is_empty():
 				continue
 			var skill := float(employee.get("skills", {}).get(task.station, 0.55))
-			var score := float(task.priority) * 100.0 + float(task.get("wait_age", 0.0)) * 2.0 + skill * 20.0
-			if String(employee.get("preferred_station", "")) == String(task.station):
-				score += 35.0
+			var worker_capacity := maxf(float(runtime.get("worker_capacity", runtime.get("capacity", 1))), 1.0)
+			var occupancy := float(runtime.get("busy", 0)) / worker_capacity
+			var score := float(task.priority) * 100.0 + float(task.get("wait_age", 0.0)) * 2.2 + skill * 28.0
+			# Prefer a physically empty instance over crowding the first compatible
+			# workstation. Skills guide the brigade but never forbid useful fallback work.
+			score += 24.0 if int(runtime.get("busy", 0)) == 0 else -occupancy * 72.0
+			if preferred_station == String(task.station):
+				score += 30.0
 			if from_position is Vector3:
 				score -= Vector3(from_position).distance_to(interaction_position) * 1.5
 			if score > best_score:
@@ -298,6 +304,20 @@ func claim_kitchen_task(employee: Dictionary, from_position: Variant = null) -> 
 	best.station_runtime.busy = best.station_runtime.reservations.size()
 	task_board_changed.emit()
 	return best
+
+
+func _effective_preferred_station(employee: Dictionary) -> String:
+	var explicit := String(employee.get("preferred_station", ""))
+	if not explicit.is_empty():
+		return explicit
+	var best_station := ""
+	var best_skill := -INF
+	for station_id: String in employee.get("skills", {}):
+		var skill := float(employee.skills[station_id])
+		if skill > best_skill:
+			best_skill = skill
+			best_station = station_id
+	return best_station
 
 
 func begin_kitchen_task(task_id: String) -> bool:

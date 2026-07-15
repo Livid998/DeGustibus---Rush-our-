@@ -48,6 +48,8 @@ func _ready() -> void:
 	load_layout()
 	spawn_staff()
 	SimulationManager.bind_world(self)
+	if not WebPlatformProfile.quality_changed.is_connected(apply_graphics_quality):
+		WebPlatformProfile.quality_changed.connect(apply_graphics_quality)
 
 
 func _process(delta: float) -> void:
@@ -148,9 +150,16 @@ func _create_environment() -> void:
 	sun.rotation_degrees = Vector3(-58, -35, 0)
 	sun.light_color = Color("fff7e8")
 	sun.light_energy = 0.84
-	sun.shadow_enabled = not WebPlatformProfile.low_memory_mode()
-	sun.directional_shadow_max_distance = 55.0
+	sun.shadow_enabled = WebPlatformProfile.shadows_enabled()
+	sun.directional_shadow_max_distance = WebPlatformProfile.shadow_distance()
 	add_child(sun)
+
+
+func apply_graphics_quality(_preset: String = "auto") -> void:
+	var sun := get_node_or_null("Sun") as DirectionalLight3D
+	if sun != null:
+		sun.shadow_enabled = WebPlatformProfile.shadows_enabled()
+		sun.directional_shadow_max_distance = WebPlatformProfile.shadow_distance()
 
 
 func _create_grid() -> void:
@@ -1015,6 +1024,8 @@ func can_agent_step(agent: AnimatedAgent, from_position: Vector3, to_position: V
 	for other: AnimatedAgent in navigation_agents:
 		if other == agent or not is_instance_valid(other) or other.is_queued_for_deletion() or not other.is_collision_enabled():
 			continue
+		if agent is CustomerAgent and other is EmployeeAgent and String(agent.get("state")) in ["walking_to_table", "retrying_table_route", "seating"]:
+			continue
 		var minimum := agent.agent_radius + other.agent_radius + 0.04
 		var current_distance := Vector2(from_position.x, from_position.z).distance_to(Vector2(other.global_position.x, other.global_position.z))
 		var candidate_distance := Vector2(to_position.x, to_position.z).distance_to(Vector2(other.global_position.x, other.global_position.z))
@@ -1052,6 +1063,8 @@ func compute_agent_velocity(agent: AnimatedAgent, desired_velocity: Vector3) -> 
 		if distance > separation * 3.2:
 			continue
 		var away := offset.normalized() if distance > 0.01 else Vector3.RIGHT.rotated(Vector3.UP, float(agent.get_instance_id() % 4) * PI * 0.5)
+		if agent is EmployeeAgent and other is CustomerAgent and String(other.get("state")) in ["walking_to_table", "retrying_table_route", "seating"]:
+			result += away * agent.movement_speed * 1.4
 		if distance < separation * 1.35:
 			result += away * agent.movement_speed * (separation * 1.35 - distance) / maxf(separation, 0.01) * 1.8
 		var desired_direction := desired_velocity.normalized()
@@ -1279,10 +1292,14 @@ func _seat_assignments_for_table(table_object: PlacedObject) -> Array[Dictionary
 		candidates.append(object)
 	candidates.sort_custom(func(a: PlacedObject, b: PlacedObject): return a.attachment_slot < b.attachment_slot)
 	for chair: PlacedObject in candidates:
+		var occupant_position := chair.global_position
+		var toward_table := chair.global_position.direction_to(table_object.global_position)
+		occupant_position += toward_table * float(table_object.definition.get("occupant_inset", 0.0))
 		result.append({
 			"chair_uid": chair.uid,
 			"slot": chair.attachment_slot,
-			"position": chair.global_position,
+			"chair_position": chair.global_position,
+			"position": occupant_position,
 			"rotation": chair.rotation.y
 		})
 	return result

@@ -7,6 +7,7 @@ var ui: RestaurantUI
 func _ready() -> void:
 	process_mode = Node.PROCESS_MODE_ALWAYS
 	SaveManager.load_game()
+	WebPlatformProfile.apply_quality(String(GameState.settings.get("graphics_quality", "auto")))
 	world = RestaurantWorld.new()
 	add_child(world)
 	ui = RestaurantUI.new()
@@ -20,4 +21,3 @@ func _notification(what: int) -> void:
 	if what == NOTIFICATION_WM_CLOSE_REQUEST:
 		SaveManager.save_game()
 		get_tree().quit()
-
