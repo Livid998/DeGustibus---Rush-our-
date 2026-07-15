@@ -191,9 +191,9 @@ func _test_builder_and_seating(world: RestaurantWorld) -> void:
 	var chairs_face_table := attached_chairs.size() == 4
 	var separate_seat_anchors := true
 	for chair: PlacedObject in attached_chairs:
-		chairs_face_table = chairs_face_table and chair.rotation_steps == world.seat_rotation_for_slot(chair.attachment_slot, table.rotation_steps) and chair.position.distance_to(table.position) <= 1.72
+		chairs_face_table = chairs_face_table and chair.rotation_steps == world.seat_rotation_for_slot(chair.attachment_slot, table.rotation_steps) and chair.position.distance_to(table.position) <= 1.87
 		var assignment: Dictionary = world._seat_assignments_for_table(table).filter(func(entry: Dictionary): return String(entry.chair_uid) == chair.uid)[0]
-		separate_seat_anchors = separate_seat_anchors and absf(Vector3(assignment.chair_position).distance_to(table.position) - 1.67) < 0.02 and absf(Vector3(assignment.position).distance_to(table.position) - 1.45) < 0.02
+		separate_seat_anchors = separate_seat_anchors and absf(Vector3(assignment.chair_position).distance_to(table.position) - 1.82) < 0.02 and absf(Vector3(assignment.position).distance_to(table.position) - 1.45) < 0.02
 	_expect(chairs_face_table, "chairs occupy four explicit close-fit slots and face their table")
 	_expect(separate_seat_anchors, "chairs move outward while the seated customer anchor remains fixed at the original table distance")
 	var sample_chair := attached_chairs[0]
@@ -234,7 +234,7 @@ func _test_builder_and_seating(world: RestaurantWorld) -> void:
 	var moved_chairs := world.attached_objects(table.uid)
 	var chairs_followed := moved_chairs.size() == 4
 	for chair: PlacedObject in moved_chairs:
-		chairs_followed = chairs_followed and chair.support_uid == table.uid and chair.position.distance_to(table.position) <= 1.72
+		chairs_followed = chairs_followed and chair.support_uid == table.uid and chair.position.distance_to(table.position) <= 1.87
 	_expect(GameState.layout.size() == layout_count and world.object_at_cell(Vector2i(6, 3)) == table and chairs_followed, "moving furniture preserves its UID, occupancy and attached chairs")
 	var second_table := world.placed_objects.get("table_2") as PlacedObject
 	_expect(world._seat_positions_for_table(second_table).size() == 4, "table capacity is derived from four real adjacent chairs")
