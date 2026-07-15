@@ -3,3 +3,4 @@
 *.bak
 save_debug/
 *.log
+/builds/

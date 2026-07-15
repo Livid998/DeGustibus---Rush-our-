@@ -9,7 +9,7 @@ signal employees_changed
 signal layout_changed
 signal toast_requested(message: String, tone: String)
 
-const SAVE_VERSION := 5
+const SAVE_VERSION := 7
 
 var money: int = 10000
 var reputation: float = 1.0
@@ -73,29 +73,37 @@ func _default_layout() -> Array:
 	var result := [
 		{"uid":"door_1","item":"door","cell":[8,0],"rotation":0},
 		{"uid":"table_1","item":"table_medium","cell":[3,3],"rotation":0},
-		{"uid":"chair_1","item":"chair","cell":[2,3],"rotation":1},
-		{"uid":"chair_2","item":"chair","cell":[5,3],"rotation":3},
-		{"uid":"chair_5","item":"chair","cell":[3,2],"rotation":2},
-		{"uid":"chair_6","item":"chair","cell":[4,5],"rotation":0},
+		{"uid":"chair_1","item":"chair","cell":[3,3],"rotation":3,"support_uid":"table_1","attachment_slot":1},
+		{"uid":"chair_2","item":"chair","cell":[3,3],"rotation":1,"support_uid":"table_1","attachment_slot":3},
+		{"uid":"chair_5","item":"chair","cell":[3,3],"rotation":0,"support_uid":"table_1","attachment_slot":0},
+		{"uid":"chair_6","item":"chair","cell":[3,3],"rotation":2,"support_uid":"table_1","attachment_slot":2},
 		{"uid":"table_2","item":"table_cloth","cell":[10,3],"rotation":0},
-		{"uid":"chair_3","item":"chair","cell":[9,3],"rotation":1},
-		{"uid":"chair_4","item":"chair","cell":[12,3],"rotation":3},
-		{"uid":"chair_7","item":"chair","cell":[10,2],"rotation":2},
-		{"uid":"chair_8","item":"chair","cell":[11,5],"rotation":0},
+		{"uid":"chair_3","item":"chair","cell":[10,3],"rotation":3,"support_uid":"table_2","attachment_slot":1},
+		{"uid":"chair_4","item":"chair","cell":[10,3],"rotation":1,"support_uid":"table_2","attachment_slot":3},
+		{"uid":"chair_7","item":"chair","cell":[10,3],"rotation":0,"support_uid":"table_2","attachment_slot":0},
+		{"uid":"chair_8","item":"chair","cell":[10,3],"rotation":2,"support_uid":"table_2","attachment_slot":2},
 		{"uid":"fridge_1","item":"fridge","cell":[2,9],"rotation":0},
-		{"uid":"storage_1","item":"storage","cell":[4,9],"rotation":0},
+		{"uid":"storage_1","item":"storage","cell":[4,8],"rotation":0,"support_uid":"wall_divider_4","attachment_slot":0},
 		{"uid":"prep_1","item":"prep_counter","cell":[6,9],"rotation":0},
-		{"uid":"cut_1","item":"cutting_board","cell":[9,9],"rotation":0},
-		{"uid":"cut_2","item":"cutting_board","cell":[10,9],"rotation":0},
+		{"uid":"prep_bowl_1","item":"prep_bowl","cell":[6,9],"rotation":0,"support_uid":"prep_1","attachment_slot":0},
+		{"uid":"support_cut_1","item":"prep_counter","cell":[9,9],"rotation":0},
+		{"uid":"cut_1","item":"cutting_board","cell":[9,9],"rotation":0,"support_uid":"support_cut_1","attachment_slot":0},
+		{"uid":"support_cut_2","item":"prep_counter","cell":[14,9],"rotation":0},
+		{"uid":"cut_2","item":"cutting_board","cell":[14,9],"rotation":0,"support_uid":"support_cut_2","attachment_slot":0},
 		{"uid":"stove_1","item":"stove","cell":[11,9],"rotation":0},
 		{"uid":"multi_1","item":"multi_stove","cell":[13,9],"rotation":0},
-		{"uid":"pizza_1","item":"pizza_oven","cell":[2,12],"rotation":2},
-		{"uid":"oven_1","item":"oven","cell":[5,12],"rotation":2},
+		{"uid":"support_pizza_1","item":"prep_counter","cell":[2,12],"rotation":2},
+		{"uid":"pizza_1","item":"pizza_oven","cell":[2,12],"rotation":2,"support_uid":"support_pizza_1","attachment_slot":0},
+		{"uid":"support_oven_1","item":"worktable","cell":[5,12],"rotation":2},
+		{"uid":"oven_1","item":"oven","cell":[5,12],"rotation":2,"support_uid":"support_oven_1","attachment_slot":0},
 		{"uid":"sink_1","item":"sink","cell":[7,12],"rotation":2},
-		{"uid":"rack_1","item":"dish_rack","cell":[9,12],"rotation":2},
+		{"uid":"support_rack_1","item":"worktable","cell":[9,12],"rotation":2},
+		{"uid":"rack_1","item":"dish_rack","cell":[9,12],"rotation":2,"support_uid":"support_rack_1","attachment_slot":0},
 		{"uid":"pass_1","item":"pass","cell":[11,12],"rotation":2},
+		{"uid":"pass_tray_1","item":"pass_tray","cell":[11,12],"rotation":2,"support_uid":"pass_1","attachment_slot":0},
 		{"uid":"dessert_1","item":"dessert","cell":[14,12],"rotation":2},
-		{"uid":"dough_1","item":"dough","cell":[16,12],"rotation":2},
+		{"uid":"support_dough_1","item":"worktable","cell":[16,12],"rotation":2},
+		{"uid":"dough_1","item":"dough","cell":[16,12],"rotation":2,"support_uid":"support_dough_1","attachment_slot":0},
 		{"uid":"plant_1","item":"plant","cell":[15,3],"rotation":0}
 	]
 	result.append_array(_initial_wall_records())
@@ -261,6 +269,10 @@ func deserialize(data: Dictionary) -> void:
 		_migrate_kitchen_capacity_v4()
 	if loaded_version < 5:
 		_migrate_edge_walls_v5()
+	if loaded_version < 6:
+		_migrate_attachments_v6()
+	if loaded_version < 7:
+		_migrate_attachment_integrity_v7()
 	settings.merge(data.get("settings", {}), true)
 	tutorial.merge(data.get("tutorial", {}), true)
 	purchased_preparations.merge(data.get("purchased_preparations", {}), true)
@@ -320,6 +332,235 @@ func _migrate_edge_walls_v5() -> void:
 				has_divider_corner = true
 	if not has_divider_corner:
 		layout.append({"uid":"wall_divider_0", "item":"wall", "cell":[0, 8], "rotation":0})
+
+
+func _migrate_attachments_v6() -> void:
+	var records_by_uid: Dictionary = {}
+	var tables: Array[Dictionary] = []
+	var walls: Array[Dictionary] = []
+	for record: Dictionary in layout:
+		records_by_uid[String(record.get("uid", ""))] = record
+		var item_id := String(record.get("item", ""))
+		if item_id.begins_with("table"):
+			tables.append(record)
+		elif item_id == "wall":
+			walls.append(record)
+	var additions: Array[Dictionary] = []
+	for record: Dictionary in layout:
+		if not String(record.get("support_uid", "")).is_empty():
+			continue
+		var item_id := String(record.get("item", ""))
+		var cell_data: Array = record.get("cell", [0, 0])
+		var cell := Vector2(int(cell_data[0]), int(cell_data[1]))
+		if item_id in ["chair", "stool"]:
+			var best_table: Dictionary = {}
+			var best_distance := INF
+			for table: Dictionary in tables:
+				var table_cell_data: Array = table.get("cell", [0, 0])
+				var table_cell := Vector2(int(table_cell_data[0]), int(table_cell_data[1]))
+				var table_definition: Dictionary = DataRegistry.build_by_id.get(String(table.get("item", "")), {})
+				var raw: Array = table_definition.get("footprint", [1, 1])
+				var size := Vector2(int(raw[0]), int(raw[1]))
+				if int(table.get("rotation", 0)) % 2 == 1:
+					size = Vector2(size.y, size.x)
+				var center := table_cell + (size - Vector2.ONE) * 0.5
+				var distance := cell.distance_to(center)
+				if distance < best_distance:
+					best_distance = distance
+					best_table = table
+			if not best_table.is_empty() and best_distance <= 3.0:
+				var table_cell_data: Array = best_table.get("cell", [0, 0])
+				var table_cell := Vector2(int(table_cell_data[0]), int(table_cell_data[1]))
+				var definition: Dictionary = DataRegistry.build_by_id.get(String(best_table.get("item", "")), {})
+				var raw: Array = definition.get("footprint", [1, 1])
+				var size := Vector2(int(raw[0]), int(raw[1]))
+				if int(best_table.get("rotation", 0)) % 2 == 1:
+					size = Vector2(size.y, size.x)
+				var delta := cell - (table_cell + (size - Vector2.ONE) * 0.5)
+				var local_delta := delta.rotated(float(int(best_table.get("rotation", 0))) * PI * 0.5)
+				var slot := (1 if local_delta.x < 0.0 else 3) if absf(local_delta.x) > absf(local_delta.y) else (0 if local_delta.y < 0.0 else 2)
+				record.support_uid = String(best_table.uid)
+				record.attachment_slot = slot
+				record.cell = best_table.cell.duplicate()
+				record.rotation = posmod([0, 3, 2, 1][slot] + int(best_table.get("rotation", 0)), 4)
+		elif item_id in ["cutting_board", "dish_rack", "dough", "oven", "pizza_oven"]:
+			var support_uid := "support_%s" % String(record.uid)
+			var support_item := "prep_counter" if item_id in ["cutting_board", "pizza_oven"] else "worktable"
+			var support_origin := _migration_find_surface_origin(Vector2i(int(cell.x), int(cell.y)), support_item, int(record.get("rotation", 0)), String(record.uid), additions)
+			additions.append({"uid":support_uid, "item":support_item, "cell":[support_origin.x, support_origin.y], "rotation":int(record.get("rotation", 0))})
+			record.support_uid = support_uid
+			record.attachment_slot = 0
+			record.cell = [support_origin.x, support_origin.y]
+		elif item_id == "prep_counter":
+			additions.append({"uid":"prep_tool_%s" % String(record.uid), "item":"prep_bowl", "cell":[int(cell.x), int(cell.y)], "rotation":int(record.get("rotation", 0)), "support_uid":String(record.uid), "attachment_slot":0})
+		elif item_id == "pass":
+			additions.append({"uid":"pass_tool_%s" % String(record.uid), "item":"pass_tray", "cell":[int(cell.x), int(cell.y)], "rotation":int(record.get("rotation", 0)), "support_uid":String(record.uid), "attachment_slot":0})
+		elif item_id == "storage" and not walls.is_empty():
+			var best_wall: Dictionary = walls[0]
+			var best_distance := INF
+			for wall: Dictionary in walls:
+				var wall_cell_data: Array = wall.get("cell", [0, 0])
+				var distance := cell.distance_to(Vector2(int(wall_cell_data[0]), int(wall_cell_data[1])))
+				if distance < best_distance:
+					best_distance = distance
+					best_wall = wall
+			record.support_uid = String(best_wall.uid)
+			record.attachment_slot = 0
+			record.cell = best_wall.cell.duplicate()
+			record.rotation = int(best_wall.get("rotation", 0))
+	layout.append_array(additions)
+
+
+func _migration_find_surface_origin(preferred: Vector2i, support_item: String, rotation_steps: int, ignored_uid: String, additions: Array[Dictionary]) -> Vector2i:
+	var candidates: Array[Vector2i] = []
+	for x: int in range(preferred.x, 18):
+		candidates.append(Vector2i(x, preferred.y))
+	for x: int in range(0, preferred.x):
+		candidates.append(Vector2i(x, preferred.y))
+	for y: int in range(8, 14):
+		if y == preferred.y:
+			continue
+		for x: int in range(0, 18):
+			candidates.append(Vector2i(x, y))
+	var support_definition: Dictionary = DataRegistry.build_by_id.get(support_item, {})
+	var support_raw: Array = support_definition.get("footprint", [1, 1])
+	var support_size := Vector2i(int(support_raw[0]), int(support_raw[1]))
+	if rotation_steps % 2 == 1:
+		support_size = Vector2i(support_size.y, support_size.x)
+	for candidate: Vector2i in candidates:
+		if candidate.x < 0 or candidate.y < 0 or candidate.x + support_size.x > 18 or candidate.y + support_size.y > 14:
+			continue
+		var free := true
+		for other: Dictionary in layout + additions:
+			if String(other.get("uid", "")) == ignored_uid:
+				continue
+			var other_definition: Dictionary = DataRegistry.build_by_id.get(String(other.get("item", "")), {})
+			if other_definition.is_empty() or not bool(other_definition.get("blocking", true)) or String(other_definition.get("placement", "cell")) != "cell":
+				continue
+			var other_cell_data: Array = other.get("cell", [-99, -99])
+			var other_origin := Vector2i(int(other_cell_data[0]), int(other_cell_data[1]))
+			var other_raw: Array = other_definition.get("footprint", [1, 1])
+			var other_size := Vector2i(int(other_raw[0]), int(other_raw[1]))
+			if int(other.get("rotation", 0)) % 2 == 1:
+				other_size = Vector2i(other_size.y, other_size.x)
+			var candidate_rect := Rect2i(candidate, support_size)
+			if candidate_rect.intersects(Rect2i(other_origin, other_size)):
+				free = false
+				break
+		if free:
+			return candidate
+	return preferred
+
+
+func _migrate_attachment_integrity_v7() -> void:
+	var records_by_uid: Dictionary = {}
+	for record: Dictionary in layout:
+		records_by_uid[String(record.get("uid", ""))] = record
+	var additions: Array[Dictionary] = []
+	var used_slots: Dictionary = {}
+	for record: Dictionary in layout:
+		var definition: Dictionary = DataRegistry.build_by_id.get(String(record.get("item", "")), {})
+		if definition.is_empty():
+			continue
+		var placement := String(definition.get("placement", "cell"))
+		if placement == "cell" and record.has("support_uid"):
+			record.erase("support_uid")
+			record.erase("attachment_slot")
+			continue
+		if placement != "surface":
+			continue
+		var support_uid := String(record.get("support_uid", ""))
+		var support: Dictionary = records_by_uid.get(support_uid, {})
+		var slot := int(record.get("attachment_slot", 0))
+		var slots := _layout_surface_slots(definition, support, slot, int(record.get("rotation", 0)))
+		if not support.is_empty() and _layout_slots_available(support_uid, slots, used_slots):
+			_layout_mark_slots(support_uid, slots, used_slots)
+			record.cell = support.get("cell", record.get("cell", [0, 0])).duplicate()
+			continue
+		var record_cell_data: Array = record.get("cell", [0, 0])
+		var record_cell := Vector2i(int(record_cell_data[0]), int(record_cell_data[1]))
+		var found_support: Dictionary = {}
+		var found_slot := -1
+		for candidate: Dictionary in layout + additions:
+			var candidate_definition: Dictionary = DataRegistry.build_by_id.get(String(candidate.get("item", "")), {})
+			if String(candidate_definition.get("support_kind", "")) != "worktop" or candidate.get("cell", []) != record.get("cell", []):
+				continue
+			var capacity_raw: Array = candidate_definition.get("footprint", [1, 1])
+			for candidate_slot: int in int(capacity_raw[0]) * int(capacity_raw[1]):
+				var candidate_slots := _layout_surface_slots(definition, candidate, candidate_slot, int(record.get("rotation", 0)))
+				var candidate_uid := String(candidate.get("uid", ""))
+				if not candidate_slots.is_empty() and _layout_slots_available(candidate_uid, candidate_slots, used_slots):
+					found_support = candidate
+					found_slot = candidate_slot
+					break
+			if not found_support.is_empty():
+				break
+		if found_support.is_empty():
+			var item_raw: Array = definition.get("footprint", [1, 1])
+			var support_item := "prep_counter" if int(item_raw[0]) > 1 or int(item_raw[1]) > 1 else "worktable"
+			var support_origin := _migration_find_surface_origin(record_cell, support_item, int(record.get("rotation", 0)), String(record.get("uid", "")), additions)
+			support_uid = "auto_support_%s" % String(record.get("uid", "tool"))
+			var suffix := 2
+			while records_by_uid.has(support_uid):
+				support_uid = "auto_support_%s_%d" % [String(record.get("uid", "tool")), suffix]
+				suffix += 1
+			found_support = {"uid":support_uid, "item":support_item, "cell":[support_origin.x, support_origin.y], "rotation":int(record.get("rotation", 0))}
+			additions.append(found_support)
+			records_by_uid[support_uid] = found_support
+			found_slot = 0
+		support_uid = String(found_support.uid)
+		slots = _layout_surface_slots(definition, found_support, found_slot, int(record.get("rotation", 0)))
+		record.support_uid = support_uid
+		record.attachment_slot = found_slot
+		record.cell = found_support.cell.duplicate()
+		_layout_mark_slots(support_uid, slots, used_slots)
+	layout.append_array(additions)
+
+
+func _layout_surface_slots(definition: Dictionary, support_record: Dictionary, attachment_slot: int, rotation_steps: int) -> Array[int]:
+	var result: Array[int] = []
+	if support_record.is_empty():
+		return result
+	var support_definition: Dictionary = DataRegistry.build_by_id.get(String(support_record.get("item", "")), {})
+	if String(support_definition.get("support_kind", "")) != String(definition.get("requires_support", "")):
+		return result
+	var support_raw: Array = support_definition.get("footprint", [1, 1])
+	var support_width := maxi(int(support_raw[0]), 1)
+	var support_height := maxi(int(support_raw[1]), 1)
+	var item_raw: Array = definition.get("footprint", [1, 1])
+	var item_width := maxi(int(item_raw[0]), 1)
+	var item_height := maxi(int(item_raw[1]), 1)
+	if posmod(rotation_steps - int(support_record.get("rotation", 0)), 2) == 1:
+		var swap := item_width
+		item_width = item_height
+		item_height = swap
+	if attachment_slot < 0:
+		return result
+	var start_x := attachment_slot % support_width
+	var start_y := attachment_slot / support_width
+	if start_x + item_width > support_width or start_y + item_height > support_height:
+		return result
+	for y: int in item_height:
+		for x: int in item_width:
+			result.append((start_y + y) * support_width + start_x + x)
+	return result
+
+
+func _layout_slots_available(support_uid: String, slots: Array[int], used_slots: Dictionary) -> bool:
+	if slots.is_empty():
+		return false
+	var occupied: Dictionary = used_slots.get(support_uid, {})
+	for slot: int in slots:
+		if occupied.has(slot):
+			return false
+	return true
+
+
+func _layout_mark_slots(support_uid: String, slots: Array[int], used_slots: Dictionary) -> void:
+	if not used_slots.has(support_uid):
+		used_slots[support_uid] = {}
+	for slot: int in slots:
+		used_slots[support_uid][slot] = true
 
 
 func _initial_wall_records() -> Array:

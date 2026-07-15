@@ -11,6 +11,9 @@ var static_blocked: Dictionary = {}
 var placed_objects: Dictionary = {}
 var table_occupants: Dictionary = {}
 var staff_agents: Dictionary = {}
+var navigation_agents: Array[AnimatedAgent] = []
+var navigation_revision := 0
+var waiting_reservations: Dictionary = {}
 var customer_root: Node3D
 var object_root: Node3D
 var preview_root: Node3D
@@ -183,6 +186,7 @@ func load_layout() -> void:
 	placed_objects.clear()
 	occupancy.clear()
 	table_occupants.clear()
+	waiting_reservations.clear()
 	for y: int in GRID_SIZE.y:
 		for x: int in GRID_SIZE.x:
 			set_floor_style(Vector2i(x, y), "floor_dining" if y < 8 else "floor_kitchen")
@@ -300,6 +304,7 @@ func attached_objects(support_uid: String) -> Array[PlacedObject]:
 	for object: PlacedObject in placed_objects.values():
 		if is_instance_valid(object) and object.support_uid == support_uid:
 			result.append(object)
+	result.sort_custom(func(a: PlacedObject, b: PlacedObject): return a.attachment_slot < b.attachment_slot if a.attachment_slot != b.attachment_slot else a.uid < b.uid)
 	return result
 
 
@@ -327,10 +332,10 @@ func occupied_cells(definition: Dictionary, origin: Vector2i, rotation_steps: in
 
 
 func placement_world_position(definition: Dictionary, cell: Vector2i, rotation_steps: int, support_uid: String = "", attachment_slot: int = -1) -> Vector3:
-	if not support_uid.is_empty():
+	if not support_uid.is_empty() and is_attachment_placement(definition):
 		var support := placed_objects.get(support_uid) as PlacedObject
 		if support != null and is_instance_valid(support):
-			return attachment_world_position(definition, support, attachment_slot)
+			return attachment_world_position(definition, support, attachment_slot, rotation_steps)
 	var raw: Array = definition.get("footprint", [1, 1])
 	var size := Vector2i(int(raw[0]), int(raw[1]))
 	if rotation_steps % 2 == 1:
@@ -352,20 +357,25 @@ func is_attachment_placement(definition: Dictionary) -> bool:
 	return String(definition.get("placement", "cell")) in ["seat", "surface", "wall_mount"]
 
 
-func attachment_world_position(definition: Dictionary, support: PlacedObject, attachment_slot: int) -> Vector3:
+func attachment_world_position(definition: Dictionary, support: PlacedObject, attachment_slot: int, rotation_steps: int = 0) -> Vector3:
 	var placement := String(definition.get("placement", "cell"))
 	if placement == "seat":
 		var directions := [Vector3(0, 0, -1), Vector3(-1, 0, 0), Vector3(0, 0, 1), Vector3(1, 0, 0)]
-		var offset := directions[posmod(attachment_slot, 4)] * float(support.definition.get("seat_offset", 1.35))
+		var offset: Vector3 = directions[posmod(attachment_slot, 4)] * float(support.definition.get("seat_offset", 1.35))
 		return support.position + offset.rotated(Vector3.UP, -support.rotation_steps * PI * 0.5)
 	if placement == "surface":
 		var raw: Array = support.definition.get("footprint", [1, 1])
 		var width := maxi(int(raw[0]), 1)
 		var height := maxi(int(raw[1]), 1)
-		var slot := clampi(attachment_slot, 0, width * height - 1)
-		var slot_x := slot % width
-		var slot_y := slot / width
-		var local_offset := Vector3((float(slot_x) - float(width - 1) * 0.5) * CELL_SIZE, 0, (float(slot_y) - float(height - 1) * 0.5) * CELL_SIZE)
+		var slots := attachment_slots_for(definition, support, attachment_slot, rotation_steps)
+		if slots.is_empty():
+			slots = [clampi(attachment_slot, 0, width * height - 1)]
+		var local_offset := Vector3.ZERO
+		for slot: int in slots:
+			var slot_x := slot % width
+			var slot_y := slot / width
+			local_offset += Vector3((float(slot_x) - float(width - 1) * 0.5) * CELL_SIZE, 0, (float(slot_y) - float(height - 1) * 0.5) * CELL_SIZE)
+		local_offset /= float(slots.size())
 		local_offset = local_offset.rotated(Vector3.UP, -support.rotation_steps * PI * 0.5)
 		return support.position + local_offset + Vector3.UP * float(support.definition.get("surface_height", 1.02))
 	if placement == "wall_mount":
@@ -389,7 +399,7 @@ func wall_mount_offset(definition: Dictionary, rotation_steps: int) -> Vector3:
 
 
 func seat_rotation_for_slot(attachment_slot: int, table_rotation: int) -> int:
-	return posmod([2, 1, 0, 3][posmod(attachment_slot, 4)] + table_rotation, 4)
+	return posmod([0, 3, 2, 1][posmod(attachment_slot, 4)] + table_rotation, 4)
 
 
 func attachment_target_at(definition: Dictionary, world_hit: Vector3, requested_rotation: int, ignored: PlacedObject = null) -> Dictionary:
@@ -430,6 +440,15 @@ func attachment_target_at(definition: Dictionary, world_hit: Vector3, requested_
 		var height := maxi(int(raw[1]), 1)
 		var slot_x := clampi(int(floor((local_hit.x + float(width) * CELL_SIZE * 0.5) / CELL_SIZE)), 0, width - 1)
 		var slot_y := clampi(int(floor((local_hit.z + float(height) * CELL_SIZE * 0.5) / CELL_SIZE)), 0, height - 1)
+		var item_raw: Array = definition.get("footprint", [1, 1])
+		var item_width := maxi(int(item_raw[0]), 1)
+		var item_height := maxi(int(item_raw[1]), 1)
+		if posmod(requested_rotation - best_support.rotation_steps, 2) == 1:
+			var swap := item_width
+			item_width = item_height
+			item_height = swap
+		slot_x = clampi(slot_x, 0, maxi(width - item_width, 0))
+		slot_y = clampi(slot_y, 0, maxi(height - item_height, 0))
 		slot = slot_y * width + slot_x
 	return {"cell": best_support.grid_cell, "rotation": rotation, "support_uid": best_support.uid, "attachment_slot": slot}
 
@@ -441,6 +460,32 @@ func attachment_occupant_at(support_uid: String, attachment_slot: int, ignored: 
 	return null
 
 
+func attachment_slots_for(definition: Dictionary, support: PlacedObject, attachment_slot: int, rotation_steps: int) -> Array[int]:
+	var result: Array[int] = []
+	if String(definition.get("placement", "cell")) != "surface":
+		if attachment_slot >= 0:
+			result.append(attachment_slot)
+		return result
+	var support_raw: Array = support.definition.get("footprint", [1, 1])
+	var support_width := maxi(int(support_raw[0]), 1)
+	var support_height := maxi(int(support_raw[1]), 1)
+	var item_raw: Array = definition.get("footprint", [1, 1])
+	var item_width := maxi(int(item_raw[0]), 1)
+	var item_height := maxi(int(item_raw[1]), 1)
+	if posmod(rotation_steps - support.rotation_steps, 2) == 1:
+		var swap := item_width
+		item_width = item_height
+		item_height = swap
+	var start_x := attachment_slot % support_width
+	var start_y := attachment_slot / support_width
+	if attachment_slot < 0 or start_x + item_width > support_width or start_y + item_height > support_height:
+		return result
+	for y: int in item_height:
+		for x: int in item_width:
+			result.append((start_y + y) * support_width + start_x + x)
+	return result
+
+
 func _refresh_all_attachments() -> void:
 	for object: PlacedObject in placed_objects.values():
 		_refresh_attachment(object)
@@ -448,6 +493,11 @@ func _refresh_all_attachments() -> void:
 
 func _refresh_attachment(object: PlacedObject) -> void:
 	if object == null or object.support_uid.is_empty():
+		return
+	if not is_attachment_placement(object.definition):
+		object.support_uid = ""
+		object.attachment_slot = -1
+		_update_layout_record(object)
 		return
 	var support := placed_objects.get(object.support_uid) as PlacedObject
 	if support == null or not is_instance_valid(support):
@@ -459,17 +509,19 @@ func _refresh_attachment(object: PlacedObject) -> void:
 	elif placement == "wall_mount":
 		rotation = support.rotation_steps
 	object.set_layout_state(support.grid_cell, rotation, support.uid, object.attachment_slot)
-	object.position = attachment_world_position(object.definition, support, object.attachment_slot)
+	object.position = attachment_world_position(object.definition, support, object.attachment_slot, object.rotation_steps)
+	_update_layout_record(object)
 
 
-func attachment_interaction_position(object: PlacedObject) -> Vector3:
-	var support := placed_objects.get(object.support_uid) as PlacedObject
-	if support == null or not is_instance_valid(support):
-		return object.global_position
-	var distance := CELL_SIZE * 1.05
-	if String(object.definition.get("placement", "cell")) == "wall_mount":
-		distance = CELL_SIZE * 0.72
-	return object.global_transform * Vector3(0, 0, distance)
+func station_interaction_position(object: PlacedObject) -> Vector3:
+	var candidates := station_access_cells(object.definition, object.grid_cell, object.rotation_steps, object.support_uid, object.attachment_slot)
+	for candidate: Vector2i in candidates:
+		if _station_front_connection_open(object.definition, candidate, object.rotation_steps) and astar.is_in_boundsv(candidate) and not astar.is_point_solid(candidate) and not _grid_path(entrance_cell, candidate).is_empty():
+			return cell_to_world(candidate)
+	for candidate: Vector2i in candidates:
+		if _station_front_connection_open(object.definition, candidate, object.rotation_steps) and astar.is_in_boundsv(candidate) and not astar.is_point_solid(candidate):
+			return cell_to_world(candidate)
+	return object.global_position
 
 
 func edge_offset(definition: Dictionary, rotation_steps: int) -> Vector3:
@@ -532,10 +584,22 @@ func validate_placement(definition: Dictionary, cell: Vector2i, rotation_steps: 
 			return {"valid": false, "reason": "Supporto non compatibile"}
 		if attachment_slot < 0:
 			return {"valid": false, "reason": "Punto di aggancio non valido"}
-		if attachment_occupant_at(support.uid, attachment_slot, ignored) != null:
-			return {"valid": false, "reason": "Questo punto di aggancio è già occupato"}
+		var requested_slots := attachment_slots_for(definition, support, attachment_slot, rotation_steps)
+		if requested_slots.is_empty():
+			return {"valid": false, "reason": "L'attrezzatura non entra sul banco con questo orientamento"}
+		for existing: PlacedObject in attached_objects(support.uid):
+			if existing == ignored:
+				continue
+			var occupied_slots := attachment_slots_for(existing.definition, support, existing.attachment_slot, existing.rotation_steps)
+			for requested_slot: int in requested_slots:
+				if requested_slot in occupied_slots:
+					return {"valid": false, "reason": "Questo punto di aggancio è già occupato"}
 		if placement == "seat" and rotation_steps != seat_rotation_for_slot(attachment_slot, support.rotation_steps):
 			return {"valid": false, "reason": "La sedia deve essere rivolta verso il tavolo"}
+		if not String(definition.get("station", "")).is_empty():
+			var access_error := _new_station_access_error(definition, cell, rotation_steps, support.uid, attachment_slot)
+			if not access_error.is_empty():
+				return {"valid": false, "reason": access_error}
 		return {"valid": true, "reason": "Aggancio valido a %s" % String(support.definition.name)}
 	var replaced_wall: PlacedObject = structural_edge_at(cell, rotation_steps, ignored) if is_edge_placement(definition) else null
 	if is_edge_placement(definition) and replaced_wall != null and not bool(definition.get("replaces_wall", false)):
@@ -556,13 +620,14 @@ func validate_placement(definition: Dictionary, cell: Vector2i, rotation_steps: 
 		if occupancy.has(occupied_cell) and (ignored == null or occupancy[occupied_cell] != ignored.uid) and (replaced_wall == null or occupancy[occupied_cell] != replaced_wall.uid):
 			return {"valid": false, "reason": "Spazio già occupato"}
 	if bool(definition.get("blocking", true)):
+		var baseline_access := _accessibility_snapshot(ignored)
 		if is_edge_placement(definition):
 			_temporary_blocked_edge_keys[edge_key(cell, rotation_steps)] = true
 			_validation_ignored_edge_uid = ignored.uid if ignored != null else ""
 		else:
 			for occupied_cell: Vector2i in cells:
 				astar.set_point_solid(occupied_cell, true)
-		var access_error := _operational_access_error(definition, cells, ignored)
+		var access_error := _operational_access_error(definition, cells, rotation_steps, ignored, support_uid, baseline_access)
 		if is_edge_placement(definition):
 			_temporary_blocked_edge_keys.erase(edge_key(cell, rotation_steps))
 			_validation_ignored_edge_uid = ""
@@ -574,20 +639,24 @@ func validate_placement(definition: Dictionary, cell: Vector2i, rotation_steps: 
 	return {"valid": true, "reason": "Posizionamento valido"}
 
 
-func _operational_access_error(new_definition: Dictionary, new_cells: Array[Vector2i], ignored: PlacedObject) -> String:
-	if _grid_path(entrance_cell, _nearest_open_cell(Vector2i(9, 8))).is_empty():
+func _operational_access_error(new_definition: Dictionary, new_cells: Array[Vector2i], rotation_steps: int, ignored: PlacedObject, support_uid: String = "", baseline_access: Dictionary = {}) -> String:
+	if bool(baseline_access.get("__kitchen", true)) and _grid_path(entrance_cell, _nearest_open_cell(Vector2i(9, 8))).is_empty():
 		return "Bloccherebbe il passaggio tra ingresso e cucina"
 	for object: PlacedObject in placed_objects.values():
 		if object == ignored or not is_instance_valid(object):
 			continue
+		if ignored != null and object.support_uid == ignored.uid:
+			continue
 		if object.station_id.is_empty() and not object.item_id.begins_with("table"):
 			continue
-		var target_position := object.get_interaction_position() if not object.station_id.is_empty() else _service_position_for_table(object)
-		var target_cell := _nearest_open_cell(world_to_cell(target_position))
-		if _grid_path(entrance_cell, target_cell).is_empty():
+		if bool(baseline_access.get(object.uid, false)) and not _object_has_operational_access(object):
 			return "Bloccherebbe l'accesso a %s" % object.definition.name
 	var new_id := String(new_definition.get("id", ""))
-	if not String(new_definition.get("station", "")).is_empty() or new_id.begins_with("table"):
+	if not String(new_definition.get("station", "")).is_empty():
+		var station_error := _new_station_access_error(new_definition, new_cells[0] if not new_cells.is_empty() else Vector2i(-1, -1), rotation_steps, support_uid)
+		if not station_error.is_empty():
+			return station_error
+	elif new_id.begins_with("table"):
 		var reachable_neighbor := false
 		for cell: Vector2i in new_cells:
 			for offset: Vector2i in [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]:
@@ -599,7 +668,131 @@ func _operational_access_error(new_definition: Dictionary, new_cells: Array[Vect
 				break
 		if not reachable_neighbor:
 			return "La nuova postazione non avrebbe un punto di accesso"
+	if ignored != null and not attached_objects(ignored.uid).is_empty() and not new_cells.is_empty():
+		var group_error := _attached_group_access_error(ignored, new_cells[0], rotation_steps)
+		if not group_error.is_empty():
+			return group_error
 	return ""
+
+
+func _accessibility_snapshot(ignored: PlacedObject = null) -> Dictionary:
+	var result := {"__kitchen": not _grid_path(entrance_cell, _nearest_open_cell(Vector2i(9, 8))).is_empty()}
+	for object: PlacedObject in placed_objects.values():
+		if object == ignored or not is_instance_valid(object):
+			continue
+		if ignored != null and object.support_uid == ignored.uid:
+			continue
+		if object.station_id.is_empty() and not object.item_id.begins_with("table"):
+			continue
+		result[object.uid] = _object_has_operational_access(object)
+	return result
+
+
+func _object_has_operational_access(object: PlacedObject) -> bool:
+	if not object.station_id.is_empty():
+		for candidate: Vector2i in station_access_cells(object.definition, object.grid_cell, object.rotation_steps, object.support_uid, object.attachment_slot):
+			if not _station_front_connection_open(object.definition, candidate, object.rotation_steps):
+				continue
+			if astar.is_in_boundsv(candidate) and not astar.is_point_solid(candidate) and not _grid_path(entrance_cell, candidate).is_empty():
+				return true
+		return false
+	var service_cell := _nearest_open_cell(world_to_cell(_service_position_for_table(object)))
+	return not _grid_path(entrance_cell, service_cell).is_empty()
+
+
+func _attached_group_access_error(support: PlacedObject, candidate_cell: Vector2i, candidate_rotation: int) -> String:
+	var old_cell := support.grid_cell
+	var old_rotation := support.rotation_steps
+	var old_position := support.position
+	var rotation_delta := posmod(candidate_rotation - old_rotation, 4)
+	support.set_layout_state(candidate_cell, candidate_rotation, support.support_uid, support.attachment_slot)
+	support.position = placement_world_position(support.definition, candidate_cell, candidate_rotation, support.support_uid, support.attachment_slot)
+	var result := ""
+	for attached: PlacedObject in attached_objects(support.uid):
+		if attached.station_id.is_empty():
+			continue
+		var child_rotation := posmod(attached.rotation_steps + rotation_delta, 4)
+		var access_error := _new_station_access_error(attached.definition, candidate_cell, child_rotation, support.uid, attached.attachment_slot)
+		if not access_error.is_empty():
+			result = "%s: %s" % [attached.definition.name, access_error]
+			break
+	support.set_layout_state(old_cell, old_rotation, support.support_uid, support.attachment_slot)
+	support.position = old_position
+	return result
+
+
+func station_front_name(rotation_steps: int) -> String:
+	return ["Sud", "Ovest", "Nord", "Est"][posmod(rotation_steps, 4)]
+
+
+func _front_offset(rotation_steps: int) -> Vector2i:
+	return [Vector2i.DOWN, Vector2i.LEFT, Vector2i.UP, Vector2i.RIGHT][posmod(rotation_steps, 4)]
+
+
+func station_access_cells(definition: Dictionary, cell: Vector2i, rotation_steps: int, support_uid: String = "", attachment_slot: int = -1) -> Array[Vector2i]:
+	var result: Array[Vector2i] = []
+	var placement := String(definition.get("placement", "cell"))
+	var offset := _front_offset(rotation_steps)
+	if placement == "wall_mount":
+		var wall := placed_objects.get(support_uid) as PlacedObject
+		if wall == null:
+			return result
+		var inward: Vector2i = [Vector2i.DOWN, Vector2i.RIGHT, Vector2i.UP, Vector2i.LEFT][posmod(wall.rotation_steps, 4)]
+		result.append(wall.grid_cell)
+		result.append(wall.grid_cell + inward)
+		return result
+	if placement == "surface":
+		var support := placed_objects.get(support_uid) as PlacedObject
+		if support == null:
+			return result
+		var support_raw: Array = support.definition.get("footprint", [1, 1])
+		var width := maxi(int(support_raw[0]), 1)
+		var height := maxi(int(support_raw[1]), 1)
+		for slot: int in attachment_slots_for(definition, support, attachment_slot, rotation_steps):
+			var slot_x := slot % width
+			var slot_y := slot / width
+			var local_offset := Vector3((float(slot_x) - float(width - 1) * 0.5) * CELL_SIZE, 0, (float(slot_y) - float(height - 1) * 0.5) * CELL_SIZE)
+			local_offset = local_offset.rotated(Vector3.UP, -support.rotation_steps * PI * 0.5)
+			result.append(world_to_cell(support.position + local_offset) + offset)
+		return result
+	var cells := occupied_cells(definition, cell, rotation_steps)
+	if cells.is_empty():
+		return result
+	var extreme := cells[0].y if offset.y != 0 else cells[0].x
+	for occupied_cell: Vector2i in cells:
+		var coordinate := occupied_cell.y if offset.y != 0 else occupied_cell.x
+		if (offset.y > 0 or offset.x > 0) and coordinate > extreme:
+			extreme = coordinate
+		elif (offset.y < 0 or offset.x < 0) and coordinate < extreme:
+			extreme = coordinate
+	for occupied_cell: Vector2i in cells:
+		var coordinate := occupied_cell.y if offset.y != 0 else occupied_cell.x
+		if coordinate == extreme:
+			result.append(occupied_cell + offset)
+	return result
+
+
+func _new_station_access_error(definition: Dictionary, cell: Vector2i, rotation_steps: int, support_uid: String = "", attachment_slot: int = -1) -> String:
+	if attachment_slot < 0 and not support_uid.is_empty():
+		for object: PlacedObject in placed_objects.values():
+			if object.support_uid == support_uid and object.definition == definition:
+				attachment_slot = object.attachment_slot
+				break
+	var candidates := station_access_cells(definition, cell, rotation_steps, support_uid, attachment_slot)
+	for candidate: Vector2i in candidates:
+		if not _station_front_connection_open(definition, candidate, rotation_steps):
+			continue
+		if not astar.is_in_boundsv(candidate) or astar.is_point_solid(candidate):
+			continue
+		if not _grid_path(entrance_cell, candidate).is_empty():
+			return ""
+	return "Il fronte operativo (%s) deve affacciarsi su una cella libera e raggiungibile" % station_front_name(rotation_steps)
+
+
+func _station_front_connection_open(definition: Dictionary, candidate: Vector2i, rotation_steps: int) -> bool:
+	if String(definition.get("placement", "cell")) == "wall_mount":
+		return true
+	return not _wall_blocks_step(candidate - _front_offset(rotation_steps), candidate)
 
 
 func object_at_cell(cell: Vector2i) -> PlacedObject:
@@ -618,6 +811,14 @@ func _rebuild_astar() -> void:
 		if astar.is_in_boundsv(cell):
 			astar.set_point_solid(cell, true)
 	astar.set_point_solid(entrance_cell, false)
+	navigation_revision += 1
+	for agent: AnimatedAgent in navigation_agents.duplicate():
+		if not is_instance_valid(agent) or agent.is_queued_for_deletion() or not agent.is_collision_enabled():
+			continue
+		if not _agent_point_is_open(agent.global_position, agent.agent_radius * 0.72):
+			agent.global_position = find_safe_agent_position(agent.global_position, agent)
+			if agent.navigation_active:
+				agent.call_deferred("_repath")
 
 
 func _grid_path(from_cell: Vector2i, to_cell: Vector2i) -> Array[Vector2i]:
@@ -675,16 +876,200 @@ func _wall_blocks_step(from_cell: Vector2i, to_cell: Vector2i) -> bool:
 
 func find_path(from_world: Vector3, to_world: Vector3) -> PackedVector3Array:
 	var from_cell := _nearest_open_cell(world_to_cell(from_world))
-	var to_cell := _nearest_open_cell(world_to_cell(to_world))
+	var requested_cell := world_to_cell(to_world)
+	var to_cell := _nearest_open_cell(requested_cell)
 	var ids := _grid_path(from_cell, to_cell)
+	if ids.is_empty():
+		to_cell = _nearest_reachable_cell(requested_cell, from_cell)
+		ids = _grid_path(from_cell, to_cell)
 	var result := PackedVector3Array()
+	if ids.is_empty():
+		return result
 	for id: Vector2i in ids:
 		result.append(cell_to_world(id))
-	if result.is_empty() or result[result.size() - 1].distance_to(to_world) > 0.2:
-		result.append(Vector3(to_world.x, 0, to_world.z))
+	var exact_target := Vector3(to_world.x, 0.0, to_world.z)
+	if requested_cell == to_cell and result[result.size() - 1].distance_to(exact_target) > 0.12 and can_agent_move(result[result.size() - 1], exact_target, 0.25):
+		result.append(exact_target)
+	elif result[result.size() - 1].distance_to(exact_target) <= 0.12:
+		result[result.size() - 1] = exact_target
+	# The first grid node is the centre of the cell containing the agent.  It is
+	# a graph implementation detail, not a place a moving character should be
+	# forced to visit.  Skipping it when the next segment is clear prevents
+	# workers already beside a station from walking away and immediately back.
+	var actual_start := Vector3(from_world.x, 0.0, from_world.z)
+	if result.size() > 1 and can_agent_move(actual_start, result[1], 0.25):
+		result.remove_at(0)
+	elif result.size() == 1 and can_agent_move(actual_start, result[0], 0.25) and actual_start.distance_to(result[0]) <= 0.12:
+		result[0] = actual_start
+	result = _simplify_world_path(result)
 	if show_paths:
 		_draw_debug_path(result)
 	return result
+
+
+func _nearest_reachable_cell(requested: Vector2i, from_cell: Vector2i) -> Vector2i:
+	var best := from_cell
+	var best_score := INF
+	var distances := _reachable_cell_distances(from_cell)
+	for radius: int in range(0, 7):
+		for y: int in range(-radius, radius + 1):
+			for x: int in range(-radius, radius + 1):
+				if radius > 0 and absi(x) != radius and absi(y) != radius:
+					continue
+				var candidate := requested + Vector2i(x, y)
+				if not astar.is_in_boundsv(candidate) or astar.is_point_solid(candidate):
+					continue
+				if not distances.has(candidate):
+					continue
+				var score := float(distances[candidate]) + candidate.distance_to(requested) * 2.0
+				if score < best_score:
+					best_score = score
+					best = candidate
+		if best_score < INF:
+			break
+	return best
+
+
+func _reachable_cell_distances(from_cell: Vector2i) -> Dictionary:
+	var distances: Dictionary = {}
+	if not astar.is_in_boundsv(from_cell) or astar.is_point_solid(from_cell):
+		return distances
+	var frontier: Array[Vector2i] = [from_cell]
+	distances[from_cell] = 0
+	var head := 0
+	while head < frontier.size():
+		var current := frontier[head]
+		head += 1
+		for offset: Vector2i in [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]:
+			var neighbor := current + offset
+			if not astar.is_in_boundsv(neighbor) or astar.is_point_solid(neighbor) or distances.has(neighbor) or _wall_blocks_step(current, neighbor):
+				continue
+			distances[neighbor] = int(distances[current]) + 1
+			frontier.append(neighbor)
+	return distances
+
+
+func _simplify_world_path(points: PackedVector3Array) -> PackedVector3Array:
+	if points.size() <= 2:
+		return points
+	var result := PackedVector3Array([points[0]])
+	for index: int in range(1, points.size() - 1):
+		var previous_direction := Vector2(points[index].x - points[index - 1].x, points[index].z - points[index - 1].z).normalized()
+		var next_direction := Vector2(points[index + 1].x - points[index].x, points[index + 1].z - points[index].z).normalized()
+		if previous_direction.dot(next_direction) < 0.999:
+			result.append(points[index])
+	result.append(points[points.size() - 1])
+	return result
+
+
+func register_navigation_agent(agent: AnimatedAgent) -> void:
+	if not navigation_agents.has(agent):
+		navigation_agents.append(agent)
+
+
+func unregister_navigation_agent(agent: AnimatedAgent) -> void:
+	navigation_agents.erase(agent)
+	release_waiting_position(agent)
+
+
+func can_agent_move(from_position: Vector3, to_position: Vector3, radius: float = 0.34) -> bool:
+	var distance := Vector2(from_position.x, from_position.z).distance_to(Vector2(to_position.x, to_position.z))
+	var checks := maxi(ceili(distance / 0.18), 1)
+	var previous_cell := world_to_cell(from_position)
+	for index: int in range(1, checks + 1):
+		var point := from_position.lerp(to_position, float(index) / float(checks))
+		if not _agent_point_is_open(point, radius):
+			return false
+		var cell := world_to_cell(point)
+		if cell != previous_cell:
+			var horizontal := Vector2i(cell.x, previous_cell.y)
+			if horizontal != previous_cell and _wall_blocks_step(previous_cell, horizontal):
+				return false
+			if cell != horizontal and _wall_blocks_step(horizontal, cell):
+				return false
+			previous_cell = cell
+	return true
+
+
+func can_agent_step(agent: AnimatedAgent, from_position: Vector3, to_position: Vector3) -> bool:
+	if not can_agent_move(from_position, to_position, agent.agent_radius):
+		return false
+	for other: AnimatedAgent in navigation_agents:
+		if other == agent or not is_instance_valid(other) or other.is_queued_for_deletion() or not other.is_collision_enabled():
+			continue
+		var minimum := agent.agent_radius + other.agent_radius + 0.04
+		var current_distance := Vector2(from_position.x, from_position.z).distance_to(Vector2(other.global_position.x, other.global_position.z))
+		var candidate_distance := Vector2(to_position.x, to_position.z).distance_to(Vector2(other.global_position.x, other.global_position.z))
+		if candidate_distance < minimum and candidate_distance <= current_distance + 0.005:
+			return false
+	return true
+
+
+func _agent_point_is_open(point: Vector3, radius: float) -> bool:
+	var samples := [
+		Vector2.ZERO,
+		Vector2(radius, 0.0), Vector2(-radius, 0.0),
+		Vector2(0.0, radius), Vector2(0.0, -radius),
+		Vector2(radius * 0.7, radius * 0.7), Vector2(-radius * 0.7, radius * 0.7),
+		Vector2(radius * 0.7, -radius * 0.7), Vector2(-radius * 0.7, -radius * 0.7)
+	]
+	for sample: Vector2 in samples:
+		var cell := world_to_cell(Vector3(point.x + sample.x, 0.0, point.z + sample.y))
+		if not astar.is_in_boundsv(cell) or astar.is_point_solid(cell):
+			return false
+	return true
+
+
+func compute_agent_velocity(agent: AnimatedAgent, desired_velocity: Vector3) -> Vector3:
+	if desired_velocity.length_squared() <= 0.0001:
+		return Vector3.ZERO
+	var result := desired_velocity
+	for other: AnimatedAgent in navigation_agents.duplicate():
+		if other == agent or not is_instance_valid(other) or other.is_queued_for_deletion() or not other.is_collision_enabled():
+			continue
+		var offset := agent.global_position - other.global_position
+		offset.y = 0.0
+		var distance := offset.length()
+		var separation := agent.agent_radius + other.agent_radius + 0.12
+		if distance > separation * 3.2:
+			continue
+		var away := offset.normalized() if distance > 0.01 else Vector3.RIGHT.rotated(Vector3.UP, float(agent.get_instance_id() % 4) * PI * 0.5)
+		if distance < separation * 1.35:
+			result += away * agent.movement_speed * (separation * 1.35 - distance) / maxf(separation, 0.01) * 1.8
+		var desired_direction := desired_velocity.normalized()
+		var toward_other := -away
+		if desired_direction.dot(toward_other) > 0.45 and distance < separation * 2.8:
+			var passing_side := Vector3(desired_direction.z, 0.0, -desired_direction.x)
+			result += passing_side * agent.movement_speed * 0.72
+			if not other.navigation_active or agent.navigation_priority < other.navigation_priority:
+				result *= 0.55
+	return result.limit_length(agent.movement_speed)
+
+
+func find_safe_agent_position(preferred: Vector3, agent: AnimatedAgent = null) -> Vector3:
+	var preferred_cell := _nearest_open_cell(world_to_cell(preferred))
+	var candidates: Array[Vector2i] = [preferred_cell]
+	for radius: int in range(1, 7):
+		for y: int in range(-radius, radius + 1):
+			for x: int in range(-radius, radius + 1):
+				if absi(x) != radius and absi(y) != radius:
+					continue
+				candidates.append(preferred_cell + Vector2i(x, y))
+	for cell: Vector2i in candidates:
+		if not astar.is_in_boundsv(cell) or astar.is_point_solid(cell):
+			continue
+		var position := cell_to_world(cell)
+		var free := true
+		for other: AnimatedAgent in navigation_agents:
+			if other == agent or not is_instance_valid(other) or not other.is_collision_enabled():
+				continue
+			var required := (agent.agent_radius if agent != null else 0.34) + other.agent_radius + 0.18
+			if Vector2(position.x, position.z).distance_to(Vector2(other.global_position.x, other.global_position.z)) < required:
+				free = false
+				break
+		if free:
+			return position
+	return cell_to_world(preferred_cell)
 
 
 func _nearest_open_cell(cell: Vector2i) -> Vector2i:
@@ -711,6 +1096,8 @@ func world_to_cell(value: Vector3) -> Vector2i:
 
 func spawn_staff() -> void:
 	for child: Node in get_tree().get_nodes_in_group("staff_agent"):
+		if child is AnimatedAgent:
+			(child as AnimatedAgent).shutdown_navigation()
 		child.queue_free()
 	staff_agents.clear()
 	var spawn_cells := [Vector2i(7, 10), Vector2i(9, 10), Vector2i(12, 10), Vector2i(7, 5), Vector2i(10, 5), Vector2i(14, 10), Vector2i(5, 10)]
@@ -720,8 +1107,9 @@ func spawn_staff() -> void:
 		var agent := EmployeeAgent.new()
 		agent.add_to_group("staff_agent")
 		add_child(agent)
-		agent.global_position = cell_to_world(spawn_cells[index % spawn_cells.size()])
+		agent.global_position = find_safe_agent_position(cell_to_world(spawn_cells[index % spawn_cells.size()]), agent)
 		agent.setup(GameState.employees[index], self)
+		agent.global_position = find_safe_agent_position(agent.global_position, agent)
 		staff_agents[String(GameState.employees[index].id)] = agent
 
 
@@ -730,31 +1118,70 @@ func spawn_customer_group() -> void:
 		return
 	var customer := CustomerAgent.new()
 	customer_root.add_child(customer)
-	customer.global_position = cell_to_world(entrance_cell)
+	customer.global_position = find_safe_agent_position(cell_to_world(entrance_cell), customer)
 	customer.setup(self, randi_range(1, 4))
 
 
 func request_table(customer: Node, group_size: int) -> Dictionary:
+	var candidates: Array[Dictionary] = []
 	for uid: String in table_occupants:
+		if table_occupants[uid] != null and not is_instance_valid(table_occupants[uid]):
+			table_occupants[uid] = null
 		if table_occupants[uid] != null:
 			continue
 		var table_object: PlacedObject = placed_objects.get(uid)
-		if table_object == null:
+		if table_object == null or not is_instance_valid(table_object):
 			continue
 		var seats := _seat_positions_for_table(table_object)
 		var capacity := seats.size()
 		if capacity < group_size:
 			continue
-		table_occupants[uid] = customer
-		var base := table_object.global_position
-		return {"uid": uid, "seat_position": seats[0], "seat_positions": seats.slice(0, group_size), "table_center": base, "service_position": _service_position_for_table(table_object), "capacity": capacity}
-	return {}
+		var access_positions := _table_access_positions(table_object)
+		if access_positions.is_empty():
+			continue
+		var approach: Vector3 = access_positions[0]
+		var best_distance := INF
+		var customer_position := Vector3(customer.global_position)
+		for position: Vector3 in access_positions:
+			var route := find_path(customer_position, position)
+			if route.is_empty():
+				continue
+			var distance: float = customer_position.distance_to(position)
+			if distance < best_distance:
+				best_distance = distance
+				approach = position
+		if best_distance == INF:
+			continue
+		candidates.append({
+			"uid": uid,
+			"object": table_object,
+			"seats": seats,
+			"capacity": capacity,
+			"approach": approach,
+			"score": float(capacity - group_size) * 4.0 + best_distance
+		})
+	if candidates.is_empty():
+		return {}
+	candidates.sort_custom(func(a: Dictionary, b: Dictionary): return float(a.score) < float(b.score))
+	var chosen: Dictionary = candidates[0]
+	table_occupants[String(chosen.uid)] = customer
+	var table_object: PlacedObject = chosen.object
+	return {
+		"uid": String(chosen.uid),
+		"seat_position": Vector3(chosen.approach),
+		"approach_position": Vector3(chosen.approach),
+		"seat_positions": (chosen.seats as Array).slice(0, group_size),
+		"table_center": table_object.global_position,
+		"service_position": Vector3(chosen.approach),
+		"capacity": int(chosen.capacity)
+	}
 
 
 func release_table(customer: Node) -> void:
 	for uid: String in table_occupants:
 		if table_occupants[uid] == customer:
 			table_occupants[uid] = null
+	release_waiting_position(customer)
 
 
 func set_rush_mode(enabled: bool) -> void:
@@ -764,33 +1191,69 @@ func set_rush_mode(enabled: bool) -> void:
 
 
 func waiting_position(customer: Node) -> Vector3:
-	var index := maxi(SimulationManager.customers.find(customer), 0)
-	var slots := [Vector2i(7, 2), Vector2i(9, 2), Vector2i(6, 2), Vector2i(10, 2), Vector2i(8, 1)]
-	return cell_to_world(slots[index % slots.size()])
+	var key := customer.get_instance_id()
+	if waiting_reservations.has(key):
+		return Vector3(waiting_reservations[key])
+	var slots := [Vector2i(8, 1), Vector2i(7, 2), Vector2i(9, 2), Vector2i(6, 2), Vector2i(10, 2), Vector2i(8, 2)]
+	for slot: Vector2i in slots:
+		if not astar.is_in_boundsv(slot) or astar.is_point_solid(slot):
+			continue
+		var position := cell_to_world(slot)
+		var reserved := false
+		for existing: Vector3 in waiting_reservations.values():
+			if existing.distance_to(position) < 0.5:
+				reserved = true
+				break
+		if not reserved and not find_path(customer.global_position, position).is_empty():
+			waiting_reservations[key] = position
+			return position
+	var fallback := find_safe_agent_position(cell_to_world(entrance_cell), customer as AnimatedAgent)
+	waiting_reservations[key] = fallback
+	return fallback
+
+
+func release_waiting_position(customer: Node) -> void:
+	if customer != null:
+		waiting_reservations.erase(customer.get_instance_id())
 
 
 func _seat_positions_for_table(table_object: PlacedObject) -> Array[Vector3]:
 	var result: Array[Vector3] = []
-	var table_cells := occupied_cells(table_object.definition, table_object.grid_cell, table_object.rotation_steps)
+	var candidates: Array[PlacedObject] = []
 	for object: PlacedObject in placed_objects.values():
 		if object.item_id not in ["chair", "stool"]:
 			continue
-		var nearest := 999
-		for table_cell: Vector2i in table_cells:
-			nearest = mini(nearest, absi(object.grid_cell.x - table_cell.x) + absi(object.grid_cell.y - table_cell.y))
-		if nearest == 1:
-			result.append(object.global_position)
-	result.sort_custom(func(a: Vector3, b: Vector3): return a.angle_to(Vector3.FORWARD) < b.angle_to(Vector3.FORWARD))
+		if object.support_uid != table_object.uid or object.attachment_slot < 0 or object.attachment_slot > 3:
+			continue
+		if object.rotation_steps != seat_rotation_for_slot(object.attachment_slot, table_object.rotation_steps):
+			continue
+		candidates.append(object)
+	candidates.sort_custom(func(a: PlacedObject, b: PlacedObject): return a.attachment_slot < b.attachment_slot)
+	for chair: PlacedObject in candidates:
+		var toward_table := chair.global_position.direction_to(table_object.global_position)
+		result.append(chair.global_position + toward_table * 0.22)
+	return result
+
+
+func _table_access_positions(table_object: PlacedObject) -> Array[Vector3]:
+	var result: Array[Vector3] = []
+	var seen: Dictionary = {}
+	for table_cell: Vector2i in occupied_cells(table_object.definition, table_object.grid_cell, table_object.rotation_steps):
+		for offset: Vector2i in [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]:
+			var candidate := table_cell + offset
+			if seen.has(candidate) or not astar.is_in_boundsv(candidate) or astar.is_point_solid(candidate) or _wall_blocks_step(table_cell, candidate):
+				continue
+			seen[candidate] = true
+			if not _grid_path(entrance_cell, candidate).is_empty():
+				result.append(cell_to_world(candidate))
+	result.sort_custom(func(a: Vector3, b: Vector3): return a.distance_to(table_object.global_position) < b.distance_to(table_object.global_position))
 	return result
 
 
 func _service_position_for_table(table_object: PlacedObject) -> Vector3:
-	var cells := occupied_cells(table_object.definition, table_object.grid_cell, table_object.rotation_steps)
-	for cell: Vector2i in cells:
-		for offset: Vector2i in [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]:
-			var candidate := cell + offset
-			if astar.is_in_boundsv(candidate) and not astar.is_point_solid(candidate):
-				return cell_to_world(candidate)
+	var positions := _table_access_positions(table_object)
+	if not positions.is_empty():
+		return positions[0]
 	return table_object.global_position + Vector3(-CELL_SIZE, 0, 0)
 
 

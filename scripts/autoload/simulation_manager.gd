@@ -74,9 +74,23 @@ func close_immediately() -> void:
 func register_station(station_id: String, node: Node, capacity: int) -> void:
 	if not stations.has(station_id):
 		stations[station_id] = []
+	var interaction_positions: Array[Vector3] = []
+	if node.has_method("get_interaction_positions"):
+		interaction_positions = node.get_interaction_positions()
+	elif node.has_method("get_interaction_position"):
+		interaction_positions.append(node.get_interaction_position())
+	else:
+		interaction_positions.append(node.global_position)
+	var worker_capacity := maxi(mini(capacity, interaction_positions.size() * 2), 1)
+	interaction_positions = _expanded_interaction_positions(interaction_positions, worker_capacity, node)
+	var physical_capacity := maxi(capacity, 1)
 	stations[station_id].append({
 		"node": node,
-		"capacity": capacity,
+		"capacity": physical_capacity,
+		"configured_capacity": capacity,
+		"worker_capacity": worker_capacity,
+		"interaction_positions": interaction_positions,
+		"reservations": {},
 		"busy": 0,
 		"busy_time": 0.0,
 		"total_time": 0.0,
@@ -84,6 +98,25 @@ func register_station(station_id: String, node: Node, capacity: int) -> void:
 		"blocked": 0,
 		"wait_total": 0.0
 	})
+
+
+func _expanded_interaction_positions(base_positions: Array[Vector3], capacity: int, node: Node) -> Array[Vector3]:
+	if base_positions.is_empty():
+		base_positions.append(node.global_position)
+	var result: Array[Vector3] = []
+	var lateral := Vector3.RIGHT
+	if node is Node3D:
+		lateral = (node as Node3D).global_transform.basis.x.normalized()
+	for slot: int in maxi(capacity, 1):
+		var base_index := slot % base_positions.size()
+		var base := base_positions[base_index]
+		var occurrences := ceili(float(capacity - base_index) / float(base_positions.size()))
+		var occurrence := slot / base_positions.size()
+		var offset := 0.0
+		if occurrences > 1:
+			offset = -0.38 if occurrence == 0 else 0.38
+		result.append(base + lateral * offset)
+	return result
 
 
 func unregister_world_stations() -> void:
@@ -205,32 +238,44 @@ func claim_kitchen_task(employee: Dictionary, from_position: Variant = null) -> 
 		return {}
 	var best: Dictionary = {}
 	var best_score := -INF
+	var best_runtime: Dictionary = {}
+	var best_slot := -1
+	var best_position := Vector3.ZERO
 	for task_id: String in tasks:
 		var task: Dictionary = tasks.get(task_id, {})
 		if task.is_empty() or String(task.get("state", "")) != "queued":
 			continue
 		if bool(orders.get(String(task.get("order_id", "")), {}).get("suspended", false)):
 			continue
-		var runtime: Dictionary = _find_free_station(task.station)
-		if runtime.is_empty():
-			continue
-		var skill := float(employee.get("skills", {}).get(task.station, 0.55))
-		var score := float(task.priority) * 100.0 + float(task.get("wait_age", 0.0)) * 2.0 + skill * 20.0
-		if String(employee.get("preferred_station", "")) == String(task.station):
-			score += 35.0
-		if from_position is Vector3:
-			score -= Vector3(from_position).distance_to(get_station_position(runtime)) * 1.5
-		if score > best_score:
-			best_score = score
-			best = task
-			best["candidate_runtime"] = runtime
+		for runtime: Dictionary in stations.get(String(task.station), []):
+			var slot := _free_station_slot(runtime)
+			if slot < 0:
+				continue
+			var positions: Array = runtime.get("interaction_positions", [])
+			var interaction_position := Vector3(positions[slot])
+			if from_position is Vector3 and world != null and world.has_method("find_path") and world.find_path(Vector3(from_position), interaction_position).is_empty():
+				continue
+			var skill := float(employee.get("skills", {}).get(task.station, 0.55))
+			var score := float(task.priority) * 100.0 + float(task.get("wait_age", 0.0)) * 2.0 + skill * 20.0
+			if String(employee.get("preferred_station", "")) == String(task.station):
+				score += 35.0
+			if from_position is Vector3:
+				score -= Vector3(from_position).distance_to(interaction_position) * 1.5
+			if score > best_score:
+				best_score = score
+				best = task
+				best_runtime = runtime
+				best_slot = slot
+				best_position = interaction_position
 	if best.is_empty():
 		return {}
 	best.state = "reserved"
 	best.employee_id = String(employee.id)
-	best.station_runtime = best.candidate_runtime
-	best.erase("candidate_runtime")
-	best.station_runtime.busy += 1
+	best.station_runtime = best_runtime
+	best.interaction_slot = best_slot
+	best.interaction_position = best_position
+	best.station_runtime.reservations[best_slot] = String(employee.id)
+	best.station_runtime.busy = best.station_runtime.reservations.size()
 	task_board_changed.emit()
 	return best
 
@@ -241,7 +286,7 @@ func begin_kitchen_task(task_id: String) -> bool:
 	var task: Dictionary = tasks[task_id]
 	if task.state != "reserved":
 		return false
-	if not GameState.consume_stock(task.inputs):
+	if not bool(task.get("stock_consumed", false)) and not GameState.consume_stock(task.inputs):
 		task.state = "waiting_stock"
 		task.employee_id = ""
 		_release_station(task)
@@ -300,13 +345,24 @@ func cancel_employee_task(employee_id: String) -> void:
 		var task: Dictionary = tasks.get(task_id, {})
 		if task.is_empty():
 			continue
-		if String(task.get("employee_id", "")) == employee_id and String(task.get("state", "")) == "reserved":
-			task.state = "queued"
+		if String(task.get("employee_id", "")) == employee_id and String(task.get("state", "")) in ["reserved", "in_progress"]:
+			var order: Dictionary = orders.get(String(task.get("order_id", "")), {})
+			task.state = "queued" if not order.is_empty() and String(order.get("state", "")) not in ["cancelled", "paid"] else "cancelled"
 			task.employee_id = ""
 			_release_station(task)
+			task.station_runtime = null
+	for task_id: String in service_tasks:
+		var service_task: Dictionary = service_tasks.get(task_id, {})
+		if String(service_task.get("employee_id", "")) == employee_id and String(service_task.get("state", "")) in ["reserved", "in_progress"]:
+			service_task.state = "queued" if is_instance_valid(service_task.get("customer")) else "cancelled"
+			service_task.employee_id = ""
+	task_board_changed.emit()
 
 
 func request_service(customer: Node, action: String, target: Vector3, payload: Dictionary = {}) -> Dictionary:
+	for existing: Dictionary in service_tasks.values():
+		if existing.get("customer") == customer and String(existing.get("action", "")) == action and existing.get("payload", {}) == payload and String(existing.get("state", "")) not in ["completed", "cancelled"]:
+			return existing
 	_service_serial += 1
 	var task := {
 		"id": "S%04d" % _service_serial,
@@ -316,6 +372,7 @@ func request_service(customer: Node, action: String, target: Vector3, payload: D
 		"payload": payload,
 		"state": "queued",
 		"employee_id": "",
+		"reservation_key": str(customer.get_instance_id()),
 		"created_at": GameState.service_seconds,
 		"priority": 2 if action == "serve" else 1
 	}
@@ -324,7 +381,7 @@ func request_service(customer: Node, action: String, target: Vector3, payload: D
 	return task
 
 
-func claim_service_task(employee: Dictionary) -> Dictionary:
+func claim_service_task(employee: Dictionary, from_position: Variant = null) -> Dictionary:
 	if String(employee.get("role", "")) != "waiter":
 		return {}
 	var best: Dictionary = {}
@@ -333,7 +390,13 @@ func claim_service_task(employee: Dictionary) -> Dictionary:
 		var task: Dictionary = service_tasks.get(task_id, {})
 		if task.is_empty() or String(task.get("state", "")) != "queued" or not is_instance_valid(task.get("customer")):
 			continue
+		if _service_key_is_reserved(String(task.get("reservation_key", ""))):
+			continue
+		if from_position is Vector3 and world != null and world.has_method("find_path") and world.find_path(Vector3(from_position), Vector3(task.target)).is_empty():
+			continue
 		var candidate := float(task.priority) * 100.0 + GameState.service_seconds - float(task.created_at)
+		if from_position is Vector3:
+			candidate -= Vector3(from_position).distance_to(Vector3(task.target))
 		if candidate > score:
 			score = candidate
 			best = task
@@ -344,16 +407,55 @@ func claim_service_task(employee: Dictionary) -> Dictionary:
 	return best
 
 
+func begin_service_task(task_id: String) -> bool:
+	if not service_tasks.has(task_id):
+		return false
+	var task: Dictionary = service_tasks[task_id]
+	if String(task.get("state", "")) != "reserved" or not is_instance_valid(task.get("customer")):
+		return false
+	task.state = "in_progress"
+	return true
+
+
 func complete_service_task(task_id: String) -> void:
 	if not service_tasks.has(task_id):
 		return
 	var task: Dictionary = service_tasks[task_id]
+	if String(task.get("state", "")) not in ["reserved", "in_progress"]:
+		return
 	task.state = "completed"
 	var employee_id := String(task.get("employee_id", ""))
 	if not employee_id.is_empty():
 		stats.employee_tasks[employee_id] = int(stats.employee_tasks.get(employee_id, 0)) + 1
 	if is_instance_valid(task.customer) and task.customer.has_method("service_completed"):
 		task.customer.service_completed(task.action, task.payload)
+
+
+func _service_key_is_reserved(key: String) -> bool:
+	for task: Dictionary in service_tasks.values():
+		if String(task.get("reservation_key", "")) == key and String(task.get("state", "")) in ["reserved", "in_progress"]:
+			return true
+	return false
+
+
+func cancel_customer_work(customer: Node) -> void:
+	for service_task: Dictionary in service_tasks.values():
+		if service_task.get("customer") == customer and String(service_task.get("state", "")) not in ["completed", "cancelled"]:
+			service_task.state = "cancelled"
+			service_task.employee_id = ""
+	for order: Dictionary in orders.values():
+		if order.get("customer") != customer or String(order.get("state", "")) in ["paid", "cancelled"]:
+			continue
+		order.state = "cancelled"
+		for task_id: String in order.get("task_ids", []):
+			var task: Dictionary = tasks.get(task_id, {})
+			if task.is_empty() or String(task.get("state", "")) in ["completed", "cancelled"]:
+				continue
+			_release_station(task)
+			task.station_runtime = null
+			task.employee_id = ""
+			task.state = "cancelled"
+	task_board_changed.emit()
 
 
 func raise_order_priority(order_id: String) -> void:
@@ -408,9 +510,25 @@ func _find_free_station(station_id: String) -> Dictionary:
 	return {}
 
 
+func _free_station_slot(runtime: Dictionary) -> int:
+	if runtime.is_empty() or not is_instance_valid(runtime.get("node")):
+		return -1
+	var reservations: Dictionary = runtime.get("reservations", {})
+	var positions: Array = runtime.get("interaction_positions", [])
+	for slot: int in mini(int(runtime.get("capacity", 1)), positions.size()):
+		if not reservations.has(slot):
+			return slot
+	return -1
+
+
 func _release_station(task: Dictionary) -> void:
 	if task.station_runtime:
-		task.station_runtime.busy = maxi(int(task.station_runtime.busy) - 1, 0)
+		var slot := int(task.get("interaction_slot", -1))
+		if slot >= 0:
+			task.station_runtime.reservations.erase(slot)
+		task.station_runtime.busy = task.station_runtime.reservations.size()
+		task.erase("interaction_slot")
+		task.erase("interaction_position")
 
 
 func _stock_available(requirements: Dictionary) -> bool:

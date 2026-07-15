@@ -23,6 +23,8 @@ func _ready() -> void:
 	for collection: String in ["hired", "candidates"]:
 		for employee: Dictionary in DataRegistry.employee_data.get(collection, []):
 			paths["res://assets/characters/%s.gltf" % employee.appearance] = true
+	for appearance: String in CustomerAgent.CUSTOMER_APPEARANCES:
+		paths["res://assets/characters/%s.gltf" % appearance] = true
 	var failures: Array[String] = []
 	var report := FileAccess.open("res://tests/asset-load-result.txt", FileAccess.WRITE)
 	for path: String in paths:

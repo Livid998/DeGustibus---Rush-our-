@@ -19,6 +19,7 @@ func _run() -> void:
 	await get_tree().process_frame
 	_test_pathfinding_and_placement(world)
 	_test_builder_and_seating(world)
+	_test_agent_navigation_and_appearance(world)
 	_test_camera_input(world)
 	_test_progression_and_menu_load(world)
 	_test_purchased_preparations()
@@ -127,7 +128,10 @@ func _test_pathfinding_and_placement(world: RestaurantWorld) -> void:
 	_expect(bool(valid.valid), "free decoration placement is valid")
 	var invalid: Dictionary = world.validate_placement(DataRegistry.build_by_id.table_small, world.entrance_cell, 0)
 	_expect(not bool(invalid.valid), "the entrance cell remains reserved")
-	_expect(bool(world.validate_placement(DataRegistry.build_by_id.cutting_board, Vector2i(0, 9), 0).valid), "equipment can use perimeter cells beside an exterior wall")
+	_expect(bool(world.validate_placement(DataRegistry.build_by_id.worktable, Vector2i(0, 9), 0).valid), "equipment supports can use perimeter cells beside an exterior wall")
+	var outward_fridge := world.validate_placement(DataRegistry.build_by_id.fridge, Vector2i(0, 10), 1)
+	var inward_fridge := world.validate_placement(DataRegistry.build_by_id.fridge, Vector2i(0, 10), 3)
+	_expect(not bool(outward_fridge.valid) and bool(inward_fridge.valid), "workstations are rejected when their operating face points outside instead of into a reachable aisle")
 	var unsupported_door: Dictionary = world.validate_placement(DataRegistry.build_by_id.door, Vector2i(5, 5), 0)
 	var supported_door: Dictionary = world.validate_placement(DataRegistry.build_by_id.door, Vector2i(2, 0), 0)
 	_expect(not bool(unsupported_door.valid) and bool(supported_door.valid), "doors and windows can only replace an existing structural edge")
@@ -147,7 +151,7 @@ func _test_builder_and_seating(world: RestaurantWorld) -> void:
 	var aligned_models := true
 	var aligned_roots := true
 	for object: PlacedObject in world.placed_objects.values():
-		aligned_roots = aligned_roots and object.position.is_equal_approx(world.placement_world_position(object.definition, object.grid_cell, object.rotation_steps))
+		aligned_roots = aligned_roots and object.position.is_equal_approx(world.placement_world_position(object.definition, object.grid_cell, object.rotation_steps, object.support_uid, object.attachment_slot))
 		if object.uid in ["door_1", "fridge_1", "storage_1", "stove_1", "oven_1", "plant_1"]:
 			var bounds := ModelFactory.calculate_visual_bounds(object.visual_model, true)
 			var center := bounds.get_center()
@@ -159,13 +163,43 @@ func _test_builder_and_seating(world: RestaurantWorld) -> void:
 	var top_wall := world.placed_objects.get("wall_top_2") as PlacedObject
 	var left_wall := world.placed_objects.get("wall_left_1") as PlacedObject
 	_expect(top_wall.position.is_equal_approx(world.cell_to_world(top_wall.grid_cell) + world.edge_offset(top_wall.definition, top_wall.rotation_steps)) and left_wall.position.is_equal_approx(world.cell_to_world(left_wall.grid_cell) + world.edge_offset(left_wall.definition, left_wall.rotation_steps)), "wall thickness sits fully outside its anchored cell")
-	_expect(not world.occupancy.has(Vector2i(6, 8)) and bool(world.validate_placement(DataRegistry.build_by_id.cutting_board, Vector2i(6, 8), 0).valid), "a wall edge does not reserve the adjacent equipment cell")
+	_expect(not world.occupancy.has(Vector2i(6, 8)) and bool(world.validate_placement(DataRegistry.build_by_id.plant, Vector2i(6, 8), 0).valid), "a wall edge does not reserve the adjacent equipment cell")
 	_expect(world.edge_key(Vector2i(6, 8), 0) != world.edge_key(Vector2i(6, 8), 1) and bool(world.validate_placement(DataRegistry.build_by_id.wall, Vector2i(6, 8), 1).valid), "perpendicular wall segments can meet at the same grid intersection")
 	_expect(world._wall_blocks_step(Vector2i(6, 8), Vector2i(6, 7)) and not world._wall_blocks_step(Vector2i(8, 8), Vector2i(8, 7)), "pathfinding blocks solid wall edges while preserving structural openings")
 	var layout_count := GameState.layout.size()
+	var attached_chairs := world.attached_objects(table.uid)
+	var chairs_face_table := attached_chairs.size() == 4
+	for chair: PlacedObject in attached_chairs:
+		chairs_face_table = chairs_face_table and chair.rotation_steps == world.seat_rotation_for_slot(chair.attachment_slot, table.rotation_steps) and chair.position.distance_to(table.position) <= 1.5
+	_expect(chairs_face_table, "chairs occupy four explicit close-fit slots and face their table")
+	var sample_chair := attached_chairs[0]
+	var chair_screen := world.camera_rig.camera.unproject_position(sample_chair.global_position + Vector3.UP * 0.9)
+	_expect(build._object_from_screen(chair_screen) == sample_chair, "ray selection prioritizes an attached chair over the overlapping table support")
+	var wrong_rotation := posmod(sample_chair.rotation_steps + 1, 4)
+	_expect(not bool(world.validate_placement(sample_chair.definition, table.grid_cell, wrong_rotation, sample_chair, table.uid, sample_chair.attachment_slot).valid), "a chair facing away from its table is never a valid seat")
+	_expect(not bool(world.validate_placement(sample_chair.definition, table.grid_cell, sample_chair.rotation_steps, null, table.uid, sample_chair.attachment_slot).valid), "two chairs cannot share the same table slot")
+	var cutting_board := world.placed_objects.get("cut_1") as PlacedObject
+	var cutting_support := world.placed_objects.get(cutting_board.support_uid) as PlacedObject
+	_expect(not bool(world.validate_placement(cutting_board.definition, cutting_board.grid_cell, cutting_board.rotation_steps).valid), "countertop equipment cannot be placed on the floor")
+	_expect(world.attachment_slots_for(cutting_board.definition, cutting_support, cutting_board.attachment_slot, cutting_board.rotation_steps).size() == 2, "the cutting board reserves both slots of a two-place worktop")
+	var preserved_support_uid := cutting_board.support_uid
+	cutting_board.support_uid = "legacy_missing_support"
+	_expect(bool(world.validate_placement(DataRegistry.build_by_id.worktable, Vector2i(16, 5), 0).valid), "a pre-existing unreachable legacy station no longer invalidates every unrelated placement")
+	cutting_board.support_uid = preserved_support_uid
+	_expect(String(DataRegistry.build_by_id.prep_counter.get("station", "")).is_empty() and String(DataRegistry.build_by_id.prep_bowl.station) == "prep_counter" and String(DataRegistry.build_by_id.pass.get("station", "")).is_empty() and String(DataRegistry.build_by_id.pass_tray.station) == "pass", "generic counters gain their operational role from visible countertop tools")
+	_expect(String(DataRegistry.build_by_id.oven.placement) == "surface" and String(DataRegistry.build_by_id.pizza_oven.placement) == "surface" and String(DataRegistry.build_by_id.stove.get("placement", "cell")) == "cell" and String(DataRegistry.build_by_id.multi_stove.get("placement", "cell")) == "cell", "ovens require worktops while the two standalone cookers remain floor stations")
+	var oven_support := world.placed_objects.get("support_oven_1") as PlacedObject
+	_expect(not bool(world.validate_placement(oven_support.definition, Vector2i(0, 10), 1, oven_support).valid), "moving a counter also validates the operating face of its attached appliance")
+	var storage := world.placed_objects.get("storage_1") as PlacedObject
+	var storage_wall := world.placed_objects.get(storage.support_uid) as PlacedObject
+	_expect(storage_wall != null and bool(world.validate_placement(storage.definition, storage_wall.grid_cell, storage_wall.rotation_steps, storage, storage_wall.uid, 0).valid) and not world.occupancy.has(storage.grid_cell), "wall storage mounts to a full wall without reserving the floor cell below")
 	build.select_object(table)
 	build.move_selected()
-	_expect(build.active and build.move_source == table, "selected furniture enters move mode without losing its source")
+	var source_position := table.position
+	var source_group_visible := table.visible and build.move_origin_marker != null
+	for chair: PlacedObject in attached_chairs:
+		source_group_visible = source_group_visible and chair.visible
+	_expect(build.active and build.move_source == table and source_group_visible and table.position == source_position, "move mode keeps the real source group visible at its origin beside the coloured preview")
 	build.cancel_preview()
 	_expect(world.object_at_cell(Vector2i(3, 3)) == table and DataRegistry.build_by_id.table_medium.has("model"), "cancelling a move restores occupancy without corrupting the catalog")
 	build.select_object(table)
@@ -173,7 +207,11 @@ func _test_builder_and_seating(world: RestaurantWorld) -> void:
 	build.preview_cell = Vector2i(6, 3)
 	build._sync_preview_transform()
 	_expect(build.placement_valid and build.confirm(), "moving furniture can be explicitly confirmed")
-	_expect(GameState.layout.size() == layout_count and world.object_at_cell(Vector2i(6, 3)) != null, "moving furniture preserves layout count and updates occupancy")
+	var moved_chairs := world.attached_objects(table.uid)
+	var chairs_followed := moved_chairs.size() == 4
+	for chair: PlacedObject in moved_chairs:
+		chairs_followed = chairs_followed and chair.support_uid == table.uid and chair.position.distance_to(table.position) <= 1.5
+	_expect(GameState.layout.size() == layout_count and world.object_at_cell(Vector2i(6, 3)) == table and chairs_followed, "moving furniture preserves its UID, occupancy and attached chairs")
 	var second_table := world.placed_objects.get("table_2") as PlacedObject
 	_expect(world._seat_positions_for_table(second_table).size() == 4, "table capacity is derived from four real adjacent chairs")
 	_expect(world.floor_tiles.size() == RestaurantWorld.GRID_SIZE.x * RestaurantWorld.GRID_SIZE.y and is_equal_approx((world.floor_tiles.values()[0] as Node3D).scale.x, 0.5), "floor tiles use non-overlapping normalized scale")
@@ -199,6 +237,17 @@ func _test_builder_and_seating(world: RestaurantWorld) -> void:
 	build.start_place("wall")
 	_expect(build.preview != null and build.preview.scale.is_equal_approx(Vector3.ONE) and is_equal_approx((build.preview_visual.get_node("BaseModel") as Node3D).scale.x, 0.5), "builder footprint and imported visual use independent transforms")
 	build.cancel_preview()
+	build.start_place("plant")
+	var pinned_cell := build.preview_cell
+	build.preview_pinned = true
+	build.pointer_moved(Vector2(40, 40))
+	_expect(build.preview_cell == pinned_cell, "click-pinned placement no longer follows the cursor while reaching the confirmation button")
+	build.preview_pinned = false
+	var before_smooth := build.preview.position
+	build.preview_cell += Vector2i.RIGHT
+	build._sync_preview_transform()
+	_expect(build.preview.position.is_equal_approx(before_smooth) and not build._preview_target_position.is_equal_approx(before_smooth), "placement previews interpolate toward exact snapped targets instead of jumping cell by cell")
+	build.cancel_preview()
 	GameState.set_restaurant_state("open")
 	build.start_place("fridge")
 	_expect(not build.active, "operational equipment remains locked while the restaurant is open")
@@ -206,6 +255,45 @@ func _test_builder_and_seating(world: RestaurantWorld) -> void:
 	_expect(build.active, "non-blocking decoration remains editable during service")
 	build.cancel_preview()
 	GameState.set_restaurant_state("closed")
+
+
+func _test_agent_navigation_and_appearance(world: RestaurantWorld) -> void:
+	var blocked_table := world.placed_objects.get("table_1") as PlacedObject
+	var safe_path := world.find_path(world.cell_to_world(world.entrance_cell), blocked_table.global_position)
+	_expect(not safe_path.is_empty() and not world.astar.is_point_solid(world.world_to_cell(safe_path[safe_path.size() - 1])) and safe_path[safe_path.size() - 1].distance_to(blocked_table.global_position) > 0.5, "unreachable furniture targets resolve to a safe adjacent cell instead of a straight-line clip")
+	_expect(not world.can_agent_move(world.cell_to_world(Vector2i(6, 8)), world.cell_to_world(Vector2i(6, 7)), 0.3), "continuous agent movement cannot cross a blocking wall edge between grid cells")
+	var multi_runtime: Dictionary = SimulationManager.stations.get("multi_stove", [])[0]
+	var interaction_positions: Array = multi_runtime.get("interaction_positions", [])
+	var unique_positions: Dictionary = {}
+	for position: Vector3 in interaction_positions:
+		unique_positions[position] = true
+	_expect(interaction_positions.size() == int(multi_runtime.worker_capacity) and unique_positions.size() == interaction_positions.size() and int(multi_runtime.capacity) >= int(multi_runtime.worker_capacity), "multi-capacity stations expose distinct physical worker slots without confusing batch capacity")
+	_expect(CustomerAgent.CUSTOMER_APPEARANCES.size() >= 15 and CustomerAgent.CUSTOMER_APPEARANCES.all(func(appearance: String): return ResourceLoader.exists("res://assets/characters/%s.gltf" % appearance)), "customer population uses at least fifteen valid character variants")
+	var sample_agent := AnimatedAgent.new()
+	world.add_child(sample_agent)
+	sample_agent.world = world
+	var sample_tone := Color("df7e8b")
+	var sample_model := sample_agent.add_character_model("res://assets/characters/Casual_Male.gltf", Vector3.ZERO, sample_tone)
+	var skin_recoloured := false
+	var face_recoloured := false
+	for node: Node in sample_model.find_children("*", "MeshInstance3D", true, false):
+		var mesh_instance := node as MeshInstance3D
+		for surface: int in mesh_instance.mesh.get_surface_count():
+			var source := mesh_instance.mesh.surface_get_material(surface)
+			var override := mesh_instance.get_surface_override_material(surface)
+			if source != null and String(source.resource_name).to_lower() == "skin" and override is StandardMaterial3D:
+				skin_recoloured = (override as StandardMaterial3D).albedo_color.is_equal_approx(sample_tone)
+			elif source != null and String(source.resource_name).to_lower() == "face" and override is ShaderMaterial:
+				face_recoloured = true
+	_expect(skin_recoloured and face_recoloured, "runtime character palette applies pink skin and dark facial features without recolouring clothes")
+	var employee_agent: EmployeeAgent = world.staff_agents.values()[0]
+	var walk_loops := false
+	for player: AnimationPlayer in employee_agent.animation_players:
+		var walk_name := employee_agent.resolve_animation(player, "Walk")
+		if not walk_name.is_empty() and player.get_animation(walk_name).loop_mode == Animation.LOOP_LINEAR:
+			walk_loops = true
+	_expect(walk_loops, "walk cycles are forced to loop so moving characters never freeze into a sliding pose")
+	sample_agent.queue_free()
 
 
 func _test_camera_input(world: RestaurantWorld) -> void:
@@ -348,18 +436,28 @@ func _test_price_margin() -> void:
 
 
 func _test_save_load() -> void:
+	var original_state := GameState.serialize().duplicate(true)
 	GameState.money = 8765
 	GameState.stock.tomato.amount = 23
 	GameState.progress.customers_served = 7
 	GameState.employees[0].preferred_station = "pizza_oven"
-	_expect(SaveManager.save_game(), "save file writes successfully")
+	var serialized_text := JSON.stringify(GameState.serialize())
+	var serialized_state: Dictionary = JSON.parse_string(serialized_text)
+	_expect(not serialized_text.is_empty() and not serialized_state.is_empty(), "save state serializes to valid JSON without touching the player's live save")
 	GameState.money = 1
 	GameState.stock.tomato.amount = 0
 	GameState.progress.customers_served = 0
 	GameState.employees[0].preferred_station = ""
-	_expect(SaveManager.load_game(), "save file loads successfully")
+	GameState.deserialize(serialized_state)
+	_expect(GameState.money == 8765, "serialized save state loads successfully")
 	_expect(GameState.money == 8765 and int(GameState.stock.tomato.amount) == 23, "save restores money and stock")
 	_expect(int(GameState.progress.customers_served) == 7 and String(GameState.employees[0].preferred_station) == "pizza_oven", "save restores progression and preferred station")
 	_expect(GameState.layout.size() > 10 and GameState.employees.size() >= 5, "save preserves layout and staff")
-	GameState.reset_to_defaults(false)
-	SaveManager.save_game()
+	var legacy_state := serialized_state.duplicate(true)
+	legacy_state.save_version = 6
+	legacy_state.layout = [{"uid":"legacy_oven", "item":"oven", "cell":[5, 10], "rotation":0}]
+	GameState.deserialize(legacy_state)
+	var legacy_oven_record: Dictionary = GameState.layout.filter(func(record: Dictionary): return String(record.get("uid", "")) == "legacy_oven")[0]
+	var legacy_support_uid := String(legacy_oven_record.get("support_uid", ""))
+	_expect(not legacy_support_uid.is_empty() and GameState.layout.any(func(record: Dictionary): return String(record.get("uid", "")) == legacy_support_uid and String(record.get("item", "")) == "worktable"), "version 7 repairs countertop appliances from intermediate saves by creating a valid support")
+	GameState.deserialize(original_state)

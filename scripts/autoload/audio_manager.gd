@@ -13,6 +13,9 @@ func _ready() -> void:
 	generator.mix_rate = 22050.0
 	generator.buffer_length = 0.25
 	player = AudioStreamPlayer.new()
+	# AudioStreamGenerator non può usare il playback "Sample" scelto di default
+	# da alcuni browser: forza lo streaming per evitare audio muto e warning Web.
+	player.playback_type = AudioServer.PLAYBACK_TYPE_STREAM
 	player.stream = generator
 	player.volume_db = -18.0
 	add_child(player)

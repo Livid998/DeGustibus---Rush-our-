@@ -28,7 +28,7 @@ func _ready() -> void:
 		if int(SimulationManager.stats.customers_served) > 0:
 			break
 		if tick > 0 and tick % 50 == 0:
-			var progress_line := "tick=%d customer=%s orders=%d tasks=%d" % [tick, customer.state, SimulationManager.orders.size(), SimulationManager.tasks.size()]
+			var progress_line := "tick=%d customer=%s pos=%s path=%d/%d failed=%s stuck=%.1f orders=%d tasks=%d" % [tick, customer.state, customer.global_position, customer.path_index, customer.path.size(), customer.navigation_failed, customer.total_stuck_time, SimulationManager.orders.size(), SimulationManager.tasks.size()]
 			print("SMOKE PROGRESS ", progress_line)
 	var summary := SimulationManager.summary()
 	var served := int(summary.customers_served)

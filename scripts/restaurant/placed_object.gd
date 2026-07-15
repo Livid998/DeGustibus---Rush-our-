@@ -56,10 +56,24 @@ func register_station() -> void:
 
 
 func get_interaction_position() -> Vector3:
-	if not support_uid.is_empty() and get_parent() != null and get_parent().get_parent() is RestaurantWorld:
-		return (get_parent().get_parent() as RestaurantWorld).attachment_interaction_position(self)
+	if get_parent() != null and get_parent().get_parent() is RestaurantWorld:
+		return (get_parent().get_parent() as RestaurantWorld).station_interaction_position(self)
 	var local_offset := Vector3(0.0, 0.0, (float(footprint.y) * 0.5 + 0.65) * RestaurantWorld.CELL_SIZE)
 	return global_transform * local_offset
+
+
+func get_interaction_positions() -> Array[Vector3]:
+	var result: Array[Vector3] = []
+	if get_parent() != null and get_parent().get_parent() is RestaurantWorld:
+		var restaurant_world := get_parent().get_parent() as RestaurantWorld
+		for cell: Vector2i in restaurant_world.station_access_cells(definition, grid_cell, rotation_steps, support_uid, attachment_slot):
+			if restaurant_world.astar.is_in_boundsv(cell) and not restaurant_world.astar.is_point_solid(cell) and not restaurant_world._grid_path(restaurant_world.entrance_cell, cell).is_empty():
+				var position := restaurant_world.cell_to_world(cell)
+				if not result.has(position):
+					result.append(position)
+	if result.is_empty():
+		result.append(get_interaction_position())
+	return result
 
 
 func show_task(task: Dictionary) -> void:
@@ -113,8 +127,13 @@ func _create_invisible_collision() -> void:
 		box.size = Vector3(maxf(bounds.size.x * 0.9, 0.45), maxf(bounds.size.y, 0.35), maxf(bounds.size.z * 0.9, 0.45))
 		shape.position = bounds.get_center()
 	else:
-		box.size = Vector3(footprint.x * RestaurantWorld.CELL_SIZE * 0.8, 1.5, footprint.y * RestaurantWorld.CELL_SIZE * 0.8)
-		shape.position.y = 0.75
+		var bounds := ModelFactory.calculate_visual_bounds(visual_model, true)
+		box.size = Vector3(
+			maxf(bounds.size.x * 0.92, 0.55),
+			maxf(bounds.size.y * 0.96, 0.4),
+			maxf(bounds.size.z * 0.92, 0.55)
+		)
+		shape.position = bounds.get_center()
 	shape.shape = box
 	body.add_child(shape)
 	add_child(body)

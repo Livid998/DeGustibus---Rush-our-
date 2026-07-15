@@ -62,10 +62,27 @@ res://assets/environment/chair_A.gltf | exists=true | packed_scene=true
 res://assets/environment/chair_stool.gltf | exists=true | packed_scene=true
 res://assets/decor/lamp_standing.gltf | exists=true | packed_scene=true
 res://assets/decor/monstera_plant_medium_potted.gltf | exists=true | packed_scene=true
+res://assets/equipment/bowl.gltf | exists=true | packed_scene=true
+res://assets/equipment/cuttingboard.gltf | exists=true | packed_scene=true
+res://assets/equipment/plate.gltf | exists=true | packed_scene=true
+res://assets/equipment/rollingpin.gltf | exists=true | packed_scene=true
 res://assets/characters/Chef_Male.gltf | exists=true | packed_scene=true
 res://assets/characters/Chef_Female.gltf | exists=true | packed_scene=true
 res://assets/characters/Worker_Male.gltf | exists=true | packed_scene=true
 res://assets/characters/Worker_Female.gltf | exists=true | packed_scene=true
 res://assets/characters/Casual_Male.gltf | exists=true | packed_scene=true
 res://assets/characters/Casual2_Female.gltf | exists=true | packed_scene=true
-ASSET CHECK: 70 unique paths, 0 failures
+res://assets/characters/Casual_Female.gltf | exists=true | packed_scene=true
+res://assets/characters/Casual2_Male.gltf | exists=true | packed_scene=true
+res://assets/characters/Casual3_Male.gltf | exists=true | packed_scene=true
+res://assets/characters/Casual3_Female.gltf | exists=true | packed_scene=true
+res://assets/characters/Casual_Bald.gltf | exists=true | packed_scene=true
+res://assets/characters/Suit_Male.gltf | exists=true | packed_scene=true
+res://assets/characters/Suit_Female.gltf | exists=true | packed_scene=true
+res://assets/characters/OldClassy_Male.gltf | exists=true | packed_scene=true
+res://assets/characters/OldClassy_Female.gltf | exists=true | packed_scene=true
+res://assets/characters/Doctor_Male_Young.gltf | exists=true | packed_scene=true
+res://assets/characters/Doctor_Female_Young.gltf | exists=true | packed_scene=true
+res://assets/characters/Doctor_Male_Old.gltf | exists=true | packed_scene=true
+res://assets/characters/Doctor_Female_Old.gltf | exists=true | packed_scene=true
+ASSET CHECK: 87 unique paths, 0 failures

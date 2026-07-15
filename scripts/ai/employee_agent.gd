@@ -17,7 +17,8 @@ func setup(value: Dictionary, value_world: RestaurantWorld) -> void:
 	name = "Employee_%s" % employee.id
 	movement_speed = 2.4 * float(employee.get("speed", 1.0))
 	var appearance := String(employee.get("appearance", "Worker_Male"))
-	add_character_model("res://assets/characters/%s.gltf" % appearance)
+	add_character_model("res://assets/characters/%s.gltf" % appearance, Vector3.ZERO, skin_tone_for_key(String(employee.id)))
+	configure_navigation(0.34, 3 if String(employee.get("role", "")) == "waiter" else 2)
 	_create_thought()
 	validate_animations()
 
@@ -42,13 +43,20 @@ func _process(delta: float) -> void:
 				poll_time = randf_range(0.25, 0.6)
 				_claim_task()
 		"moving":
-			if advance_path(scaled, active_task.get("action", "") == "serve"):
+			if not _active_task_is_actionable():
+				cancel_active_task()
+			elif navigation_failed:
+				cancel_active_task()
+			elif advance_path(scaled, active_task.get("action", "") == "serve"):
 				_arrived()
 		"working":
+			if not _active_task_is_actionable():
+				cancel_active_task()
+				return
 			work_time += scaled
 			play_animation(String(active_task.get("animation", "PickUp")))
 			if active_task.has("order_id"):
-				var runtime: Dictionary = active_task.get("station_runtime", {})
+				var runtime := _active_station_runtime()
 				if runtime and is_instance_valid(runtime.node):
 					runtime.node.update_task_progress(active_task)
 				if SimulationManager.advance_kitchen_task(active_task.id, scaled, employee):
@@ -60,16 +68,20 @@ func _process(delta: float) -> void:
 
 func _claim_task() -> void:
 	if String(employee.role) == "waiter":
-		active_task = SimulationManager.claim_service_task(employee)
+		active_task = SimulationManager.claim_service_task(employee, global_position)
 		if not active_task.is_empty():
 			_thought.text = {"take_order":"COMANDA", "serve":"PRONTO!", "payment":"CONTO"}.get(active_task.action, "SERVIZIO")
-			move_to(active_task.target)
 	else:
 		active_task = SimulationManager.claim_kitchen_task(employee, global_position)
 		if not active_task.is_empty():
 			_thought.text = String(active_task.recipe_step_id).to_upper()
-			move_to(SimulationManager.get_station_position(active_task.station_runtime))
 	if not active_task.is_empty():
+		var target := Vector3(active_task.get("target", active_task.get("interaction_position", SimulationManager.get_station_position(active_task.get("station_runtime", {})))))
+		if not move_to(target):
+			SimulationManager.cancel_employee_task(String(employee.get("id", "")))
+			active_task = {}
+			poll_time = 0.45
+			return
 		_thought.visible = true
 		state = "moving"
 		employee.current_task = String(active_task.get("recipe_step_id", active_task.get("action", "")))
@@ -81,15 +93,23 @@ func _arrived() -> void:
 		if not SimulationManager.begin_kitchen_task(active_task.id):
 			_finish_task()
 			return
-		var runtime: Dictionary = active_task.get("station_runtime", {})
+		var runtime := _active_station_runtime()
 		if runtime and is_instance_valid(runtime.node):
+			face_position(runtime.node.global_position)
 			runtime.node.show_task(active_task)
+	else:
+		if not SimulationManager.begin_service_task(String(active_task.get("id", ""))):
+			_finish_task()
+			return
+		var customer := active_task.get("customer") as Node3D
+		if customer != null and is_instance_valid(customer):
+			face_position(customer.global_position)
 	state = "working"
 
 
 func _finish_task() -> void:
 	if active_task.has("station_runtime"):
-		var runtime: Dictionary = active_task.get("station_runtime", {})
+		var runtime := _active_station_runtime()
 		if runtime and is_instance_valid(runtime.node):
 			runtime.node.clear_task()
 	# Dictionaries are reference types. Replacing the local handle preserves the
@@ -103,11 +123,42 @@ func _finish_task() -> void:
 
 
 func cancel_active_task() -> void:
+	if active_task.has("station_runtime"):
+		var runtime := _active_station_runtime()
+		if runtime and is_instance_valid(runtime.get("node")):
+			runtime.node.clear_task()
 	SimulationManager.cancel_employee_task(String(employee.get("id", "")))
 	active_task = {}
+	employee.current_task = ""
 	state = "idle"
+	velocity = Vector3.ZERO
+	navigation_active = false
+	navigation_failed = false
+	stuck_time = 0.0
+	total_stuck_time = 0.0
+	path.clear()
+	path_index = 0
+	play_animation("Idle")
 	if _thought:
 		_thought.visible = false
+
+
+func _active_task_is_actionable() -> bool:
+	if active_task.is_empty():
+		return false
+	var task_id := String(active_task.get("id", ""))
+	if active_task.has("order_id"):
+		if not SimulationManager.tasks.has(task_id):
+			return false
+		return String(SimulationManager.tasks[task_id].get("state", "")) in ["reserved", "in_progress"]
+	if not SimulationManager.service_tasks.has(task_id):
+		return false
+	return String(SimulationManager.service_tasks[task_id].get("state", "")) in ["reserved", "in_progress"] and is_instance_valid(active_task.get("customer"))
+
+
+func _active_station_runtime() -> Dictionary:
+	var value: Variant = active_task.get("station_runtime", {})
+	return value if value is Dictionary else {}
 
 
 func _create_thought() -> void:

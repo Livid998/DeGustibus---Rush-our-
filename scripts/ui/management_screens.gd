@@ -737,6 +737,26 @@ static func _statistics(content: VBoxContainer, ui: RestaurantUI) -> void:
 static func _settings(content: VBoxContainer, ui: RestaurantUI) -> void:
 	content.add_child(ui.make_section("Impostazioni", "Preferenze salvate insieme al ristorante e applicate immediatamente."))
 
+	if PwaUpdateManager.is_available():
+		var update_card := ui.make_card()
+		var update_box := VBoxContainer.new()
+		update_box.add_theme_constant_override("separation", 10)
+		update_card.add_child(update_box)
+		var update_title := Label.new()
+		update_title.text = "AGGIORNAMENTI PWA"
+		update_title.add_theme_font_override("font", GameFonts.bold())
+		update_title.add_theme_font_size_override("font_size", 19)
+		update_box.add_child(update_title)
+		var update_description := Label.new()
+		update_description.text = "L'app installata resta nella Home. Le nuove build vengono scaricate in background e applicate con un solo riavvio."
+		update_description.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		update_description.add_theme_color_override("font_color", Color("52686b"))
+		update_box.add_child(update_description)
+		update_box.add_child(ui.make_button("Controlla aggiornamenti", func():
+			ui.show_toast(PwaUpdateManager.check_for_updates(), "info")
+		, "green"))
+		content.add_child(update_card)
+
 	var general := ui.make_card()
 	var general_box := VBoxContainer.new()
 	general_box.add_theme_constant_override("separation", 12)

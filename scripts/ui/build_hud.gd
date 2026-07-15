@@ -9,6 +9,7 @@ var item_row: HBoxContainer
 var action_row: HBoxContainer
 var current_category := "Sala"
 var is_open := false
+var attachment_cycle_by_support: Dictionary = {}
 
 const CATEGORIES := ["Strutture", "Sala", "Cucina"]
 
@@ -142,6 +143,12 @@ func refresh_actions() -> void:
 		var editable := build.can_edit_definition(selected.definition)
 		label.text = "%s  ·  cella %d,%d%s" % [selected.definition.name, selected.grid_cell.x, selected.grid_cell.y, "  ·  bloccato durante il servizio" if not editable else ""]
 		action_row.add_child(label)
+		var support := world.placed_objects.get(selected.support_uid) as PlacedObject
+		var attachments := world.attached_objects(selected.uid)
+		if not attachments.is_empty():
+			action_row.add_child(_action_button("Agganci (%d)" % attachments.size(), func(): _select_next_attachment(selected.uid, attachments), "blue"))
+		elif support != null:
+			action_row.add_child(_action_button("Supporto", func(): build.select_object(support), "blue"))
 		if editable:
 			action_row.add_child(_action_button("Sposta", build.move_selected, "yellow"))
 			action_row.add_child(_action_button("Vendi 60%", build.sell_selected, "red"))
@@ -155,6 +162,14 @@ func _action_button(text_value: String, callback: Callable, tone: String) -> But
 	var button := ui.make_button(text_value, callback, tone)
 	button.custom_minimum_size = Vector2(116, 42)
 	return button
+
+
+func _select_next_attachment(support_uid: String, attachments: Array[PlacedObject]) -> void:
+	if attachments.is_empty():
+		return
+	var next_index := posmod(int(attachment_cycle_by_support.get(support_uid, -1)) + 1, attachments.size())
+	attachment_cycle_by_support[support_uid] = next_index
+	world.build_system.select_object(attachments[next_index])
 
 
 func _clear(node: Node) -> void:
