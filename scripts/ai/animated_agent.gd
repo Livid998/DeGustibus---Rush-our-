@@ -1,6 +1,8 @@
 class_name AnimatedAgent
 extends CharacterBody3D
 
+const CHARACTER_FOOT_LIFT := 0.08
+
 const SKIN_TONES: Array[Color] = [
 	Color("e3b0ad"),
 	Color("cf9698"),
@@ -24,7 +26,7 @@ var navigation_active := false
 var navigation_failed := false
 var navigation_priority := 1
 var navigation_revision := -1
-var agent_radius := 0.34
+var agent_radius := 0.40
 var arrival_tolerance := 0.16
 var animation_players: Array[AnimationPlayer] = []
 var current_animation := ""
@@ -35,7 +37,7 @@ var _collision_shape: CollisionShape3D
 var _animation_resolution_cache: Dictionary = {}
 
 
-func configure_navigation(radius: float = 0.34, priority: int = 1) -> void:
+func configure_navigation(radius: float = 0.40, priority: int = 1) -> void:
 	agent_radius = radius
 	navigation_priority = priority
 	collision_layer = 2
@@ -45,9 +47,9 @@ func configure_navigation(radius: float = 0.34, priority: int = 1) -> void:
 		_collision_shape.name = "AgentCollider"
 		var capsule := CapsuleShape3D.new()
 		capsule.radius = agent_radius
-		capsule.height = 1.62
+		capsule.height = 2.90
 		_collision_shape.shape = capsule
-		_collision_shape.position.y = 0.81
+		_collision_shape.position.y = 1.45
 		add_child(_collision_shape)
 	else:
 		(_collision_shape.shape as CapsuleShape3D).radius = agent_radius
@@ -68,7 +70,9 @@ func _exit_tree() -> void:
 
 func add_character_model(model_path: String, offset: Vector3 = Vector3.ZERO, skin_tone: Color = Color.TRANSPARENT) -> Node3D:
 	var model := ModelFactory.instantiate_model(model_path)
-	model.position = offset
+	# The source rigs dip a few centimetres below their origin. Keep the
+	# controller on the navigation plane and lift only the rendered character.
+	model.position = offset + Vector3.UP * CHARACTER_FOOT_LIFT
 	add_child(model)
 	if skin_tone.a <= 0.0:
 		skin_tone = SKIN_TONES.pick_random()
@@ -80,6 +84,11 @@ func add_character_model(model_path: String, offset: Vector3 = Vector3.ZERO, ski
 	var players := ModelFactory.find_animation_players(model)
 	animation_players.append_array(players)
 	return model
+
+
+func get_avoidance_points() -> Array[Vector3]:
+	var result: Array[Vector3] = [global_position]
+	return result
 
 
 static func skin_tone_for_key(key: String) -> Color:

@@ -33,6 +33,7 @@ func _ready() -> void:
 	var locomotion_details: Array[String] = []
 	var previous_positions: Dictionary = {}
 	var seated_checks := 0
+	var seat_alignment_violations := 0
 	for tick: int in 1600:
 		if tick > 0 and tick % 200 == 0:
 			var task_states: Dictionary = {}
@@ -47,11 +48,15 @@ func _ready() -> void:
 			if is_instance_valid(customer) and not customer.is_queued_for_deletion():
 				customer._process(0.1)
 		var active_agents: Array[AnimatedAgent] = []
+		var visible_people: Array[Dictionary] = []
 		for agent: AnimatedAgent in main.world.navigation_agents:
 			if is_instance_valid(agent) and not agent.is_queued_for_deletion() and agent.is_collision_enabled():
 				active_agents.append(agent)
-				if not main.world._agent_point_is_open(agent.global_position, agent.agent_radius * 0.72):
-					solid_violations += 1
+				for point_index: int in agent.get_avoidance_points().size():
+					var point := agent.get_avoidance_points()[point_index]
+					visible_people.append({"position": point, "radius": agent.agent_radius, "label": "%s#%d" % [agent.name, point_index]})
+					if not main.world._agent_point_is_open(point, agent.agent_radius * 0.72):
+						solid_violations += 1
 				var agent_key := agent.get_instance_id()
 				if previous_positions.has(agent_key):
 					var displacement := Vector3(previous_positions[agent_key]).distance_to(agent.global_position)
@@ -67,14 +72,16 @@ func _ready() -> void:
 								if locomotion_details.size() < 12:
 									locomotion_details.append("tick %d %s player=%s expected=%s actual=%s playing=%s speed=%.2f" % [tick, agent.name, player.name, expected, player.current_animation, player.is_playing(), player.speed_scale])
 				previous_positions[agent_key] = agent.global_position
-		for first_index: int in active_agents.size():
-			for second_index: int in range(first_index + 1, active_agents.size()):
-				var first := active_agents[first_index]
-				var second := active_agents[second_index]
-				var clearance := first.global_position.distance_to(second.global_position) - first.agent_radius - second.agent_radius
+		for first_index: int in visible_people.size():
+			for second_index: int in range(first_index + 1, visible_people.size()):
+				var first: Dictionary = visible_people[first_index]
+				var second: Dictionary = visible_people[second_index]
+				var first_position := Vector3(first.position)
+				var second_position := Vector3(second.position)
+				var clearance := Vector2(first_position.x, first_position.z).distance_to(Vector2(second_position.x, second_position.z)) - float(first.radius) - float(second.radius)
 				if clearance < minimum_clearance:
 					minimum_clearance = clearance
-					minimum_pair = "%d:%s[%s]@%s <> %s[%s]@%s" % [tick, first.name, first.get("state"), first.global_position, second.name, second.get("state"), second.global_position]
+					minimum_pair = "%d:%s@%s <> %s@%s" % [tick, first.label, first_position, second.label, second_position]
 		var reservations: Dictionary = {}
 		for employee: EmployeeAgent in main.world.staff_agents.values():
 			if employee.active_task.is_empty() or employee.state not in ["moving", "working"] or not employee._active_task_is_actionable():
@@ -97,15 +104,16 @@ func _ready() -> void:
 			var seats: Array = customer.table.get("seat_positions", [])
 			for index: int in mini(customer.group_models.size(), seats.size()):
 				seated_checks += 1
-				if customer.group_models[index].global_position.distance_to(Vector3(seats[index]) + Vector3.UP * 0.015) > 0.06:
-					failures.append("cliente non allineato alla sedia")
+				if customer.group_models[index].global_position.distance_to(Vector3(seats[index]) + Vector3.UP * AnimatedAgent.CHARACTER_FOOT_LIFT) > 0.06:
+					seat_alignment_violations += 1
 		if int(SimulationManager.stats.customers_served) >= 6 and SimulationManager.customers.is_empty():
 			break
 	_expect(solid_violations == 0, "nessun personaggio attraversa celle occupate dall'arredamento")
 	_expect(duplicate_reservations == 0, "postazioni e punti servizio hanno prenotazioni esclusive")
 	_expect(locomotion_animation_violations == 0, "chi si muove usa sempre un'animazione di camminata attiva")
 	_expect(seated_checks > 0, "i clienti raggiungono e usano sedie reali")
-	_expect(minimum_clearance > -0.12, "la separazione fisica impedisce sovrapposizioni profonde tra agenti")
+	_expect(seat_alignment_violations == 0, "i clienti seduti restano allineati alla propria sedia")
+	_expect(minimum_clearance > -0.10, "la separazione fisica impedisce sovrapposizioni profonde tra persone visibili")
 	_expect(int(SimulationManager.stats.customers_served) >= 2, "più gruppi completano il servizio sotto carico")
 	var appearances: Dictionary = {}
 	var tones: Dictionary = {}

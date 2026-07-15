@@ -21,7 +21,7 @@ func setup(value: Dictionary, value_world: RestaurantWorld) -> void:
 	movement_speed = 2.4 * float(employee.get("speed", 1.0))
 	var appearance := String(employee.get("appearance", "Worker_Male"))
 	add_character_model("res://assets/characters/%s.gltf" % appearance, Vector3.ZERO, skin_tone_for_key(String(employee.id)))
-	configure_navigation(0.34, 3 if String(employee.get("role", "")) == "waiter" else 2)
+	configure_navigation(0.40, 3 if String(employee.get("role", "")) == "waiter" else 2)
 	_create_thought()
 	validate_animations()
 

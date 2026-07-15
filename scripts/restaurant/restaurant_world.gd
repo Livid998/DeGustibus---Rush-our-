@@ -1021,16 +1021,21 @@ func can_agent_move(from_position: Vector3, to_position: Vector3, radius: float 
 func can_agent_step(agent: AnimatedAgent, from_position: Vector3, to_position: Vector3) -> bool:
 	if not can_agent_move(from_position, to_position, agent.agent_radius):
 		return false
+	var movement_delta := to_position - from_position
+	var own_points := agent.get_avoidance_points()
+	if own_points.is_empty():
+		own_points.append(from_position)
 	for other: AnimatedAgent in navigation_agents:
 		if other == agent or not is_instance_valid(other) or other.is_queued_for_deletion() or not other.is_collision_enabled():
 			continue
-		if agent is CustomerAgent and other is EmployeeAgent and String(agent.get("state")) in ["walking_to_table", "retrying_table_route", "seating"]:
-			continue
-		var minimum := agent.agent_radius + other.agent_radius + 0.04
-		var current_distance := Vector2(from_position.x, from_position.z).distance_to(Vector2(other.global_position.x, other.global_position.z))
-		var candidate_distance := Vector2(to_position.x, to_position.z).distance_to(Vector2(other.global_position.x, other.global_position.z))
-		if candidate_distance < minimum and candidate_distance <= current_distance + 0.005:
-			return false
+		var minimum := agent.agent_radius + other.agent_radius + 0.08
+		for own_point: Vector3 in own_points:
+			var candidate_point := own_point + movement_delta
+			for other_point: Vector3 in other.get_avoidance_points():
+				var current_distance := Vector2(own_point.x, own_point.z).distance_to(Vector2(other_point.x, other_point.z))
+				var candidate_distance := Vector2(candidate_point.x, candidate_point.z).distance_to(Vector2(other_point.x, other_point.z))
+				if candidate_distance < minimum and candidate_distance <= current_distance + 0.005:
+					return false
 	return true
 
 
@@ -1056,30 +1061,47 @@ func compute_agent_velocity(agent: AnimatedAgent, desired_velocity: Vector3) -> 
 	for other: AnimatedAgent in navigation_agents.duplicate():
 		if other == agent or not is_instance_valid(other) or other.is_queued_for_deletion() or not other.is_collision_enabled():
 			continue
-		var offset := agent.global_position - other.global_position
-		offset.y = 0.0
-		var distance := offset.length()
-		var separation := agent.agent_radius + other.agent_radius + 0.12
+		var offset := Vector3.ZERO
+		var distance := INF
+		for own_point: Vector3 in agent.get_avoidance_points():
+			for other_point: Vector3 in other.get_avoidance_points():
+				var candidate := own_point - other_point
+				candidate.y = 0.0
+				if candidate.length() < distance:
+					distance = candidate.length()
+					offset = candidate
+		if distance == INF:
+			continue
+		var separation := agent.agent_radius + other.agent_radius + 0.14
 		if distance > separation * 3.2:
 			continue
 		var away := offset.normalized() if distance > 0.01 else Vector3.RIGHT.rotated(Vector3.UP, float(agent.get_instance_id() % 4) * PI * 0.5)
 		if agent is EmployeeAgent and other is CustomerAgent and String(other.get("state")) in ["walking_to_table", "retrying_table_route", "seating"]:
-			result += away * agent.movement_speed * 1.4
+			result += away * agent.movement_speed * 1.8
 		if distance < separation * 1.35:
-			result += away * agent.movement_speed * (separation * 1.35 - distance) / maxf(separation, 0.01) * 1.8
+			result += away * agent.movement_speed * (separation * 1.35 - distance) / maxf(separation, 0.01) * 2.2
 		var desired_direction := desired_velocity.normalized()
 		var toward_other := -away
 		if desired_direction.dot(toward_other) > 0.45 and distance < separation * 2.8:
-			var passing_side := Vector3(desired_direction.z, 0.0, -desired_direction.x)
-			result += passing_side * agent.movement_speed * 0.72
-			if not other.navigation_active or agent.navigation_priority < other.navigation_priority:
-				result *= 0.55
+			var side_sign := -1.0 if agent.get_instance_id() < other.get_instance_id() else 1.0
+			var passing_side := Vector3(desired_direction.z, 0.0, -desired_direction.x) * side_sign
+			result += passing_side * agent.movement_speed * 0.82
+			var agent_yields := agent.navigation_priority > other.navigation_priority or (agent.navigation_priority == other.navigation_priority and agent.get_instance_id() > other.get_instance_id())
+			if agent_yields or not other.navigation_active:
+				result *= 0.42
 	return result.limit_length(agent.movement_speed)
 
 
 func find_safe_agent_position(preferred: Vector3, agent: AnimatedAgent = null) -> Vector3:
 	var preferred_cell := _nearest_open_cell(world_to_cell(preferred))
 	var candidates: Array[Vector2i] = [preferred_cell]
+	var own_offsets: Array[Vector3] = [Vector3.ZERO]
+	if agent != null:
+		var own_points := agent.get_avoidance_points()
+		if not own_points.is_empty():
+			own_offsets.clear()
+			for own_point: Vector3 in own_points:
+				own_offsets.append(own_point - agent.global_position)
 	for radius: int in range(1, 7):
 		for y: int in range(-radius, radius + 1):
 			for x: int in range(-radius, radius + 1):
@@ -1091,16 +1113,72 @@ func find_safe_agent_position(preferred: Vector3, agent: AnimatedAgent = null) -
 			continue
 		var position := cell_to_world(cell)
 		var free := true
+		for own_offset: Vector3 in own_offsets:
+			if not _agent_point_is_open(position + own_offset, (agent.agent_radius if agent != null else 0.34) * 0.72):
+				free = false
+				break
+		if not free:
+			continue
 		for other: AnimatedAgent in navigation_agents:
 			if other == agent or not is_instance_valid(other) or not other.is_collision_enabled():
 				continue
 			var required := (agent.agent_radius if agent != null else 0.34) + other.agent_radius + 0.18
-			if Vector2(position.x, position.z).distance_to(Vector2(other.global_position.x, other.global_position.z)) < required:
-				free = false
+			for own_offset: Vector3 in own_offsets:
+				for other_point: Vector3 in other.get_avoidance_points():
+					var own_position := position + own_offset
+					if Vector2(own_position.x, own_position.z).distance_to(Vector2(other_point.x, other_point.z)) < required:
+						free = false
+						break
+				if not free:
+					break
+			if not free:
 				break
 		if free:
 			return position
 	return cell_to_world(preferred_cell)
+
+
+func is_work_position_available(position: Vector3, employee_id: String) -> bool:
+	# A station reservation is not enough: the previous worker may still be
+	# physically leaving, or another station can expose the same access cell.
+	for other: AnimatedAgent in navigation_agents:
+		if not (other is EmployeeAgent) or not is_instance_valid(other) or other.is_queued_for_deletion():
+			continue
+		var worker := other as EmployeeAgent
+		if String(worker.employee.get("id", "")) == employee_id:
+			continue
+		var required := worker.agent_radius + 0.48
+		for other_point: Vector3 in worker.get_avoidance_points():
+			if Vector2(position.x, position.z).distance_to(Vector2(other_point.x, other_point.z)) < required:
+				return false
+		if worker.navigation_active and Vector2(position.x, position.z).distance_to(Vector2(worker.destination.x, worker.destination.z)) < required:
+			return false
+	return true
+
+
+func can_visual_person_step(owner: AnimatedAgent, from_position: Vector3, to_position: Vector3, radius: float) -> bool:
+	if not _agent_point_is_open(to_position, radius * 0.72):
+		return false
+	var skipped_self := false
+	for sibling_point: Vector3 in owner.get_avoidance_points():
+		if not skipped_self and sibling_point.distance_to(from_position) < 0.015:
+			skipped_self = true
+			continue
+		var sibling_required := radius * 2.0 + 0.05
+		var sibling_current := Vector2(from_position.x, from_position.z).distance_to(Vector2(sibling_point.x, sibling_point.z))
+		var sibling_candidate := Vector2(to_position.x, to_position.z).distance_to(Vector2(sibling_point.x, sibling_point.z))
+		if sibling_candidate < sibling_required and sibling_candidate <= sibling_current + 0.004:
+			return false
+	for other: AnimatedAgent in navigation_agents:
+		if other == owner or not is_instance_valid(other) or other.is_queued_for_deletion() or not other.is_collision_enabled():
+			continue
+		var required := radius + other.agent_radius + 0.06
+		for other_point: Vector3 in other.get_avoidance_points():
+			var current_distance := Vector2(from_position.x, from_position.z).distance_to(Vector2(other_point.x, other_point.z))
+			var candidate_distance := Vector2(to_position.x, to_position.z).distance_to(Vector2(other_point.x, other_point.z))
+			if candidate_distance < required and candidate_distance <= current_distance + 0.004:
+				return false
+	return true
 
 
 func _nearest_open_cell(cell: Vector2i) -> Vector2i:

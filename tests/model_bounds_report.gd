@@ -20,4 +20,12 @@ func _ready() -> void:
 			expected.x, expected.y
 		])
 		model.queue_free()
+	for appearance: String in ["Worker_Male", "Worker_Female", "Chef_Male", "Casual_Male", "Casual_Female", "OldClassy_Female"]:
+		var character := ModelFactory.instantiate_model("res://assets/characters/%s.gltf" % appearance)
+		add_child(character)
+		var bounds := ModelFactory.calculate_visual_bounds(character, true)
+		print("CHARACTER | %s | min_y=%.3f | max_y=%.3f | radius_xz=%.3f" % [
+			appearance, bounds.position.y, bounds.end.y, maxf(bounds.size.x, bounds.size.z) * 0.5
+		])
+		character.queue_free()
 	get_tree().quit()

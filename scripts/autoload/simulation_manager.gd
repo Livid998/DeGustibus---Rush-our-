@@ -134,7 +134,7 @@ func _expanded_interaction_positions(base_positions: Array[Vector3], capacity: i
 		var occurrence := slot / base_positions.size()
 		var offset := 0.0
 		if occurrences > 1:
-			offset = -0.38 if occurrence == 0 else 0.38
+			offset = -0.46 if occurrence == 0 else 0.46
 		result.append(base + lateral * offset)
 	return result
 
@@ -274,6 +274,8 @@ func claim_kitchen_task(employee: Dictionary, from_position: Variant = null) -> 
 				continue
 			var positions: Array = runtime.get("interaction_positions", [])
 			var interaction_position := Vector3(positions[slot])
+			if world != null and world.has_method("is_work_position_available") and not world.is_work_position_available(interaction_position, String(employee.get("id", ""))):
+				continue
 			if from_position is Vector3 and world != null and world.has_method("find_path") and world.find_path(Vector3(from_position), interaction_position).is_empty():
 				continue
 			var skill := float(employee.get("skills", {}).get(task.station, 0.55))

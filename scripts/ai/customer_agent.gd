@@ -50,10 +50,16 @@ func setup(value_world: RestaurantWorld, size: int) -> void:
 	movement_speed = randf_range(2.1, 2.65)
 	# The controller represents the party leader, not a circular body as wide
 	# as the whole group. Followers use the leader's trail visually.
-	configure_navigation(0.40 + float(group_size - 1) * 0.045, 1)
+	# Every visible party member contributes its own avoidance point; the leader
+	# no longer pretends to be one oversized circular group.
+	configure_navigation(0.37, 1)
 	arrival_tolerance = 0.24
 	global_position = world.find_safe_agent_position(global_position, self)
 	_build_group_models()
+	# Re-evaluate the spawn after the followers exist, so the whole visible party
+	# starts in free space instead of validating only its invisible controller.
+	global_position = world.find_safe_agent_position(global_position, self)
+	_arrange_waiting_formation(true)
 	_create_thought()
 	validate_animations()
 	_randomize_animation_phases()
@@ -444,8 +450,11 @@ func _randomize_animation_phases() -> void:
 
 func _reset_position_trail() -> void:
 	_position_trail.clear()
-	for _index: int in 36:
-		_position_trail.append(global_position)
+	var forward := Vector3(sin(rotation.y), 0.0, cos(rotation.y))
+	for index: int in 36:
+		# Seed an actual queue behind the leader. Repeating the same point made
+		# followers 2 and 4 overlap until enough live trail samples accumulated.
+		_position_trail.append(global_position - forward * float(35 - index) * 0.055)
 
 
 func _update_group_visuals(delta: float) -> void:
@@ -463,7 +472,7 @@ func _update_group_visuals(delta: float) -> void:
 				_position_trail.pop_front()
 		var last := _position_trail.size() - 1
 		for index: int in group_models.size():
-			var trail_index := maxi(last - index * 7, 0)
+			var trail_index := maxi(last - index * 14, 0)
 			var target := _position_trail[trail_index]
 			var before := _position_trail[maxi(trail_index - 1, 0)]
 			var after := _position_trail[mini(trail_index + 1, last)]
@@ -473,24 +482,42 @@ func _update_group_visuals(delta: float) -> void:
 				direction = Vector3(sin(rotation.y), 0.0, cos(rotation.y))
 			var lateral := Vector3(-direction.z, 0.0, direction.x)
 			if index > 0:
-				target += lateral * (0.16 if index % 2 == 0 else -0.16)
-			_move_group_model_toward(group_models[index], target, direction, delta, index == 0)
+				target += lateral * (0.20 if index % 2 == 0 else -0.20)
+			_move_group_model_toward(group_models[index], target, direction, delta, false)
 	else:
 		_arrange_waiting_formation(false, delta)
 
 
+func get_avoidance_points() -> Array[Vector3]:
+	var result: Array[Vector3] = []
+	if _seated or not is_collision_enabled():
+		return result
+	for model: Node3D in group_models:
+		if is_instance_valid(model) and model.visible:
+			result.append(model.global_position)
+	if result.is_empty():
+		result.append(global_position)
+	return result
+
+
 func _move_group_model_toward(model: Node3D, target: Vector3, direction: Vector3, delta: float, snap: bool = false) -> void:
-	target.y = 0.0
-	if snap or model.global_position.distance_to(target) > 2.5:
+	target.y = CHARACTER_FOOT_LIFT
+	if snap:
 		model.global_position = target
 	else:
-		model.global_position = model.global_position.lerp(target, 1.0 - exp(-delta * 10.0))
+		var travel := minf(model.global_position.distance_to(target), movement_speed * delta * 1.15)
+		var steps := maxi(ceili(travel / 0.16), 1)
+		for _step: int in steps:
+			var candidate := model.global_position.move_toward(target, travel / float(steps))
+			if world != null and not world.can_visual_person_step(self, model.global_position, candidate, agent_radius):
+				break
+			model.global_position = candidate
 	if direction.length_squared() > 0.001:
 		model.global_rotation.y = lerp_angle(model.global_rotation.y, atan2(direction.x, direction.z), 1.0 - exp(-delta * 12.0))
 
 
 func _arrange_waiting_formation(instant: bool = false, delta: float = 0.1) -> void:
-	var offsets := [Vector3.ZERO, Vector3(-0.34, 0.0, -0.32), Vector3(0.34, 0.0, -0.38), Vector3(0.0, 0.0, -0.78)]
+	var offsets := [Vector3.ZERO, Vector3(-0.72, 0.0, -0.52), Vector3(0.72, 0.0, -0.52), Vector3(0.0, 0.0, -1.18)]
 	for index: int in group_models.size():
 		var target: Vector3 = global_position + Vector3(offsets[index]).rotated(Vector3.UP, rotation.y)
 		var direction := Vector3(sin(rotation.y), 0.0, cos(rotation.y))
@@ -537,7 +564,7 @@ func _advance_seating(delta: float) -> bool:
 	for index: int in mini(group_models.size(), assignments.size()):
 		var model := group_models[index]
 		var target := Vector3(assignments[index].position)
-		target.y = 0.015
+		target.y = CHARACTER_FOOT_LIFT
 		var distance := model.global_position.distance_to(target)
 		if distance > 0.045:
 			all_arrived = false
@@ -566,7 +593,7 @@ func _enforce_seat_alignment() -> void:
 	for index: int in mini(group_models.size(), assignments.size()):
 		var model := group_models[index]
 		var position := Vector3(assignments[index].position)
-		position.y = 0.015
+		position.y = CHARACTER_FOOT_LIFT
 		model.global_position = position
 		var direction := position.direction_to(center)
 		var facing := atan2(direction.x, direction.z)
@@ -579,9 +606,11 @@ func _enforce_seat_alignment() -> void:
 
 func _stand_group_for_exit() -> void:
 	var approach := Vector3(table.get("approach_position", global_position))
-	global_position = world.find_safe_agent_position(approach, self)
 	_seated = false
 	set_collision_enabled(true)
+	global_position = approach
+	_arrange_waiting_formation(true)
+	global_position = world.find_safe_agent_position(approach, self)
 	_arrange_waiting_formation(true)
 	_reset_position_trail()
 
