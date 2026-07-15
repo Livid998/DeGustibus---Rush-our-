@@ -1,0 +1,16 @@
+[
+ {"id":"fridge","name":"Frigorifero","type":"storage","capacity":2,"speed":1.0,"footprint":[1,1],"price":650,"model":"res://assets/equipment/fridge_A_decorated.gltf"},
+ {"id":"storage","name":"Magazzino","type":"storage","capacity":3,"speed":1.0,"footprint":[1,1],"price":420,"model":"res://assets/decor/shelf_B_large_decorated.gltf"},
+ {"id":"prep_counter","name":"Banco preparazione","type":"prep","capacity":2,"speed":1.0,"footprint":[2,1],"price":480,"model":"res://assets/equipment/kitchentable_A_large.gltf"},
+ {"id":"cutting_board","name":"Tagliere","type":"cut","capacity":1,"speed":1.0,"footprint":[1,1],"price":220,"model":"res://assets/equipment/kitchentable_B.gltf"},
+ {"id":"stove","name":"Fornello","type":"cook","capacity":1,"speed":1.0,"footprint":[1,1],"price":580,"model":"res://assets/equipment/stove_single.gltf"},
+ {"id":"multi_stove","name":"Cucina multipla","type":"cook","capacity":3,"speed":1.05,"footprint":[2,1],"price":1200,"model":"res://assets/equipment/stove_multi.gltf"},
+ {"id":"oven","name":"Forno","type":"bake","capacity":3,"speed":1.0,"footprint":[1,1],"price":1100,"model":"res://assets/equipment/oven.gltf"},
+ {"id":"pizza_oven","name":"Forno pizza","type":"pizza","capacity":2,"speed":1.0,"footprint":[2,1],"price":1450,"model":"res://assets/equipment/pizza_oven.gltf"},
+ {"id":"sink","name":"Lavello","type":"wash","capacity":1,"speed":1.0,"footprint":[1,1],"price":520,"model":"res://assets/equipment/kitchentable_sink.gltf"},
+ {"id":"dish_rack","name":"Scolapiatti","type":"wash","capacity":4,"speed":1.0,"footprint":[1,1],"price":260,"model":"res://assets/equipment/dishrack_plates.gltf"},
+ {"id":"pass","name":"Pass","type":"pass","capacity":6,"speed":1.0,"footprint":[2,1],"price":600,"model":"res://assets/equipment/kitchentable_A.gltf"},
+ {"id":"dessert","name":"Stazione dessert","type":"dessert","capacity":2,"speed":1.0,"footprint":[1,1],"price":900,"model":"res://assets/equipment/icecream_machine.gltf"},
+ {"id":"dough","name":"Stazione impasto","type":"dough","capacity":1,"speed":1.0,"footprint":[1,1],"price":880,"model":"res://assets/equipment/stand_mixer.gltf"}
+]
+

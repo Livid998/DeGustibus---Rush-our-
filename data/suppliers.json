@@ -1,0 +1,9 @@
+[
+ {"id":"wholesale","name":"Grossista Centrale","delivery":5.0,"quality":2,"urgent_fee":18,"products":["flour","potato","onion"]},
+ {"id":"produce","name":"Ortofrutta Verde","delivery":4.0,"quality":3,"urgent_fee":16,"products":["tomato","potato","onion","carrot","mushroom","lettuce"]},
+ {"id":"butcher","name":"Macelleria Bruno","delivery":6.0,"quality":3,"urgent_fee":24,"products":["patty","steak","ham","pepperoni"]},
+ {"id":"dairy","name":"Caseificio Alba","delivery":5.0,"quality":3,"urgent_fee":20,"products":["cheese","egg","milk"]},
+ {"id":"bakery","name":"Forno del Borgo","delivery":3.0,"quality":2,"urgent_fee":14,"products":["bun","dough"]},
+ {"id":"deli","name":"Laboratorio Gusto","delivery":3.5,"quality":2,"urgent_fee":22,"products":["veg_patty","ice_vanilla","ice_chocolate","ice_strawberry","tomato_sauce","dough_base","cheese_grated","potato_cut"]}
+]
+

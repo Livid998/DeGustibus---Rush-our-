@@ -1,0 +1,547 @@
+extends Node
+
+signal task_board_changed
+signal order_created(order: Dictionary)
+signal order_updated(order: Dictionary)
+signal dish_ready(order: Dictionary)
+signal service_task_created(task: Dictionary)
+signal customer_count_changed(count: int)
+signal statistics_changed
+
+var simulation_speed: float = 1.0
+var world: Node = null
+var tasks: Dictionary = {}
+var orders: Dictionary = {}
+var service_tasks: Dictionary = {}
+var stations: Dictionary = {}
+var customers: Array[Node] = []
+var stats: Dictionary = {}
+var _task_serial := 0
+var _order_serial := 0
+var _service_serial := 0
+
+
+func _ready() -> void:
+	reset_service_stats()
+
+
+func _process(delta: float) -> void:
+	var scaled := delta * simulation_speed
+	if GameState.restaurant_state == "open" or GameState.restaurant_state == "closing":
+		GameState.service_seconds += scaled
+		_update_waiting_tasks(scaled)
+		_update_metrics(scaled)
+	if GameState.restaurant_state == "closing" and customers.is_empty():
+		stats.labor_cost += EconomyManager.pay_shift_wages()
+		GameState.set_restaurant_state("closed")
+		SaveManager.save_game()
+
+
+func bind_world(value: Node) -> void:
+	world = value
+
+
+func set_speed(value: float) -> void:
+	simulation_speed = clampf(value, 1.0, 4.0)
+
+
+func open_restaurant() -> void:
+	if GameState.restaurant_state != "closed":
+		return
+	reset_service_stats()
+	GameState.service_seconds = 0.0
+	GameState.progress.services_started = int(GameState.progress.get("services_started", 0)) + 1
+	GameState.check_progression()
+	GameState.set_restaurant_state("open")
+
+
+func request_close() -> void:
+	if GameState.restaurant_state == "open":
+		GameState.set_restaurant_state("closing")
+
+
+func close_immediately() -> void:
+	for customer: Node in customers.duplicate():
+		if is_instance_valid(customer):
+			customer.queue_free()
+	customers.clear()
+	for task_id: String in service_tasks:
+		service_tasks[task_id].state = "cancelled"
+	GameState.set_restaurant_state("closed")
+	customer_count_changed.emit(0)
+
+
+func register_station(station_id: String, node: Node, capacity: int) -> void:
+	if not stations.has(station_id):
+		stations[station_id] = []
+	stations[station_id].append({
+		"node": node,
+		"capacity": capacity,
+		"busy": 0,
+		"busy_time": 0.0,
+		"total_time": 0.0,
+		"completed": 0,
+		"blocked": 0,
+		"wait_total": 0.0
+	})
+
+
+func unregister_world_stations() -> void:
+	stations.clear()
+
+
+func register_customer(customer: Node) -> void:
+	if not customers.has(customer):
+		customers.append(customer)
+		customer_count_changed.emit(customers.size())
+
+
+func unregister_customer(customer: Node, lost: bool = false) -> void:
+	customers.erase(customer)
+	if lost:
+		stats.customers_lost += 1
+	customer_count_changed.emit(customers.size())
+
+
+func create_order(recipe_id: String, table_id: String, customer: Node) -> Dictionary:
+	var recipe: Dictionary = DataRegistry.recipes_by_id.get(recipe_id, {})
+	if recipe.is_empty():
+		return {}
+	_order_serial += 1
+	var order_id := "O%03d" % _order_serial
+	var order := {
+		"id": order_id,
+		"table_id": table_id,
+		"recipe_id": recipe_id,
+		"recipe_name": recipe.name,
+		"customer": customer,
+		"created_at": GameState.service_seconds,
+		"priority": 1,
+		"suspended": false,
+		"state": "cooking",
+		"ready": false,
+		"task_ids": [],
+		"missing": []
+	}
+	orders[order_id] = order
+	var step_task_ids: Dictionary = {}
+	for step: Dictionary in recipe.steps:
+		_task_serial += 1
+		var task_id := "%s_%s_%03d" % [order_id, step.id, _task_serial]
+		step_task_ids[String(step.id)] = task_id
+		var task := {
+			"id": task_id,
+			"order_id": order_id,
+			"recipe_step_id": String(step.id),
+			"priority": 1,
+			"dependencies": [],
+			"inputs": step.get("inputs", {}).duplicate(true),
+			"output": String(step.get("output", "")),
+			"station": String(step.station),
+			"state": "waiting_dependencies",
+			"employee_id": "",
+			"remaining": float(step.get("time", 1.0)),
+			"duration": float(step.get("time", 1.0)),
+			"animation": String(step.get("animation", "PickUp")),
+			"model": String(step.get("model", "")),
+			"created_at": GameState.service_seconds,
+			"station_runtime": null,
+			"stock_consumed": false,
+			"prebuilt": false
+		}
+		for dependency: String in step.get("dependencies", []):
+			task.dependencies.append(step_task_ids.get(dependency, "%s_%s" % [order_id, dependency]))
+		var output_id := String(step.get("output", ""))
+		if bool(step.get("preppable", false)) and int(GameState.purchased_preparations.get(output_id, 0)) > 0:
+			GameState.purchased_preparations[output_id] = int(GameState.purchased_preparations[output_id]) - 1
+			task.state = "completed"
+			task.prebuilt = true
+			task.remaining = 0.0
+		tasks[task_id] = task
+		order.task_ids.append(task_id)
+	_update_waiting_tasks(0.0)
+	order_created.emit(order)
+	task_board_changed.emit()
+	return order
+
+
+func _update_waiting_tasks(delta: float) -> void:
+	var changed := false
+	for task_id: String in tasks:
+		var task: Dictionary = tasks.get(task_id, {})
+		if task.is_empty() or not task.has("state"):
+			continue
+		if bool(orders.get(String(task.get("order_id", "")), {}).get("suspended", false)):
+			continue
+		if String(task.get("state", "cancelled")) in ["completed", "cancelled", "failed", "reserved", "in_progress"]:
+			continue
+		if String(task.get("state", "")) == "queued":
+			continue
+		var dependencies_ready := true
+		for dependency_id: String in task.get("dependencies", []):
+			if not tasks.has(dependency_id) or String(tasks.get(dependency_id, {}).get("state", "missing")) != "completed":
+				dependencies_ready = false
+				break
+		if not dependencies_ready:
+			task.state = "waiting_dependencies"
+			continue
+		if not _stock_available(task.get("inputs", {})):
+			task.state = "waiting_stock"
+			for ingredient_id: String in task.get("inputs", {}):
+				if not stats.ingredients_out.has(ingredient_id):
+					stats.ingredients_out.append(ingredient_id)
+		else:
+			task.state = "queued"
+			changed = true
+		if task.state in ["waiting_dependencies", "waiting_stock", "queued"]:
+			task["wait_age"] = float(task.get("wait_age", 0.0)) + delta
+	if changed:
+		task_board_changed.emit()
+	_refresh_order_missing_components()
+
+
+func claim_kitchen_task(employee: Dictionary, from_position: Variant = null) -> Dictionary:
+	if String(employee.get("role", "")) == "waiter":
+		return {}
+	var best: Dictionary = {}
+	var best_score := -INF
+	for task_id: String in tasks:
+		var task: Dictionary = tasks.get(task_id, {})
+		if task.is_empty() or String(task.get("state", "")) != "queued":
+			continue
+		if bool(orders.get(String(task.get("order_id", "")), {}).get("suspended", false)):
+			continue
+		var runtime: Dictionary = _find_free_station(task.station)
+		if runtime.is_empty():
+			continue
+		var skill := float(employee.get("skills", {}).get(task.station, 0.55))
+		var score := float(task.priority) * 100.0 + float(task.get("wait_age", 0.0)) * 2.0 + skill * 20.0
+		if String(employee.get("preferred_station", "")) == String(task.station):
+			score += 35.0
+		if from_position is Vector3:
+			score -= Vector3(from_position).distance_to(get_station_position(runtime)) * 1.5
+		if score > best_score:
+			best_score = score
+			best = task
+			best["candidate_runtime"] = runtime
+	if best.is_empty():
+		return {}
+	best.state = "reserved"
+	best.employee_id = String(employee.id)
+	best.station_runtime = best.candidate_runtime
+	best.erase("candidate_runtime")
+	best.station_runtime.busy += 1
+	task_board_changed.emit()
+	return best
+
+
+func begin_kitchen_task(task_id: String) -> bool:
+	if not tasks.has(task_id):
+		return false
+	var task: Dictionary = tasks[task_id]
+	if task.state != "reserved":
+		return false
+	if not GameState.consume_stock(task.inputs):
+		task.state = "waiting_stock"
+		task.employee_id = ""
+		_release_station(task)
+		task.station_runtime.blocked += 1 if task.station_runtime else 0
+		task.station_runtime = null
+		task_board_changed.emit()
+		return false
+	task.stock_consumed = true
+	task.state = "in_progress"
+	return true
+
+
+func advance_kitchen_task(task_id: String, delta: float, employee: Dictionary) -> bool:
+	if not tasks.has(task_id):
+		return true
+	var task: Dictionary = tasks[task_id]
+	if task.state != "in_progress":
+		return true
+	var skill := float(employee.get("skills", {}).get(task.station, 0.65))
+	var speed := float(employee.get("speed", 1.0)) * lerpf(0.8, 1.2, skill)
+	task.remaining -= delta * speed
+	if task.remaining > 0.0:
+		return false
+	_complete_kitchen_task(task)
+	return true
+
+
+func _complete_kitchen_task(task: Dictionary) -> void:
+	task.state = "completed"
+	var employee_id := String(task.get("employee_id", ""))
+	if not employee_id.is_empty():
+		stats.employee_tasks[employee_id] = int(stats.employee_tasks.get(employee_id, 0)) + 1
+	if task.station_runtime:
+		task.station_runtime.completed += 1
+		task.station_runtime.wait_total += float(task.get("wait_age", 0.0))
+	_release_station(task)
+	var order: Dictionary = orders.get(task.order_id, {})
+	var all_done := not order.is_empty()
+	for task_id: String in order.get("task_ids", []):
+		if not tasks.has(task_id) or String(tasks.get(task_id, {}).get("state", "missing")) != "completed":
+			all_done = false
+			break
+	if all_done:
+		order.ready = true
+		order.state = "at_pass"
+		dish_ready.emit(order)
+		if is_instance_valid(order.customer):
+			request_service(order.customer, "serve", order.customer.get_service_position(), {"order_id": order.id})
+	order_updated.emit(order)
+	_update_waiting_tasks(0.0)
+	task_board_changed.emit()
+
+
+func cancel_employee_task(employee_id: String) -> void:
+	for task_id: String in tasks:
+		var task: Dictionary = tasks.get(task_id, {})
+		if task.is_empty():
+			continue
+		if String(task.get("employee_id", "")) == employee_id and String(task.get("state", "")) == "reserved":
+			task.state = "queued"
+			task.employee_id = ""
+			_release_station(task)
+
+
+func request_service(customer: Node, action: String, target: Vector3, payload: Dictionary = {}) -> Dictionary:
+	_service_serial += 1
+	var task := {
+		"id": "S%04d" % _service_serial,
+		"customer": customer,
+		"action": action,
+		"target": target,
+		"payload": payload,
+		"state": "queued",
+		"employee_id": "",
+		"created_at": GameState.service_seconds,
+		"priority": 2 if action == "serve" else 1
+	}
+	service_tasks[task.id] = task
+	service_task_created.emit(task)
+	return task
+
+
+func claim_service_task(employee: Dictionary) -> Dictionary:
+	if String(employee.get("role", "")) != "waiter":
+		return {}
+	var best: Dictionary = {}
+	var score := -INF
+	for task_id: String in service_tasks:
+		var task: Dictionary = service_tasks.get(task_id, {})
+		if task.is_empty() or String(task.get("state", "")) != "queued" or not is_instance_valid(task.get("customer")):
+			continue
+		var candidate := float(task.priority) * 100.0 + GameState.service_seconds - float(task.created_at)
+		if candidate > score:
+			score = candidate
+			best = task
+	if best.is_empty():
+		return {}
+	best.state = "reserved"
+	best.employee_id = String(employee.id)
+	return best
+
+
+func complete_service_task(task_id: String) -> void:
+	if not service_tasks.has(task_id):
+		return
+	var task: Dictionary = service_tasks[task_id]
+	task.state = "completed"
+	var employee_id := String(task.get("employee_id", ""))
+	if not employee_id.is_empty():
+		stats.employee_tasks[employee_id] = int(stats.employee_tasks.get(employee_id, 0)) + 1
+	if is_instance_valid(task.customer) and task.customer.has_method("service_completed"):
+		task.customer.service_completed(task.action, task.payload)
+
+
+func raise_order_priority(order_id: String) -> void:
+	if not orders.has(order_id):
+		return
+	orders[order_id].priority = mini(int(orders[order_id].priority) + 1, 3)
+	for task_id: String in orders[order_id].task_ids:
+		tasks[task_id].priority = orders[order_id].priority
+	task_board_changed.emit()
+
+
+func toggle_order_suspended(order_id: String) -> void:
+	if not orders.has(order_id) or String(orders[order_id].state) == "paid":
+		return
+	orders[order_id].suspended = not bool(orders[order_id].get("suspended", false))
+	order_updated.emit(orders[order_id])
+	task_board_changed.emit()
+
+
+func complete_order_payment(order_id: String, satisfaction: float) -> void:
+	if not orders.has(order_id):
+		return
+	var order: Dictionary = orders[order_id]
+	if order.state == "paid":
+		return
+	order.state = "paid"
+	var price := int(GameState.menu.get(order.recipe_id, {}).get("price", DataRegistry.recipes_by_id[order.recipe_id].price))
+	var tip := int(round(max(satisfaction - 0.7, 0.0) * price * 0.3))
+	GameState.earn(price + tip, "%s servito" % order.recipe_name)
+	stats.revenue += price + tip
+	stats.ingredient_cost += DataRegistry.estimate_recipe_cost(DataRegistry.recipes_by_id[order.recipe_id])
+	stats.customers_served += 1
+	stats.satisfaction_sum += satisfaction
+	stats.recipe_sales[order.recipe_id] = int(stats.recipe_sales.get(order.recipe_id, 0)) + 1
+	stats.service_time_total += GameState.service_seconds - float(order.created_at)
+	GameState.record_completed_order(String(order.recipe_id), satisfaction)
+	statistics_changed.emit()
+
+
+func get_station_position(runtime: Dictionary) -> Vector3:
+	if runtime.is_empty() or not is_instance_valid(runtime.node):
+		return Vector3.ZERO
+	if runtime.node.has_method("get_interaction_position"):
+		return runtime.node.get_interaction_position()
+	return runtime.node.global_position
+
+
+func _find_free_station(station_id: String) -> Dictionary:
+	for runtime: Dictionary in stations.get(station_id, []):
+		if is_instance_valid(runtime.node) and int(runtime.busy) < int(runtime.capacity):
+			return runtime
+	return {}
+
+
+func _release_station(task: Dictionary) -> void:
+	if task.station_runtime:
+		task.station_runtime.busy = maxi(int(task.station_runtime.busy) - 1, 0)
+
+
+func _stock_available(requirements: Dictionary) -> bool:
+	for ingredient_id: String in requirements:
+		if int(GameState.stock.get(ingredient_id, {}).get("amount", 0)) < int(requirements[ingredient_id]):
+			return false
+	return true
+
+
+func _refresh_order_missing_components() -> void:
+	for order_id: String in orders:
+		var order: Dictionary = orders[order_id]
+		var missing: Array[String] = []
+		for task_id: String in order.get("task_ids", []):
+			var task: Dictionary = tasks.get(task_id, {})
+			if String(task.get("state", "")) != "waiting_stock":
+				continue
+			for ingredient_id: String in task.get("inputs", {}):
+				if int(GameState.stock.get(ingredient_id, {}).get("amount", 0)) < int(task.inputs[ingredient_id]):
+					var ingredient_name := String(DataRegistry.ingredients_by_id.get(ingredient_id, {"name": ingredient_id}).name)
+					if not missing.has(ingredient_name):
+						missing.append(ingredient_name)
+		order.missing = missing
+
+
+func _update_metrics(delta: float) -> void:
+	for station_id: String in stations:
+		for runtime: Dictionary in stations[station_id]:
+			runtime.total_time += delta
+			if runtime.busy > 0:
+				runtime.busy_time += delta * minf(float(runtime.busy) / maxf(float(runtime.capacity), 1.0), 1.0)
+
+
+func station_metrics() -> Array:
+	var result: Array = []
+	for definition: Dictionary in DataRegistry.stations:
+		var busy_time := 0.0
+		var total_time := 0.0
+		var busy := 0
+		var capacity := 0
+		var completed := 0
+		var blocked := 0
+		var wait_total := 0.0
+		for runtime: Dictionary in stations.get(definition.id, []):
+			busy_time += float(runtime.busy_time)
+			total_time += float(runtime.total_time)
+			busy += int(runtime.busy)
+			capacity += int(runtime.capacity)
+			completed += int(runtime.completed)
+			blocked += int(runtime.blocked)
+			wait_total += float(runtime.wait_total)
+		var queue := 0
+		for task_id: String in tasks:
+			if tasks[task_id].station == definition.id and tasks[task_id].state in ["queued", "waiting_stock"]:
+				queue += 1
+		var utilization := 0.0 if total_time <= 0.0 else busy_time / total_time * 100.0
+		result.append({
+			"id": definition.id,
+			"name": definition.name,
+			"utilization": utilization,
+			"predicted": predicted_station_load(definition.id),
+			"queue": queue,
+			"busy": busy,
+			"capacity": capacity,
+			"completed": completed,
+			"blocked": blocked,
+			"average_wait": wait_total / maxf(completed, 1.0),
+			"idle": maxf(100.0 - utilization, 0.0)
+		})
+	return result
+
+
+func predicted_station_load(station_id: String) -> float:
+	var load := 0.0
+	var capacity := 0
+	for runtime: Dictionary in stations.get(station_id, []):
+		capacity += int(runtime.capacity)
+	capacity = maxi(capacity, 1)
+	for recipe: Dictionary in DataRegistry.active_recipes(GameState.menu):
+		for step: Dictionary in recipe.steps:
+			if step.station == station_id:
+				load += float(step.time) * float(recipe.get("popularity", 1.0)) * 18.0
+	return load / capacity
+
+
+func reset_service_stats() -> void:
+	stats = {
+		"revenue": 0,
+		"ingredient_cost": 0.0,
+		"labor_cost": 0,
+		"customers_served": 0,
+		"customers_lost": 0,
+		"satisfaction_sum": 0.0,
+		"recipe_sales": {},
+		"employee_tasks": {},
+		"service_time_total": 0.0,
+		"waste": 0,
+		"ingredients_out": []
+	}
+	tasks.clear()
+	orders.clear()
+	service_tasks.clear()
+	statistics_changed.emit()
+
+
+func summary() -> Dictionary:
+	var served := int(stats.customers_served)
+	var top_recipe := "—"
+	var low_recipe := "—"
+	var top_count := -1
+	var low_count := 999999
+	for recipe_id: String in stats.recipe_sales:
+		var count := int(stats.recipe_sales[recipe_id])
+		if count > top_count:
+			top_count = count
+			top_recipe = DataRegistry.recipes_by_id[recipe_id].name
+		if count < low_count:
+			low_count = count
+			low_recipe = DataRegistry.recipes_by_id[recipe_id].name
+	return {
+		"revenue": int(stats.revenue),
+		"ingredient_cost": int(round(float(stats.ingredient_cost))),
+		"labor_cost": int(stats.labor_cost),
+		"profit": int(stats.revenue - float(stats.ingredient_cost) - int(stats.labor_cost)),
+		"customers_served": served,
+		"customers_lost": int(stats.customers_lost),
+		"satisfaction": 0.0 if served == 0 else float(stats.satisfaction_sum) / served,
+		"top_recipe": top_recipe,
+		"low_recipe": low_recipe,
+		"waste": int(stats.waste)
+		,"average_time": 0.0 if served == 0 else float(stats.service_time_total) / served
+		,"employee_tasks": stats.employee_tasks.duplicate(true)
+		,"ingredients_out": stats.ingredients_out.duplicate()
+	}

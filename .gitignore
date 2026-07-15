@@ -1,0 +1,5 @@
+.godot/
+*.tmp
+*.bak
+save_debug/
+*.log

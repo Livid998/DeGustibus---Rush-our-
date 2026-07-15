@@ -1,0 +1,16 @@
+[
+ {"id":"tomato_sauce","name":"Salsa di pomodoro","inputs":{"tomato":2},"station":"prep_counter","time":2.5,"model":"res://assets/food/food_ingredient_tomato_sauce.gltf","market_price":7.0},
+ {"id":"dough_base","name":"Base pizza","inputs":{"dough":1},"station":"dough","time":2.0,"model":"res://assets/food/food_ingredient_dough_base.gltf","market_price":5.5},
+ {"id":"tomato_slices","name":"Pomodoro affettato","inputs":{"tomato":1},"station":"cutting_board","time":1.5,"model":"res://assets/food/food_ingredient_tomato_slice.gltf","market_price":3.5},
+ {"id":"mushroom_cut","name":"Funghi tagliati","inputs":{"mushroom":1},"station":"cutting_board","time":1.6,"model":"res://assets/food/food_ingredient_mushroom_chopped.gltf","market_price":4.0},
+ {"id":"onion_chopped","name":"Cipolla tritata","inputs":{"onion":1},"station":"cutting_board","time":1.4,"model":"res://assets/food/food_ingredient_onion_chopped.gltf","market_price":2.8},
+ {"id":"cheese_grated","name":"Formaggio grattugiato","inputs":{"cheese":1},"station":"prep_counter","time":1.3,"model":"res://assets/food/food_ingredient_cheese_grated.gltf","market_price":5.0},
+ {"id":"cheese_slice","name":"Formaggio a fette","inputs":{"cheese":1},"station":"cutting_board","time":1.1,"model":"res://assets/food/food_ingredient_cheese_slice.gltf","market_price":4.8},
+ {"id":"burger_cooked","name":"Hamburger cotto","inputs":{"patty":1},"station":"stove","time":3.0,"model":"res://assets/food/food_ingredient_burger_cooked.gltf","market_price":8.0},
+ {"id":"veg_burger_cooked","name":"Burger vegetale cotto","inputs":{"veg_patty":1},"station":"stove","time":2.7,"model":"res://assets/food/food_ingredient_vegetableburger_cooked.gltf","market_price":7.5},
+ {"id":"lettuce_cut","name":"Lattuga tagliata","inputs":{"lettuce":1},"station":"cutting_board","time":1.2,"model":"res://assets/food/food_ingredient_lettuce_chopped.gltf","market_price":3.0},
+ {"id":"potato_cut","name":"Patate tagliate","inputs":{"potato":2},"station":"cutting_board","time":1.8,"model":"res://assets/food/food_ingredient_potato_chopped.gltf","market_price":4.0},
+ {"id":"steak_pieces","name":"Bistecca a pezzi","inputs":{"steak":1},"station":"cutting_board","time":2.0,"model":"res://assets/food/food_ingredient_steak_pieces.gltf","market_price":9.0},
+ {"id":"bun_split","name":"Panino diviso","inputs":{"bun":1},"station":"prep_counter","time":1.0,"model":"res://assets/food/food_ingredient_bun_bottom.gltf","market_price":3.0}
+]
+

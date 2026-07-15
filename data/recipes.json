@@ -1,0 +1,49 @@
+[
+ {"id":"margherita","name":"Pizza margherita","icon_index":0,"unlocked":true,"active":true,"price":24,"popularity":1.2,"dish_model":"res://assets/food/food_pizza_cheese_plated.gltf","steps":[
+  {"id":"base","station":"dough","inputs":{"dough":1},"output":"dough_base","time":2.0,"preppable":true,"animation":"PickUp"},
+  {"id":"sauce","station":"prep_counter","inputs":{"tomato":2},"output":"tomato_sauce","time":2.4,"preppable":true,"animation":"PickUp"},
+  {"id":"grate","station":"prep_counter","inputs":{"cheese":1},"output":"cheese_grated","time":1.4,"preppable":true,"animation":"PickUp"},
+  {"id":"assemble","station":"prep_counter","inputs":{},"output":"pizza_raw","time":1.8,"dependencies":["base","sauce","grate"],"animation":"PickUp"},
+  {"id":"bake","station":"pizza_oven","inputs":{},"output":"margherita","time":5.0,"dependencies":["assemble"],"animation":"PickUp","model":"res://assets/food/food_pizza_cheese_plated.gltf"}]},
+ {"id":"mushroom_pizza","name":"Pizza ai funghi","icon_index":1,"unlocked":true,"active":false,"price":27,"popularity":1.0,"dish_model":"res://assets/food/food_pizza_mushroom_plated.gltf","steps":[
+  {"id":"base","station":"dough","inputs":{"dough":1},"output":"dough_base","time":2.0,"preppable":true,"animation":"PickUp"},
+  {"id":"sauce","station":"prep_counter","inputs":{"tomato":2},"output":"tomato_sauce","time":2.4,"preppable":true,"animation":"PickUp"},
+  {"id":"toppings","station":"cutting_board","inputs":{"mushroom":1,"cheese":1},"output":"mushroom_topping","time":2.0,"preppable":true,"animation":"PickUp"},
+  {"id":"bake","station":"pizza_oven","inputs":{},"output":"mushroom_pizza","time":5.2,"dependencies":["base","sauce","toppings"],"animation":"PickUp","model":"res://assets/food/food_pizza_mushroom_plated.gltf"}]},
+ {"id":"pepperoni_pizza","name":"Pizza pepperoni","icon_index":2,"unlocked":false,"active":false,"price":29,"popularity":1.05,"dish_model":"res://assets/food/food_pizza_pepperoni_plated.gltf","steps":[
+  {"id":"base","station":"dough","inputs":{"dough":1},"output":"dough_base","time":2.0,"preppable":true,"animation":"PickUp"},
+  {"id":"toppings","station":"prep_counter","inputs":{"tomato":2,"cheese":1,"pepperoni":1},"output":"pepperoni_topping","time":2.4,"preppable":true,"animation":"PickUp"},
+  {"id":"bake","station":"pizza_oven","inputs":{},"output":"pepperoni_pizza","time":5.3,"dependencies":["base","toppings"],"animation":"PickUp","model":"res://assets/food/food_pizza_pepperoni_plated.gltf"}]},
+ {"id":"classic_burger","name":"Hamburger classico","icon_index":3,"unlocked":true,"active":true,"price":22,"popularity":1.15,"dish_model":"res://assets/food/food_burger.gltf","steps":[
+  {"id":"bun","station":"prep_counter","inputs":{"bun":1},"output":"bun_split","time":1.0,"preppable":true,"animation":"PickUp"},
+  {"id":"patty","station":"stove","inputs":{"patty":1},"output":"burger_cooked","time":3.2,"animation":"PickUp"},
+  {"id":"veg","station":"cutting_board","inputs":{"lettuce":1,"tomato":1},"output":"burger_veg","time":1.8,"preppable":true,"animation":"PickUp"},
+  {"id":"assemble","station":"prep_counter","inputs":{},"output":"classic_burger","time":1.5,"dependencies":["bun","patty","veg"],"animation":"PickUp","model":"res://assets/food/food_burger.gltf"}]},
+ {"id":"cheeseburger","name":"Cheeseburger","icon_index":4,"unlocked":true,"active":false,"price":25,"popularity":1.0,"dish_model":"res://assets/food/food_burger.gltf","steps":[
+  {"id":"bun","station":"prep_counter","inputs":{"bun":1},"output":"bun_split","time":1.0,"preppable":true,"animation":"PickUp"},
+  {"id":"hot","station":"stove","inputs":{"patty":1,"cheese":1},"output":"cheese_patty","time":3.6,"animation":"PickUp"},
+  {"id":"veg","station":"cutting_board","inputs":{"lettuce":1,"tomato":1},"output":"burger_veg","time":1.8,"preppable":true,"animation":"PickUp"},
+  {"id":"assemble","station":"prep_counter","inputs":{},"output":"cheeseburger","time":1.5,"dependencies":["bun","hot","veg"],"animation":"PickUp","model":"res://assets/food/food_burger.gltf"}]},
+ {"id":"veggie_burger","name":"Burger vegetale","icon_index":5,"unlocked":false,"active":false,"price":24,"popularity":0.9,"dish_model":"res://assets/food/food_vegetableburger.gltf","steps":[
+  {"id":"bun","station":"prep_counter","inputs":{"bun":1},"output":"bun_split","time":1.0,"preppable":true,"animation":"PickUp"},
+  {"id":"patty","station":"stove","inputs":{"veg_patty":1},"output":"veg_burger_cooked","time":2.8,"animation":"PickUp"},
+  {"id":"assemble","station":"prep_counter","inputs":{"lettuce":1,"tomato":1},"output":"veggie_burger","time":1.6,"dependencies":["bun","patty"],"animation":"PickUp","model":"res://assets/food/food_vegetableburger.gltf"}]},
+ {"id":"roast_potatoes","name":"Patate al forno","icon_index":6,"unlocked":true,"active":false,"price":13,"popularity":0.8,"dish_model":"res://assets/food/food_dinner.gltf","steps":[
+  {"id":"cut","station":"cutting_board","inputs":{"potato":2},"output":"potato_cut","time":1.8,"preppable":true,"animation":"PickUp"},
+  {"id":"cook","station":"oven","inputs":{},"output":"roast_potatoes","time":4.4,"dependencies":["cut"],"animation":"PickUp","model":"res://assets/food/food_dinner.gltf"}]},
+ {"id":"mixed_salad","name":"Insalata mista","icon_index":7,"unlocked":true,"active":true,"price":16,"popularity":0.9,"dish_model":"res://assets/food/food_dinner.gltf","steps":[
+  {"id":"cut","station":"cutting_board","inputs":{"lettuce":1,"tomato":1,"carrot":1},"output":"salad_mix","time":2.5,"preppable":true,"animation":"PickUp"},
+  {"id":"plate","station":"prep_counter","inputs":{},"output":"mixed_salad","time":1.1,"dependencies":["cut"],"animation":"PickUp","model":"res://assets/food/food_dinner.gltf"}]},
+ {"id":"beef_stew","name":"Stufato carne e verdure","icon_index":8,"unlocked":true,"active":true,"price":28,"popularity":0.85,"dish_model":"res://assets/food/food_stew.gltf","steps":[
+  {"id":"chop","station":"cutting_board","inputs":{"steak":1,"carrot":1,"potato":1,"onion":1},"output":"stew_raw","time":3.0,"preppable":true,"animation":"PickUp"},
+  {"id":"simmer","station":"multi_stove","inputs":{},"output":"beef_stew_batch","quantity":3,"time":6.5,"dependencies":["chop"],"animation":"PickUp"},
+  {"id":"plate","station":"pass","inputs":{},"output":"beef_stew","time":0.8,"dependencies":["simmer"],"animation":"PickUp","model":"res://assets/food/food_stew.gltf"}]},
+ {"id":"steak_plate","name":"Piatto di bistecca","icon_index":9,"unlocked":true,"active":false,"price":34,"popularity":0.75,"dish_model":"res://assets/food/food_dinner.gltf","steps":[
+  {"id":"side","station":"cutting_board","inputs":{"potato":1,"carrot":1},"output":"steak_side","time":2.0,"preppable":true,"animation":"PickUp"},
+  {"id":"sear","station":"stove","inputs":{"steak":1},"output":"steak_cooked","time":4.2,"animation":"PickUp"},
+  {"id":"plate","station":"pass","inputs":{},"output":"steak_plate","time":1.0,"dependencies":["side","sear"],"animation":"PickUp","model":"res://assets/food/food_dinner.gltf"}]},
+ {"id":"icecream_cone","name":"Gelato in cono","icon_index":10,"unlocked":false,"active":false,"price":12,"popularity":0.8,"dish_model":"res://assets/food/food_icecream_cone_vanilla.gltf","steps":[
+  {"id":"scoop","station":"dessert","inputs":{"ice_vanilla":1},"output":"icecream_cone","time":1.8,"animation":"PickUp","model":"res://assets/food/food_icecream_cone_vanilla.gltf"}]},
+ {"id":"mixed_sundae","name":"Coppa gelato mista","icon_index":11,"unlocked":false,"active":false,"price":16,"popularity":0.7,"dish_model":"res://assets/food/food_icecream_cone_chocolate.gltf","steps":[
+  {"id":"scoop","station":"dessert","inputs":{"ice_chocolate":1,"ice_strawberry":1},"output":"mixed_sundae","time":2.4,"animation":"PickUp","model":"res://assets/food/food_icecream_cone_chocolate.gltf"}]}
+]
