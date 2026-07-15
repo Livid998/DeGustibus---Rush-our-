@@ -33,6 +33,7 @@ var current_animation := ""
 var stuck_time := 0.0
 var total_stuck_time := 0.0
 var repath_cooldown := 0.0
+var traffic_wait_time := 0.0
 var _collision_shape: CollisionShape3D
 var _animation_resolution_cache: Dictionary = {}
 
@@ -247,6 +248,7 @@ func move_to(target: Vector3) -> bool:
 	stuck_time = 0.0
 	total_stuck_time = 0.0
 	repath_cooldown = 0.0
+	traffic_wait_time = 0.0
 	if _flat_distance(global_position, destination) <= arrival_tolerance:
 		navigation_active = false
 		path.clear()
@@ -293,11 +295,18 @@ func advance_path(delta: float, carry: bool = false) -> bool:
 		return true
 	if world != null and not world.can_agent_advance_route(self, path, path_index):
 		# Waiting outside a reserved one-person corridor is intentional, not a
-		# navigation failure. Do not accumulate stuck time or repeatedly repath.
+		# navigation failure. After a short pause, however, ask the traffic-aware
+		# planner for a genuine alternate route instead of queueing unnecessarily.
 		velocity = velocity.move_toward(Vector3.ZERO, movement_acceleration * delta)
 		stuck_time = 0.0
+		traffic_wait_time += delta
+		if traffic_wait_time >= 0.45 and repath_cooldown <= 0.0:
+			traffic_wait_time = 0.0
+			repath_cooldown = 0.35
+			_repath()
 		play_animation("Idle")
 		return false
+	traffic_wait_time = 0.0
 	var target := path[path_index]
 	var flat_target := Vector3(target.x, global_position.y, target.z)
 	var distance_to_target := global_position.distance_to(flat_target)

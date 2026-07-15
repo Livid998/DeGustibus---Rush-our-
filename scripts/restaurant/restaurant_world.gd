@@ -969,6 +969,13 @@ func _traffic_grid_path(from_cell: Vector2i, to_cell: Vector2i, agent: AnimatedA
 
 func _traffic_cell_costs(requesting_agent: AnimatedAgent) -> Dictionary:
 	var costs: Dictionary = {}
+	for key: String in corridor_reservations:
+		if int(corridor_reservations.get(key, 0)) == requesting_agent.get_instance_id():
+			continue
+		for encoded_cell: String in key.split(";", false):
+			var coordinates := encoded_cell.split(",", false)
+			if coordinates.size() == 2:
+				_add_traffic_cost(costs, Vector2i(int(coordinates[0]), int(coordinates[1])), 18.0)
 	for other: AnimatedAgent in navigation_agents:
 		if other == requesting_agent or not is_instance_valid(other) or other.is_queued_for_deletion() or not other.is_collision_enabled():
 			continue
