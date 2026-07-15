@@ -29,6 +29,12 @@ Pubblicare ogni nuova cartella `builds/pwa` allo stesso indirizzo HTTPS. La PWA 
 
 Non cambiare dominio o percorso pubblico tra una versione e l'altra e non cancellare i dati del sito, altrimenti il browser la considererà un'installazione diversa o eliminerà il salvataggio.
 
+## Pubblicazione automatica su GitHub Pages
+
+Il workflow `.github/workflows/deploy-pwa.yml` esporta e pubblica automaticamente la PWA a ogni push rilevante sul ramo `main`.
+
+La prima volta, nel repository GitHub aprire `Settings > Pages` e scegliere `GitHub Actions` come sorgente. Dopo il successivo push o un avvio manuale da `Actions > Pubblica PWA`, il gioco sarà disponibile all'indirizzo Pages mostrato dal job di pubblicazione.
+
 ## Installazione su iPad/iPhone
 
 Aprire l'indirizzo HTTPS in Safari, usare `Condividi` e scegliere `Aggiungi alla schermata Home`.
