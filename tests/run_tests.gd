@@ -27,6 +27,7 @@ func _run() -> void:
 	_test_service_assignment()
 	_test_price_margin()
 	_test_save_load()
+	_test_completed_work_pruning()
 	world.queue_free()
 	print("TESTS: %d checks, %d failures" % [checks, failures.size()])
 	for failure: String in failures:
@@ -216,7 +217,19 @@ func _test_builder_and_seating(world: RestaurantWorld) -> void:
 	_expect(GameState.layout.size() == layout_count and world.object_at_cell(Vector2i(6, 3)) == table and chairs_followed, "moving furniture preserves its UID, occupancy and attached chairs")
 	var second_table := world.placed_objects.get("table_2") as PlacedObject
 	_expect(world._seat_positions_for_table(second_table).size() == 4, "table capacity is derived from four real adjacent chairs")
-	_expect(world.floor_tiles.size() == RestaurantWorld.GRID_SIZE.x * RestaurantWorld.GRID_SIZE.y and is_equal_approx((world.floor_tiles.values()[0] as Node3D).scale.x, 0.5), "floor tiles use non-overlapping normalized scale")
+	var batched_floor_instances := 0
+	for batch: MultiMeshInstance3D in world.floor_batches.values():
+		batched_floor_instances += batch.multimesh.instance_count
+	_expect(world.floor_tiles.size() == RestaurantWorld.GRID_SIZE.x * RestaurantWorld.GRID_SIZE.y and world.floor_batches.size() == 2 and batched_floor_instances == world.floor_tiles.size(), "floor tiles are grouped into two GPU batches without overlap")
+	var floor_test_cell := Vector2i(0, 0)
+	var original_floor_style := String(world.floor_tiles[floor_test_cell])
+	var changed_floor_style := "floor_kitchen" if original_floor_style != "floor_kitchen" else "floor_dining"
+	world.set_floor_style(floor_test_cell, changed_floor_style)
+	var changed_batch_instances := 0
+	for batch: MultiMeshInstance3D in world.floor_batches.values():
+		changed_batch_instances += batch.multimesh.instance_count
+	_expect(String(world.floor_tiles[floor_test_cell]) == changed_floor_style and changed_batch_instances == world.floor_tiles.size(), "individual floor cells remain editable while GPU batches rebuild coherently")
+	world.set_floor_style(floor_test_cell, original_floor_style)
 	var editable_walls := 0
 	for object: PlacedObject in world.placed_objects.values():
 		if object.item_id in ["wall", "wall_window"]:
@@ -296,6 +309,35 @@ func _test_agent_navigation_and_appearance(world: RestaurantWorld) -> void:
 			walk_loops = true
 	_expect(walk_loops, "walk cycles are forced to loop so moving characters never freeze into a sliding pose")
 	sample_agent.queue_free()
+	var closing_customer := CustomerAgent.new()
+	world.customer_root.add_child(closing_customer)
+	closing_customer.global_position = world.cell_to_world(world.entrance_cell)
+	closing_customer.setup(world, 2)
+	GameState.set_restaurant_state("closing")
+	closing_customer._process(0.1)
+	_expect(closing_customer.state == "leaving", "unseated customers head for the exit as soon as restaurant closing begins")
+	closing_customer.global_position = world.cell_to_world(world.entrance_cell)
+	closing_customer._process(0.1)
+	_expect(closing_customer.is_queued_for_deletion(), "customers already at the exit are removed without blocking closing")
+	GameState.set_restaurant_state("closed")
+
+
+func _test_completed_work_pruning() -> void:
+	var original_state := GameState.serialize().duplicate(true)
+	var original_seconds := GameState.service_seconds
+	SimulationManager.reset_service_stats()
+	var dummy_customer := Node.new()
+	add_child(dummy_customer)
+	for _index: int in 120:
+		var order := SimulationManager.create_order("margherita", "soak_table", dummy_customer)
+		SimulationManager.complete_order_payment(String(order.id), 0.9)
+	GameState.service_seconds += SimulationManager.COMPLETED_WORK_RETENTION + 1.0
+	SimulationManager._prune_completed_work()
+	_expect(SimulationManager.orders.is_empty() and SimulationManager.tasks.is_empty(), "completed orders and recipe tasks remain bounded during long sessions")
+	dummy_customer.queue_free()
+	SimulationManager.reset_service_stats()
+	GameState.deserialize(original_state)
+	GameState.service_seconds = original_seconds
 
 
 func _test_camera_input(world: RestaurantWorld) -> void:

@@ -19,6 +19,11 @@ var stats: Dictionary = {}
 var _task_serial := 0
 var _order_serial := 0
 var _service_serial := 0
+var _simulation_tick_accumulator := 0.0
+var _maintenance_clock := 0.0
+
+const SIMULATION_TICK := 0.1
+const COMPLETED_WORK_RETENTION := 6.0
 
 
 func _ready() -> void:
@@ -29,8 +34,22 @@ func _process(delta: float) -> void:
 	var scaled := delta * simulation_speed
 	if GameState.restaurant_state == "open" or GameState.restaurant_state == "closing":
 		GameState.service_seconds += scaled
-		_update_waiting_tasks(scaled)
-		_update_metrics(scaled)
+		_simulation_tick_accumulator += scaled
+		# Task dependency scans and station metrics do not need renderer frequency.
+		# A fixed tick removes frame-rate-dependent work and prevents large catch-up
+		# spikes after a browser tab resumes from the background.
+		var processed := 0
+		while _simulation_tick_accumulator >= SIMULATION_TICK and processed < 5:
+			_update_waiting_tasks(SIMULATION_TICK)
+			_update_metrics(SIMULATION_TICK)
+			_simulation_tick_accumulator -= SIMULATION_TICK
+			_maintenance_clock += SIMULATION_TICK
+			processed += 1
+		if processed == 5:
+			_simulation_tick_accumulator = minf(_simulation_tick_accumulator, SIMULATION_TICK)
+		if _maintenance_clock >= 2.0:
+			_maintenance_clock = 0.0
+			_prune_completed_work()
 	if GameState.restaurant_state == "closing" and customers.is_empty():
 		stats.labor_cost += EconomyManager.pay_shift_wages()
 		GameState.set_restaurant_state("closed")
@@ -69,6 +88,7 @@ func close_immediately() -> void:
 		service_tasks[task_id].state = "cancelled"
 	GameState.set_restaurant_state("closed")
 	customer_count_changed.emit(0)
+	_prune_completed_work(true)
 
 
 func register_station(station_id: String, node: Node, capacity: int) -> void:
@@ -424,6 +444,7 @@ func complete_service_task(task_id: String) -> void:
 	if String(task.get("state", "")) not in ["reserved", "in_progress"]:
 		return
 	task.state = "completed"
+	task.finished_at = GameState.service_seconds
 	var employee_id := String(task.get("employee_id", ""))
 	if not employee_id.is_empty():
 		stats.employee_tasks[employee_id] = int(stats.employee_tasks.get(employee_id, 0)) + 1
@@ -443,10 +464,12 @@ func cancel_customer_work(customer: Node) -> void:
 		if service_task.get("customer") == customer and String(service_task.get("state", "")) not in ["completed", "cancelled"]:
 			service_task.state = "cancelled"
 			service_task.employee_id = ""
+			service_task.finished_at = GameState.service_seconds
 	for order: Dictionary in orders.values():
 		if order.get("customer") != customer or String(order.get("state", "")) in ["paid", "cancelled"]:
 			continue
 		order.state = "cancelled"
+		order.finished_at = GameState.service_seconds
 		for task_id: String in order.get("task_ids", []):
 			var task: Dictionary = tasks.get(task_id, {})
 			if task.is_empty() or String(task.get("state", "")) in ["completed", "cancelled"]:
@@ -482,6 +505,7 @@ func complete_order_payment(order_id: String, satisfaction: float) -> void:
 	if order.state == "paid":
 		return
 	order.state = "paid"
+	order.finished_at = GameState.service_seconds
 	var price := int(GameState.menu.get(order.recipe_id, {}).get("price", DataRegistry.recipes_by_id[order.recipe_id].price))
 	var tip := int(round(max(satisfaction - 0.7, 0.0) * price * 0.3))
 	GameState.earn(price + tip, "%s servito" % order.recipe_name)
@@ -631,7 +655,30 @@ func reset_service_stats() -> void:
 	tasks.clear()
 	orders.clear()
 	service_tasks.clear()
+	_simulation_tick_accumulator = 0.0
+	_maintenance_clock = 0.0
 	statistics_changed.emit()
+
+
+func _prune_completed_work(force: bool = false) -> void:
+	var now := GameState.service_seconds
+	for service_id: String in service_tasks.keys():
+		var service_task: Dictionary = service_tasks.get(service_id, {})
+		if String(service_task.get("state", "")) not in ["completed", "cancelled"]:
+			continue
+		var finished_at := float(service_task.get("finished_at", service_task.get("created_at", now)))
+		if force or now - finished_at >= COMPLETED_WORK_RETENTION:
+			service_tasks.erase(service_id)
+	for order_id: String in orders.keys():
+		var order: Dictionary = orders.get(order_id, {})
+		if String(order.get("state", "")) not in ["paid", "cancelled"]:
+			continue
+		var finished_at := float(order.get("finished_at", order.get("created_at", now)))
+		if not force and now - finished_at < COMPLETED_WORK_RETENTION:
+			continue
+		for task_id: String in order.get("task_ids", []):
+			tasks.erase(task_id)
+		orders.erase(order_id)
 
 
 func summary() -> Dictionary:

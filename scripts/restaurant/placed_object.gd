@@ -17,6 +17,7 @@ var _status_label: Label3D
 var _food_anchor: Node3D
 var _food_model: Node3D
 var _steam: GPUParticles3D
+var _last_progress_percent := -1
 
 
 func setup(value_uid: String, item: Dictionary, cell: Vector2i, rotation_value: int, value_support_uid: String = "", value_attachment_slot: int = -1) -> void:
@@ -78,6 +79,7 @@ func get_interaction_positions() -> Array[Vector3]:
 
 func show_task(task: Dictionary) -> void:
 	current_task = task
+	_last_progress_percent = 0
 	_status_label.visible = true
 	_status_label.text = "%s  0%%" % task.recipe_step_id.capitalize()
 	if _food_model:
@@ -98,12 +100,17 @@ func update_task_progress(task: Dictionary) -> void:
 	if current_task.is_empty() or current_task.id != task.id:
 		show_task(task)
 	var percent := int(round((1.0 - float(task.remaining) / maxf(float(task.duration), 0.01)) * 100.0))
-	_status_label.text = "%s  %d%%" % [String(task.recipe_step_id).capitalize(), percent]
+	var displayed_percent := clampi((percent / 5) * 5, 0, 100)
+	if displayed_percent == _last_progress_percent:
+		return
+	_last_progress_percent = displayed_percent
+	_status_label.text = "%s  %d%%" % [String(task.recipe_step_id).capitalize(), displayed_percent]
 
 
 func clear_task() -> void:
 	# Keep SimulationManager's shared task dictionary intact.
 	current_task = {}
+	_last_progress_percent = -1
 	if _status_label:
 		_status_label.visible = false
 	if _food_model:
@@ -157,7 +164,7 @@ func _create_station_feedback() -> void:
 
 func _create_heat_particles() -> void:
 	_steam = GPUParticles3D.new()
-	_steam.amount = 7
+	_steam.amount = 3 if WebPlatformProfile.low_memory_mode() else 6
 	_steam.lifetime = 1.6
 	_steam.randomness = 0.45
 	_steam.emitting = false

@@ -27,6 +27,7 @@ var world_build_button: Button
 var current_screen := "Ristorante"
 var market_provider := MockMarketProvider.new()
 var _refresh_clock := 0.0
+var _pass_refresh_clock := 0.0
 var _toast_tween: Tween
 var _market_refresh_clock := 0.0
 var _theme: Theme
@@ -66,11 +67,15 @@ func _process(delta: float) -> void:
 	var market_changed := market_provider.tick(delta * SimulationManager.simulation_speed)
 	_market_refresh_clock -= delta
 	_refresh_clock += delta
-	if _refresh_clock >= 0.35:
+	_pass_refresh_clock += delta
+	if _refresh_clock >= 0.5:
 		_refresh_clock = 0.0
 		_update_top_bar()
-		_update_pass()
-		if current_screen == "Statistiche":
+	if _pass_refresh_clock >= 1.0:
+		_pass_refresh_clock = 0.0
+		if current_screen == "Ristorante":
+			_update_pass()
+		elif current_screen == "Statistiche":
 			show_screen("Statistiche", false)
 	if current_screen == "Mercato" and (market_changed or _market_refresh_clock <= 0.0):
 		_market_refresh_clock = 1.0

@@ -9,7 +9,8 @@ var _clock := 0.0
 func _process(delta: float) -> void:
 	var scaled := delta * SimulationManager.simulation_speed
 	_clock += scaled
-	for delivery: Dictionary in GameState.deliveries.duplicate():
+	for index: int in range(GameState.deliveries.size() - 1, -1, -1):
+		var delivery: Dictionary = GameState.deliveries[index]
 		delivery.remaining = float(delivery.remaining) - scaled
 		if delivery.remaining <= 0.0:
 			_complete_delivery(delivery)

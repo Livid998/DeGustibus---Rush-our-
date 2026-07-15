@@ -11,6 +11,8 @@ const SKIN_TONES: Array[Color] = [
 ]
 
 static var _face_shader: Shader
+static var _skin_material_cache: Dictionary = {}
+static var _face_material_cache: Dictionary = {}
 
 var world: RestaurantWorld
 var movement_speed := 2.5
@@ -30,6 +32,7 @@ var stuck_time := 0.0
 var total_stuck_time := 0.0
 var repath_cooldown := 0.0
 var _collision_shape: CollisionShape3D
+var _animation_resolution_cache: Dictionary = {}
 
 
 func configure_navigation(radius: float = 0.34, priority: int = 1) -> void:
@@ -70,6 +73,9 @@ func add_character_model(model_path: String, offset: Vector3 = Vector3.ZERO, ski
 	if skin_tone.a <= 0.0:
 		skin_tone = SKIN_TONES.pick_random()
 	_apply_character_palette(model, skin_tone)
+	# Characters already use a cheap blob shadow. Avoid rendering every skinned
+	# mesh a second time in the directional shadow pass.
+	ModelFactory.set_shadow_casting(model, GeometryInstance3D.SHADOW_CASTING_SETTING_OFF)
 	_add_blob_shadow(model)
 	var players := ModelFactory.find_animation_players(model)
 	animation_players.append_array(players)
@@ -100,16 +106,25 @@ func _apply_character_palette(model: Node3D, skin_tone: Color) -> void:
 				continue
 			var material_name := String(source.resource_name).to_lower()
 			if material_name == "skin" and source is StandardMaterial3D:
-				var skin_material := (source as StandardMaterial3D).duplicate() as StandardMaterial3D
-				skin_material.albedo_color = skin_tone
+				var skin_key := "%d:%s" % [source.get_instance_id(), skin_tone.to_html()]
+				var skin_material: StandardMaterial3D = _skin_material_cache.get(skin_key)
+				if skin_material == null:
+					skin_material = (source as StandardMaterial3D).duplicate() as StandardMaterial3D
+					skin_material.albedo_color = skin_tone
+					_skin_material_cache[skin_key] = skin_material
 				mesh_instance.set_surface_override_material(surface, skin_material)
 			elif material_name == "face":
-				var face_material := ShaderMaterial.new()
-				face_material.shader = _character_face_shader()
-				face_material.set_shader_parameter("feature_color", Color("15141a"))
-				face_material.set_shader_parameter("brow_color", hair_color.darkened(0.12))
 				var bounds := mesh_instance.mesh.get_aabb()
-				face_material.set_shader_parameter("brow_height", bounds.position.y + bounds.size.y * 0.808)
+				var brow_height := bounds.position.y + bounds.size.y * 0.808
+				var face_key := "%s:%.4f" % [hair_color.to_html(), brow_height]
+				var face_material: ShaderMaterial = _face_material_cache.get(face_key)
+				if face_material == null:
+					face_material = ShaderMaterial.new()
+					face_material.shader = _character_face_shader()
+					face_material.set_shader_parameter("feature_color", Color("15141a"))
+					face_material.set_shader_parameter("brow_color", hair_color.darkened(0.12))
+					face_material.set_shader_parameter("brow_height", brow_height)
+					_face_material_cache[face_key] = face_material
 				mesh_instance.set_surface_override_material(surface, face_material)
 
 
@@ -204,10 +219,15 @@ func _configure_animation_loops() -> void:
 
 
 func resolve_animation(player: AnimationPlayer, requested: String) -> StringName:
+	var cache_key := "%d:%s" % [player.get_instance_id(), requested.to_lower()]
+	if _animation_resolution_cache.has(cache_key):
+		return StringName(_animation_resolution_cache[cache_key])
 	for animation_name: StringName in player.get_animation_list():
 		var simple := String(animation_name).get_slice("/", String(animation_name).get_slice_count("/") - 1)
 		if simple.to_lower() == requested.to_lower() or String(animation_name).to_lower() == requested.to_lower():
+			_animation_resolution_cache[cache_key] = animation_name
 			return animation_name
+	_animation_resolution_cache[cache_key] = &""
 	return &""
 
 

@@ -5,6 +5,8 @@ var viewport_3d: SubViewport
 var model_root: Node3D
 var camera: Camera3D
 var auto_rotate := true
+var _render_clock := 0.0
+var _render_interval := 1.0 / 24.0
 
 
 func _ready() -> void:
@@ -12,9 +14,13 @@ func _ready() -> void:
 		custom_minimum_size = Vector2(180, 135)
 	stretch = true
 	viewport_3d = SubViewport.new()
-	viewport_3d.size = Vector2i(360, 270) if auto_rotate else Vector2i(180, 120)
+	var low_memory := WebPlatformProfile.low_memory_mode()
+	viewport_3d.size = Vector2i(220, 165) if low_memory else Vector2i(300, 225) if auto_rotate else Vector2i(180, 120)
 	viewport_3d.transparent_bg = auto_rotate
-	viewport_3d.render_target_update_mode = SubViewport.UPDATE_ALWAYS if auto_rotate else SubViewport.UPDATE_ONCE
+	viewport_3d.msaa_3d = Viewport.MSAA_DISABLED
+	viewport_3d.screen_space_aa = Viewport.SCREEN_SPACE_AA_DISABLED
+	viewport_3d.render_target_update_mode = SubViewport.UPDATE_ONCE
+	_render_interval = 1.0 / (12.0 if low_memory else 24.0)
 	add_child(viewport_3d)
 	model_root = Node3D.new()
 	viewport_3d.add_child(model_root)
@@ -40,8 +46,14 @@ func _ready() -> void:
 
 
 func _process(delta: float) -> void:
-	if model_root and auto_rotate:
-		model_root.rotation.y += delta * 0.55
+	if model_root == null or not auto_rotate or not is_visible_in_tree():
+		return
+	_render_clock += delta
+	if _render_clock < _render_interval:
+		return
+	model_root.rotation.y += _render_clock * 0.55
+	_render_clock = 0.0
+	viewport_3d.render_target_update_mode = SubViewport.UPDATE_ONCE
 
 
 func set_model(path: String) -> void:

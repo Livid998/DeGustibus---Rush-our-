@@ -26,12 +26,17 @@ var show_station_queues := false
 var _spawn_clock := 0.0
 var floor_root: Node3D
 var floor_tiles: Dictionary = {}
+var floor_batches: Dictionary = {}
 var grid_overlay: MeshInstance3D
 var debug_paths_root: Node3D
 var _queue_labels: Dictionary = {}
 var _debug_refresh_clock := 0.0
 var _temporary_blocked_edge_keys: Dictionary = {}
 var _validation_ignored_edge_uid := ""
+var _loading_layout := false
+var _blocked_edge_uids: Dictionary = {}
+var _grid_path_cache: Dictionary = {}
+var _path_cache_suspended := false
 
 
 func _ready() -> void:
@@ -161,9 +166,6 @@ func _create_floor_and_walls() -> void:
 	floor_root = Node3D.new()
 	floor_root.name = "KayKitFloor"
 	add_child(floor_root)
-	for y: int in GRID_SIZE.y:
-		for x: int in GRID_SIZE.x:
-			set_floor_style(Vector2i(x, y), "floor_dining" if y < 8 else "floor_kitchen")
 	_create_grid_overlay()
 	_rebuild_astar()
 
@@ -187,6 +189,8 @@ func load_layout() -> void:
 	occupancy.clear()
 	table_occupants.clear()
 	waiting_reservations.clear()
+	_loading_layout = true
+	floor_tiles.clear()
 	for y: int in GRID_SIZE.y:
 		for x: int in GRID_SIZE.x:
 			set_floor_style(Vector2i(x, y), "floor_dining" if y < 8 else "floor_kitchen")
@@ -200,6 +204,8 @@ func load_layout() -> void:
 			String(record.get("support_uid", "")),
 			int(record.get("attachment_slot", -1))
 		)
+	_loading_layout = false
+	_rebuild_floor_batches()
 	_refresh_all_attachments()
 	_rebuild_astar()
 
@@ -625,6 +631,7 @@ func validate_placement(definition: Dictionary, cell: Vector2i, rotation_steps: 
 			_temporary_blocked_edge_keys[edge_key(cell, rotation_steps)] = true
 			_validation_ignored_edge_uid = ignored.uid if ignored != null else ""
 		else:
+			_path_cache_suspended = true
 			for occupied_cell: Vector2i in cells:
 				astar.set_point_solid(occupied_cell, true)
 		var access_error := _operational_access_error(definition, cells, rotation_steps, ignored, support_uid, baseline_access)
@@ -634,6 +641,7 @@ func validate_placement(definition: Dictionary, cell: Vector2i, rotation_steps: 
 		else:
 			for occupied_cell: Vector2i in cells:
 				astar.set_point_solid(occupied_cell, static_blocked.has(occupied_cell) or occupancy.has(occupied_cell))
+			_path_cache_suspended = false
 		if not access_error.is_empty():
 			return {"valid": false, "reason": access_error}
 	return {"valid": true, "reason": "Posizionamento valido"}
@@ -811,6 +819,11 @@ func _rebuild_astar() -> void:
 		if astar.is_in_boundsv(cell):
 			astar.set_point_solid(cell, true)
 	astar.set_point_solid(entrance_cell, false)
+	_blocked_edge_uids.clear()
+	for object: PlacedObject in placed_objects.values():
+		if is_instance_valid(object) and is_edge_placement(object.definition) and bool(object.definition.get("blocking", true)):
+			_blocked_edge_uids[edge_key(object.grid_cell, object.rotation_steps)] = object.uid
+	_grid_path_cache.clear()
 	navigation_revision += 1
 	for agent: AnimatedAgent in navigation_agents.duplicate():
 		if not is_instance_valid(agent) or agent.is_queued_for_deletion() or not agent.is_collision_enabled():
@@ -825,6 +838,11 @@ func _grid_path(from_cell: Vector2i, to_cell: Vector2i) -> Array[Vector2i]:
 	var empty: Array[Vector2i] = []
 	if not astar.is_in_boundsv(from_cell) or not astar.is_in_boundsv(to_cell) or astar.is_point_solid(from_cell) or astar.is_point_solid(to_cell):
 		return empty
+	var cache_key := "%d,%d>%d,%d" % [from_cell.x, from_cell.y, to_cell.x, to_cell.y]
+	if not _path_cache_suspended and _temporary_blocked_edge_keys.is_empty() and _validation_ignored_edge_uid.is_empty() and _grid_path_cache.has(cache_key):
+		var cached: Array[Vector2i] = []
+		cached.assign(_grid_path_cache[cache_key])
+		return cached
 	var frontier: Array[Vector2i] = [from_cell]
 	var came_from: Dictionary = {from_cell: from_cell}
 	var head := 0
@@ -840,6 +858,8 @@ func _grid_path(from_cell: Vector2i, to_cell: Vector2i) -> Array[Vector2i]:
 			came_from[neighbor] = current
 			frontier.append(neighbor)
 	if not came_from.has(to_cell):
+		if not _path_cache_suspended and _temporary_blocked_edge_keys.is_empty() and _validation_ignored_edge_uid.is_empty():
+			_grid_path_cache[cache_key] = empty
 		return empty
 	var result: Array[Vector2i] = []
 	var cursor := to_cell
@@ -848,6 +868,8 @@ func _grid_path(from_cell: Vector2i, to_cell: Vector2i) -> Array[Vector2i]:
 		cursor = came_from[cursor]
 	result.append(from_cell)
 	result.reverse()
+	if not _path_cache_suspended and _temporary_blocked_edge_keys.is_empty() and _validation_ignored_edge_uid.is_empty():
+		_grid_path_cache[cache_key] = result.duplicate()
 	return result
 
 
@@ -866,12 +888,8 @@ func _wall_blocks_step(from_cell: Vector2i, to_cell: Vector2i) -> bool:
 		return false
 	if _temporary_blocked_edge_keys.has(key):
 		return true
-	for object: PlacedObject in placed_objects.values():
-		if not is_instance_valid(object) or object.uid == _validation_ignored_edge_uid or not is_edge_placement(object.definition) or not bool(object.definition.get("blocking", true)):
-			continue
-		if edge_key(object.grid_cell, object.rotation_steps) == key:
-			return true
-	return false
+	var blocking_uid := String(_blocked_edge_uids.get(key, ""))
+	return not blocking_uid.is_empty() and blocking_uid != _validation_ignored_edge_uid
 
 
 func find_path(from_world: Vector3, to_world: Vector3) -> PackedVector3Array:
@@ -1260,15 +1278,64 @@ func _service_position_for_table(table_object: PlacedObject) -> Vector3:
 func set_floor_style(cell: Vector2i, item_id: String) -> void:
 	if not Rect2i(Vector2i.ZERO, GRID_SIZE).has_point(cell) or floor_root == null:
 		return
-	if floor_tiles.has(cell) and is_instance_valid(floor_tiles[cell]):
-		floor_tiles[cell].queue_free()
-	var path := "res://assets/environment/floor_kitchen.gltf" if item_id == "floor_kitchen" else "res://assets/environment/floor_kitchen_styleB.gltf"
-	var tile := ModelFactory.instantiate_model(path)
-	tile.scale = Vector3.ONE * 0.5
-	tile.position = cell_to_world(cell)
-	ModelFactory.set_shadow_casting(tile, GeometryInstance3D.SHADOW_CASTING_SETTING_OFF)
-	floor_root.add_child(tile)
-	floor_tiles[cell] = tile
+	floor_tiles[cell] = item_id
+	if not _loading_layout:
+		_rebuild_floor_batches()
+
+
+func _rebuild_floor_batches() -> void:
+	if floor_root == null:
+		return
+	for child: Node in floor_root.get_children():
+		child.queue_free()
+	floor_batches.clear()
+	var cells_by_style: Dictionary = {}
+	for cell: Vector2i in floor_tiles:
+		var style := String(floor_tiles[cell])
+		if not cells_by_style.has(style):
+			cells_by_style[style] = []
+		cells_by_style[style].append(cell)
+	for style: String in cells_by_style:
+		var path := "res://assets/environment/floor_kitchen.gltf" if style == "floor_kitchen" else "res://assets/environment/floor_kitchen_styleB.gltf"
+		var source := ModelFactory.instantiate_model(path)
+		var mesh_data: Dictionary = {}
+		_find_first_floor_mesh(source, Transform3D.IDENTITY, mesh_data)
+		if mesh_data.is_empty():
+			source.free()
+			continue
+		var cells: Array = cells_by_style[style]
+		var multimesh := MultiMesh.new()
+		multimesh.transform_format = MultiMesh.TRANSFORM_3D
+		multimesh.mesh = mesh_data.mesh
+		multimesh.instance_count = cells.size()
+		var mesh_transform: Transform3D = mesh_data.transform
+		for index: int in cells.size():
+			var cell: Vector2i = cells[index]
+			var tile_transform := Transform3D(Basis.IDENTITY.scaled(Vector3.ONE * 0.5), cell_to_world(cell))
+			multimesh.set_instance_transform(index, tile_transform * mesh_transform)
+		var batch := MultiMeshInstance3D.new()
+		batch.name = "FloorBatch_%s" % style
+		batch.multimesh = multimesh
+		batch.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		floor_root.add_child(batch)
+		floor_batches[style] = batch
+		source.free()
+
+
+func _find_first_floor_mesh(node: Node, parent_transform: Transform3D, result: Dictionary) -> void:
+	if not result.is_empty():
+		return
+	var current_transform := parent_transform
+	if node is Node3D:
+		current_transform = parent_transform * (node as Node3D).transform
+	if node is MeshInstance3D and (node as MeshInstance3D).mesh != null:
+		result.mesh = (node as MeshInstance3D).mesh
+		result.transform = current_transform
+		return
+	for child: Node in node.get_children():
+		_find_first_floor_mesh(child, current_transform, result)
+		if not result.is_empty():
+			return
 
 
 func _create_grid_overlay() -> void:

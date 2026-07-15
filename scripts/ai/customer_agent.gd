@@ -25,6 +25,10 @@ const CUSTOMER_APPEARANCES: Array[String] = [
 	"Casual_Bald", "Suit_Male", "Suit_Female", "OldClassy_Male", "OldClassy_Female",
 	"Doctor_Male_Young", "Doctor_Female_Young", "Doctor_Male_Old", "Doctor_Female_Old"
 ]
+const MOBILE_CUSTOMER_APPEARANCES: Array[String] = [
+	"Casual_Male", "Casual_Female", "Casual2_Male", "Casual2_Female",
+	"Casual3_Male", "Casual3_Female", "Casual_Bald", "Suit_Female"
+]
 
 
 func setup(value_world: RestaurantWorld, size: int) -> void:
@@ -64,6 +68,9 @@ func _exit_tree() -> void:
 func _process(delta: float) -> void:
 	var scaled := delta * SimulationManager.simulation_speed
 	state_elapsed += scaled
+	if GameState.restaurant_state == "closing" and not _seated and state in ["entering", "waiting_table", "walking_to_table"]:
+		_leave_for_closing()
+		return
 	if state in ["waiting_table", "waiting_order", "waiting_food", "waiting_payment"]:
 		wait_time += scaled
 		var patience_pressure := clampf((state_elapsed - patience * 0.45) / maxf(patience, 1.0), 0.0, 1.0)
@@ -110,6 +117,9 @@ func _process(delta: float) -> void:
 			if state_elapsed > patience * 1.7:
 				_leave_lost("CONTO IN RITARDO")
 		"leaving":
+			if _flat_distance(global_position, world.cell_to_world(world.entrance_cell)) <= RestaurantWorld.CELL_SIZE * 0.72:
+				_finish_departure()
+				return
 			if navigation_failed:
 				departure_failures += 1
 				if departure_failures >= 3 or not move_to(world.cell_to_world(world.entrance_cell)):
@@ -281,6 +291,17 @@ func _begin_leaving(_lost: bool) -> void:
 	departure_failures = 0
 	if not move_to(world.cell_to_world(world.entrance_cell)):
 		departure_failures = 1
+	else:
+		play_animation("Walk")
+
+
+func _leave_for_closing() -> void:
+	if state == "leaving":
+		return
+	_thought.text = "CHIUSURA"
+	_thought.visible = true
+	SimulationManager.cancel_customer_work(self)
+	_begin_leaving(false)
 
 
 func _finish_departure() -> void:
@@ -293,7 +314,8 @@ func _finish_departure() -> void:
 
 func _build_group_models() -> void:
 	var available: Array[String] = []
-	for appearance: String in CUSTOMER_APPEARANCES:
+	var appearance_pool := MOBILE_CUSTOMER_APPEARANCES if WebPlatformProfile.low_memory_mode() else CUSTOMER_APPEARANCES
+	for appearance: String in appearance_pool:
 		if ResourceLoader.exists("res://assets/characters/%s.gltf" % appearance):
 			available.append(appearance)
 	available.shuffle()

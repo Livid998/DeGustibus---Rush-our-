@@ -37,10 +37,11 @@ func get_offers() -> Array:
 
 func tick(delta: float) -> bool:
 	var changed := false
-	for offer: Dictionary in _offers.duplicate():
+	for index: int in range(_offers.size() - 1, -1, -1):
+		var offer: Dictionary = _offers[index]
 		offer.remaining = float(offer.remaining) - delta
 		if float(offer.remaining) <= 0.0:
-			_offers.erase(offer)
+			_offers.remove_at(index)
 			changed = true
 	if _offers.is_empty():
 		refresh()
