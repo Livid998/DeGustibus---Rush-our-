@@ -26,9 +26,14 @@ var _task_visual_phase := ""
 var _task_visual_style := "assemble"
 var _task_output_model_path := ""
 var _completed_task_id := ""
+var _mechanism_nodes: Array[Node3D] = []
+var _mechanism_rest_rotations: Array[Vector3] = []
+var _access_animation_time := -1.0
+var _burner_glow: Node3D
 
 
 func _process(delta: float) -> void:
+	_update_access_animation(delta)
 	if current_task.is_empty() or _food_models.is_empty():
 		return
 	_task_motion_time += delta * SimulationManager.simulation_speed
@@ -45,6 +50,7 @@ func setup(value_uid: String, item: Dictionary, cell: Vector2i, rotation_value: 
 	visual_model.name = "VisualModel"
 	ModelFactory.align_visual_to_grid_origin(visual_model)
 	add_child(visual_model)
+	_configure_equipment_feedback()
 	_create_invisible_collision()
 	if not station_id.is_empty():
 		_create_station_feedback()
@@ -108,6 +114,9 @@ func show_task(task: Dictionary) -> void:
 		input_parts = FoodVisualFactory.parts_for_task(task, "output")
 		_task_visual_phase = "output"
 	_set_food_parts(input_parts)
+	if station_id in ["oven", "pizza_oven"]:
+		play_access_animation()
+	_set_burner_active(station_id in ["stove", "multi_stove"])
 	if _steam:
 		_steam.emitting = true
 
@@ -142,6 +151,7 @@ func clear_task() -> void:
 	if _status_label:
 		_status_label.visible = false
 	_clear_food_models()
+	_set_burner_active(false)
 	if _steam:
 		_steam.emitting = false
 
@@ -153,6 +163,9 @@ func complete_task_visual(task: Dictionary) -> void:
 	_task_progress_ratio = 1.0
 	_status_label.visible = false
 	_set_food_parts(FoodVisualFactory.parts_for_task(task, "output"))
+	_set_burner_active(false)
+	if station_id in ["oven", "pizza_oven"]:
+		play_access_animation()
 	if _steam:
 		_steam.emitting = false
 
@@ -161,7 +174,79 @@ func take_completed_output(task_id: String) -> void:
 	if task_id.is_empty() or _completed_task_id != task_id:
 		return
 	_completed_task_id = ""
+	if station_id in ["oven", "pizza_oven", "fridge"]:
+		play_access_animation()
 	_clear_food_models()
+
+
+func play_access_animation() -> void:
+	if _mechanism_nodes.is_empty():
+		return
+	_access_animation_time = 0.0
+
+
+func _configure_equipment_feedback() -> void:
+	if station_id in ["fridge", "oven", "pizza_oven"]:
+		for value: Node in visual_model.find_children("*door*", "Node3D", true, false):
+			var mechanism := value as Node3D
+			if mechanism == null:
+				continue
+			_mechanism_nodes.append(mechanism)
+			_mechanism_rest_rotations.append(mechanism.rotation)
+	if station_id in ["stove", "multi_stove"]:
+		_create_burner_glow()
+
+
+func _update_access_animation(delta: float) -> void:
+	if _access_animation_time < 0.0 or _mechanism_nodes.is_empty():
+		return
+	_access_animation_time += delta * SimulationManager.simulation_speed
+	var progress := clampf(_access_animation_time / 1.15, 0.0, 1.0)
+	var open_weight := sin(progress * PI)
+	open_weight = smoothstep(0.0, 1.0, open_weight)
+	for index: int in _mechanism_nodes.size():
+		var rest := _mechanism_rest_rotations[index]
+		if station_id == "fridge":
+			_mechanism_nodes[index].rotation = rest + Vector3(0.0, -PI * 0.48 * open_weight, 0.0)
+		else:
+			_mechanism_nodes[index].rotation = rest + Vector3(PI * 0.46 * open_weight, 0.0, 0.0)
+	if progress >= 1.0:
+		for index: int in _mechanism_nodes.size():
+			_mechanism_nodes[index].rotation = _mechanism_rest_rotations[index]
+		_access_animation_time = -1.0
+
+
+func _create_burner_glow() -> void:
+	_burner_glow = Node3D.new()
+	_burner_glow.name = "BurnerGlow"
+	var anchor_y := float(definition.get("work_anchor", [0.0, 1.22, 0.0])[1]) + 0.015
+	var positions: Array[Vector3] = [Vector3.ZERO]
+	if station_id == "multi_stove":
+		positions = [Vector3(-0.34, 0.0, -0.28), Vector3(0.34, 0.0, -0.28), Vector3(-0.34, 0.0, 0.28), Vector3(0.34, 0.0, 0.28)]
+	for offset: Vector3 in positions:
+		var burner := MeshInstance3D.new()
+		var disc := CylinderMesh.new()
+		disc.top_radius = 0.13
+		disc.bottom_radius = 0.13
+		disc.height = 0.018
+		disc.radial_segments = 16
+		burner.mesh = disc
+		var material := StandardMaterial3D.new()
+		material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		material.albedo_color = Color("ff6d2e")
+		material.emission_enabled = true
+		material.emission = Color("ff9a32")
+		material.emission_energy_multiplier = 1.7
+		burner.material_override = material
+		burner.position = Vector3(offset.x, anchor_y, offset.z)
+		_burner_glow.add_child(burner)
+	add_child(_burner_glow)
+	_burner_glow.visible = false
+
+
+func _set_burner_active(active: bool) -> void:
+	if _burner_glow != null:
+		_burner_glow.visible = active
 
 
 func _set_food_parts(parts: Array) -> void:

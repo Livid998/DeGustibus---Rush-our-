@@ -64,9 +64,15 @@
     {"model":"res://assets/equipment/pan_A.gltf","scale":0.62,"offset":[0.0,0.0,0.0],"role":"container"},
     {"model":"res://assets/food/food_ingredient_potato_chopped.gltf","scale":0.23,"offset":[0.0,0.16,0.0],"quantity":3,"spacing":0.10}
   ]},
-  {"id":"roast_potatoes","models":[
+  {"id":"roast_potatoes","consumption_container":"plate","models":[
     {"model":"res://assets/equipment/plate.gltf","scale":0.58,"offset":[0.0,0.0,0.0],"role":"container"},
     {"model":"res://assets/food/food_ingredient_potato_chopped.gltf","scale":0.23,"offset":[0.0,0.10,0.0],"quantity":4,"spacing":0.10}
+  ],"serving_models":[
+    {"model":"res://assets/food/food_ingredient_potato_chopped.gltf","scale":0.21,"offset":[0.0,0.10,0.0],"quantity":4,"spacing":0.10}
+  ],"partial_models":[
+    {"model":"res://assets/food/food_ingredient_potato_chopped.gltf","scale":0.23,"offset":[0.0,0.10,0.0],"quantity":2,"spacing":0.13}
+  ],"leftover_models":[
+    {"model":"res://assets/food/food_ingredient_potato_chopped.gltf","scale":0.20,"offset":[0.08,0.10,-0.05]}
   ]},
   {"id":"classic_burger_unplated","models":[
     {"model":"res://assets/food/food_burger.gltf","scale":0.50,"offset":[0.0,0.0,0.0]}
@@ -77,37 +83,133 @@
   {"id":"veggie_burger_unplated","models":[
     {"model":"res://assets/food/food_vegetableburger.gltf","scale":0.50,"offset":[0.0,0.0,0.0]}
   ]},
-  {"id":"margherita","models":[
+  {"id":"margherita","consumption_container":"plate","models":[
     {"model":"res://assets/food/food_pizza_cheese_plated.gltf","scale":0.32,"offset":[0.0,0.0,0.0]}
+  ],"serving_models":[
+    {"model":"res://assets/food/food_pizza_cheese_slice.gltf","scale":0.25,"offset":[0.0,0.07,0.0],"rotation":[0.0,0.0,0.0]},
+    {"model":"res://assets/food/food_pizza_cheese_slice.gltf","scale":0.25,"offset":[0.0,0.07,0.0],"rotation":[0.0,1.0472,0.0]},
+    {"model":"res://assets/food/food_pizza_cheese_slice.gltf","scale":0.25,"offset":[0.0,0.07,0.0],"rotation":[0.0,2.0944,0.0]},
+    {"model":"res://assets/food/food_pizza_cheese_slice.gltf","scale":0.25,"offset":[0.0,0.07,0.0],"rotation":[0.0,3.1416,0.0]},
+    {"model":"res://assets/food/food_pizza_cheese_slice.gltf","scale":0.25,"offset":[0.0,0.07,0.0],"rotation":[0.0,4.1888,0.0]},
+    {"model":"res://assets/food/food_pizza_cheese_slice.gltf","scale":0.25,"offset":[0.0,0.07,0.0],"rotation":[0.0,5.2360,0.0]}
+  ],"partial_models":[
+    {"model":"res://assets/food/food_pizza_cheese_slice.gltf","scale":0.31,"offset":[0.0,0.07,0.0],"quantity":2,"spacing":0.18}
+  ],"leftover_models":[
+    {"model":"res://assets/food/food_pizza_cheese_slice.gltf","scale":0.30,"offset":[0.07,0.07,-0.04]}
   ]},
-  {"id":"mushroom_pizza","models":[
+  {"id":"mushroom_pizza","consumption_container":"plate","models":[
     {"model":"res://assets/food/food_pizza_mushroom_plated.gltf","scale":0.32,"offset":[0.0,0.0,0.0]}
+  ],"serving_models":[
+    {"model":"res://assets/food/food_pizza_mushroom_slice.gltf","scale":0.25,"offset":[0.0,0.07,0.0],"rotation":[0.0,0.0,0.0]},
+    {"model":"res://assets/food/food_pizza_mushroom_slice.gltf","scale":0.25,"offset":[0.0,0.07,0.0],"rotation":[0.0,1.0472,0.0]},
+    {"model":"res://assets/food/food_pizza_mushroom_slice.gltf","scale":0.25,"offset":[0.0,0.07,0.0],"rotation":[0.0,2.0944,0.0]},
+    {"model":"res://assets/food/food_pizza_mushroom_slice.gltf","scale":0.25,"offset":[0.0,0.07,0.0],"rotation":[0.0,3.1416,0.0]},
+    {"model":"res://assets/food/food_pizza_mushroom_slice.gltf","scale":0.25,"offset":[0.0,0.07,0.0],"rotation":[0.0,4.1888,0.0]},
+    {"model":"res://assets/food/food_pizza_mushroom_slice.gltf","scale":0.25,"offset":[0.0,0.07,0.0],"rotation":[0.0,5.2360,0.0]}
+  ],"partial_models":[
+    {"model":"res://assets/food/food_pizza_mushroom_slice.gltf","scale":0.31,"offset":[0.0,0.07,0.0],"quantity":2,"spacing":0.18}
+  ],"leftover_models":[
+    {"model":"res://assets/food/food_pizza_mushroom_slice.gltf","scale":0.30,"offset":[0.07,0.07,-0.04]}
   ]},
-  {"id":"pepperoni_pizza","models":[
+  {"id":"pepperoni_pizza","consumption_container":"plate","models":[
     {"model":"res://assets/food/food_pizza_pepperoni_plated.gltf","scale":0.32,"offset":[0.0,0.0,0.0]}
+  ],"serving_models":[
+    {"model":"res://assets/food/food_pizza_pepperoni_slice.gltf","scale":0.25,"offset":[0.0,0.07,0.0],"rotation":[0.0,0.0,0.0]},
+    {"model":"res://assets/food/food_pizza_pepperoni_slice.gltf","scale":0.25,"offset":[0.0,0.07,0.0],"rotation":[0.0,1.0472,0.0]},
+    {"model":"res://assets/food/food_pizza_pepperoni_slice.gltf","scale":0.25,"offset":[0.0,0.07,0.0],"rotation":[0.0,2.0944,0.0]},
+    {"model":"res://assets/food/food_pizza_pepperoni_slice.gltf","scale":0.25,"offset":[0.0,0.07,0.0],"rotation":[0.0,3.1416,0.0]},
+    {"model":"res://assets/food/food_pizza_pepperoni_slice.gltf","scale":0.25,"offset":[0.0,0.07,0.0],"rotation":[0.0,4.1888,0.0]},
+    {"model":"res://assets/food/food_pizza_pepperoni_slice.gltf","scale":0.25,"offset":[0.0,0.07,0.0],"rotation":[0.0,5.2360,0.0]}
+  ],"partial_models":[
+    {"model":"res://assets/food/food_pizza_pepperoni_slice.gltf","scale":0.31,"offset":[0.0,0.07,0.0],"quantity":2,"spacing":0.18}
+  ],"leftover_models":[
+    {"model":"res://assets/food/food_pizza_pepperoni_slice.gltf","scale":0.30,"offset":[0.07,0.07,-0.04]}
   ]},
-  {"id":"classic_burger","models":[
+  {"id":"classic_burger","consumption_container":"plate","support_visible_full":true,"models":[
     {"model":"res://assets/food/food_burger.gltf","scale":0.52,"offset":[0.0,0.0,0.0]}
+  ],"serving_models":[
+    {"model":"res://assets/food/food_burger.gltf","scale":0.52,"offset":[0.0,0.08,0.0]}
+  ],"partial_models":[
+    {"model":"res://assets/food/food_burger.gltf","scale":0.43,"offset":[0.03,0.08,-0.01]}
+  ],"leftover_models":[
+    {"model":"res://assets/food/food_ingredient_burger_trash.gltf","scale":0.36,"offset":[0.05,0.08,-0.03]}
   ]},
-  {"id":"cheeseburger","models":[
+  {"id":"cheeseburger","consumption_container":"plate","support_visible_full":true,"models":[
     {"model":"res://assets/food/food_cheeseburger.glb","scale":1.30,"offset":[0.0,0.0,0.0]}
+  ],"serving_models":[
+    {"model":"res://assets/food/food_cheeseburger.glb","scale":1.30,"offset":[0.0,0.08,0.0]}
+  ],"partial_models":[
+    {"model":"res://assets/food/food_cheeseburger.glb","scale":1.05,"offset":[0.03,0.08,-0.01]}
+  ],"leftover_models":[
+    {"model":"res://assets/food/food_ingredient_burger_trash.gltf","scale":0.36,"offset":[0.05,0.08,-0.03]}
   ]},
-  {"id":"veggie_burger","models":[
+  {"id":"veggie_burger","consumption_container":"plate","support_visible_full":true,"models":[
     {"model":"res://assets/food/food_vegetableburger.gltf","scale":0.52,"offset":[0.0,0.0,0.0]}
+  ],"serving_models":[
+    {"model":"res://assets/food/food_vegetableburger.gltf","scale":0.52,"offset":[0.0,0.08,0.0]}
+  ],"partial_models":[
+    {"model":"res://assets/food/food_vegetableburger.gltf","scale":0.43,"offset":[0.03,0.08,-0.01]}
+  ],"leftover_models":[
+    {"model":"res://assets/food/food_ingredient_lettuce_chopped.gltf","scale":0.22,"offset":[0.04,0.08,-0.04]},
+    {"model":"res://assets/food/food_ingredient_tomato_slice.gltf","scale":0.21,"offset":[-0.06,0.08,0.04]}
   ]},
-  {"id":"mixed_salad","models":[
+  {"id":"mixed_salad","consumption_container":"bowl","models":[
     {"model":"res://assets/food/food_mixed_salad.glb","scale":0.90,"offset":[0.0,0.0,0.0]}
+  ],"serving_models":[
+    {"model":"res://assets/food/food_ingredient_lettuce_chopped.gltf","scale":0.20,"offset":[-0.05,0.13,0.0],"quantity":3,"spacing":0.10},
+    {"model":"res://assets/food/food_ingredient_tomato_slices.gltf","scale":0.17,"offset":[0.07,0.13,0.02],"quantity":2,"spacing":0.09},
+    {"model":"res://assets/food/food_ingredient_carrot_chopped.gltf","scale":0.16,"offset":[0.0,0.13,0.06]}
+  ],"partial_models":[
+    {"model":"res://assets/food/food_ingredient_lettuce_chopped.gltf","scale":0.20,"offset":[-0.05,0.13,0.0],"quantity":3,"spacing":0.10},
+    {"model":"res://assets/food/food_ingredient_tomato_slices.gltf","scale":0.17,"offset":[0.07,0.13,0.02],"quantity":2,"spacing":0.09},
+    {"model":"res://assets/food/food_ingredient_carrot_chopped.gltf","scale":0.16,"offset":[0.0,0.13,0.06]}
+  ],"leftover_models":[
+    {"model":"res://assets/food/food_ingredient_lettuce_chopped.gltf","scale":0.16,"offset":[-0.04,0.13,-0.03]},
+    {"model":"res://assets/food/food_ingredient_tomato_slice.gltf","scale":0.16,"offset":[0.05,0.13,0.02]},
+    {"model":"res://assets/food/food_ingredient_carrot_chopped.gltf","scale":0.14,"offset":[0.01,0.13,0.06]}
   ]},
-  {"id":"beef_stew","models":[
+  {"id":"beef_stew","consumption_container":"bowl","models":[
     {"model":"res://assets/food/food_stew.gltf","scale":0.55,"offset":[0.0,0.0,0.0]}
+  ],"serving_models":[
+    {"primitive":"disc","color":"#7a3f24","scale":0.43,"offset":[0.0,0.12,0.0],"role":"food"},
+    {"model":"res://assets/food/food_ingredient_steak_pieces.gltf","scale":0.18,"offset":[-0.07,0.14,-0.02],"quantity":2,"spacing":0.09},
+    {"model":"res://assets/food/food_ingredient_potato_chopped.gltf","scale":0.16,"offset":[0.07,0.14,0.02],"quantity":2,"spacing":0.08},
+    {"model":"res://assets/food/food_ingredient_carrot_chopped.gltf","scale":0.14,"offset":[0.0,0.14,0.06]}
+  ],"partial_models":[
+    {"model":"res://assets/food/food_ingredient_steak_pieces.gltf","scale":0.20,"offset":[-0.07,0.13,0.0]},
+    {"model":"res://assets/food/food_ingredient_carrot_chopped.gltf","scale":0.18,"offset":[0.08,0.13,0.02]}
+  ],"leftover_models":[
+    {"model":"res://assets/food/food_ingredient_steak_pieces.gltf","scale":0.16,"offset":[0.04,0.13,-0.03]}
   ]},
-  {"id":"steak_plate","models":[
+  {"id":"steak_plate","consumption_container":"plate","models":[
     {"model":"res://assets/food/food_dinner.gltf","scale":0.50,"offset":[0.0,0.0,0.0]}
+  ],"serving_models":[
+    {"model":"res://assets/food/food_ingredient_steak_cooked.glb","scale":0.31,"offset":[-0.06,0.08,0.0]},
+    {"model":"res://assets/food/food_ingredient_potato_chopped.gltf","scale":0.17,"offset":[0.11,0.08,0.03],"quantity":2,"spacing":0.08},
+    {"model":"res://assets/food/food_ingredient_carrot_chopped.gltf","scale":0.15,"offset":[0.08,0.08,-0.07]}
+  ],"partial_models":[
+    {"model":"res://assets/food/food_ingredient_steak_cooked.glb","scale":0.27,"offset":[-0.06,0.08,0.0]},
+    {"model":"res://assets/food/food_ingredient_potato_chopped.gltf","scale":0.18,"offset":[0.10,0.08,0.02]}
+  ],"leftover_models":[
+    {"model":"res://assets/food/food_ingredient_potato_chopped.gltf","scale":0.16,"offset":[0.06,0.08,-0.04]}
   ]},
-  {"id":"icecream_cone","models":[
+  {"id":"icecream_cone","consumption_container":"plate","support_visible_full":true,"models":[
     {"model":"res://assets/food/food_icecream_cone_vanilla.gltf","scale":0.52,"offset":[0.0,0.0,0.0]}
-  ]},
-  {"id":"mixed_sundae","models":[
+  ],"serving_models":[
+    {"model":"res://assets/food/food_icecream_cone_vanilla.gltf","scale":0.52,"offset":[0.0,0.08,0.0]}
+  ],"partial_models":[
+    {"model":"res://assets/food/food_icecream_cone_vanilla.gltf","scale":0.40,"offset":[0.04,0.08,-0.02]}
+  ],"leftover_models":[]},
+  {"id":"mixed_sundae","consumption_container":"bowl","models":[
     {"model":"res://assets/food/icecream_bowl_decorated_A.gltf","scale":0.50,"offset":[0.0,0.0,0.0]}
+  ],"serving_models":[
+    {"primitive":"sphere","color":"#f6e2aa","scale":0.24,"offset":[-0.08,0.22,0.0],"role":"food"},
+    {"primitive":"sphere","color":"#e989a8","scale":0.24,"offset":[0.08,0.22,0.01],"role":"food"},
+    {"primitive":"sphere","color":"#7a422d","scale":0.22,"offset":[0.0,0.25,-0.08],"role":"food"}
+  ],"partial_models":[
+    {"primitive":"sphere","color":"#f6e2aa","scale":0.20,"offset":[-0.05,0.20,0.0],"role":"food"},
+    {"primitive":"sphere","color":"#e989a8","scale":0.18,"offset":[0.06,0.19,0.02],"role":"food"}
+  ],"leftover_models":[
+    {"primitive":"sphere","color":"#e989a8","scale":0.13,"offset":[0.03,0.16,-0.03],"role":"food"}
   ]}
 ]

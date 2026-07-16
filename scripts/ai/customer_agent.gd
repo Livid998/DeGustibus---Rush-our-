@@ -369,7 +369,9 @@ func _update_dining(delta: float) -> void:
 		_diner_eat_remaining[diner_index] = float(_diner_eat_remaining[diner_index]) - delta
 		var remaining := maxf(float(_diner_eat_remaining[diner_index]), 0.0)
 		var total := maxf(float(_diner_eat_total.get(diner_index, 1.0)), 0.01)
-		_update_dish_consumption(String(order.id), remaining / total)
+		# Visual portions advance only on an actual eating gesture. Time still
+		# governs meal duration, but a plate never changes by itself between bites.
+		_update_dish_consumption(String(order.id), remaining / total, people[diner_index].bite_count())
 		if float(_diner_eat_remaining[diner_index]) <= 0.0:
 			_diner_finished[diner_index] = true
 			people[diner_index].set_seated_mode("conversation", false)
@@ -655,11 +657,12 @@ func _show_dish(order: Dictionary) -> void:
 	var recipe_id := String(order.get("recipe_id", ""))
 	var dish := Node3D.new()
 	dish.name = "TableDish_%s" % order_id
-	var content := FoodVisualFactory.instantiate_recipe_dish(recipe_id, 1.0)
+	# Table service always uses food-only geometry over one canonical container.
+	# This guarantees that clean, partial and dirty plates have identical size.
+	var content := FoodVisualFactory.instantiate_recipe_serving_food(recipe_id)
 	content.name = "FoodContent"
 	dish.add_child(content)
-	if recipe_id in ["classic_burger", "cheeseburger", "veggie_burger", "icecream_cone"]:
-		_add_support_plate(dish)
+	_add_support_container(dish, recipe_id, true)
 	add_child(dish)
 	dish.top_level = true
 	var diner_index := clampi(int(order.get("diner_index", 0)), 0, group_size - 1)
@@ -676,7 +679,7 @@ func _show_dish(order: Dictionary) -> void:
 	dish_models[order_id] = dish
 
 
-func _update_dish_consumption(order_id: String, remaining_ratio: float) -> void:
+func _update_dish_consumption(order_id: String, remaining_ratio: float, bite_count: int = -1) -> void:
 	var dish := dish_models.get(order_id) as Node3D
 	if dish == null or not is_instance_valid(dish):
 		return
@@ -685,48 +688,63 @@ func _update_dish_consumption(order_id: String, remaining_ratio: float) -> void:
 		desired_stage = 2
 	elif remaining_ratio <= 0.64:
 		desired_stage = 1
+	if bite_count >= 0:
+		desired_stage = mini(desired_stage, clampi(bite_count, 0, 2))
 	if int(_dish_consumption_stage.get(order_id, 0)) >= desired_stage:
 		return
 	_dish_consumption_stage[order_id] = desired_stage
-	_add_support_plate(dish)
+	var recipe_id := String(dish.get_meta("recipe_id", ""))
+	_add_support_container(dish, recipe_id, true)
 	var content := dish.get_node_or_null("FoodContent") as Node3D
-	if content == null:
-		return
-	if desired_stage == 1:
-		content.scale = Vector3.ONE * 0.74
-		content.position = Vector3(-0.035, 0.055, 0.025)
-	else:
-		content.scale = Vector3.ONE * 0.34
-		content.position = Vector3(0.075, 0.055, -0.045)
+	if content != null:
+		content.visible = false
+	var previous := dish.get_node_or_null("FoodRemainder") as Node3D
+	if previous != null:
+		dish.remove_child(previous)
+		previous.queue_free()
+	var parts := FoodVisualFactory.consumption_parts(recipe_id, desired_stage)
+	if not parts.is_empty():
+		var remainder := FoodVisualFactory.instantiate_parts(parts, 1.0, 6)
+		remainder.name = "FoodRemainder"
+		dish.add_child(remainder)
+		ModelFactory.set_shadow_casting(remainder, GeometryInstance3D.SHADOW_CASTING_SETTING_OFF)
 
 
-func _add_support_plate(dish: Node3D) -> void:
-	if dish.has_node("SupportPlate"):
+func _add_support_container(dish: Node3D, recipe_id: String, make_visible: bool) -> void:
+	var existing := dish.get_node_or_null("StableContainer") as Node3D
+	if existing != null:
+		existing.visible = make_visible
 		return
-	var plate := ModelFactory.instantiate_model("res://assets/equipment/plate.gltf", 0.55)
-	plate.name = "SupportPlate"
-	ModelFactory.align_visual_to_grid_origin(plate)
-	ModelFactory.set_shadow_casting(plate, GeometryInstance3D.SHADOW_CASTING_SETTING_OFF)
-	dish.add_child(plate)
-	dish.move_child(plate, 0)
+	var kind := FoodVisualFactory.consumption_container(recipe_id)
+	var model_path := "res://assets/equipment/bowl.gltf" if kind == "bowl" else "res://assets/equipment/plate.gltf"
+	var scale_factor := 0.58 if kind == "bowl" else 0.55
+	var container := ModelFactory.instantiate_model(model_path, scale_factor)
+	container.name = "StableContainer"
+	ModelFactory.align_visual_to_grid_origin(container)
+	ModelFactory.set_shadow_casting(container, GeometryInstance3D.SHADOW_CASTING_SETTING_OFF)
+	container.visible = make_visible
+	dish.add_child(container)
+	dish.move_child(container, 0)
+	dish.set_meta("consumption_container", kind)
 	var content := dish.get_node_or_null("FoodContent") as Node3D
-	if content != null and content.position.y < 0.05:
+	if make_visible and content != null and content.position.y < 0.05:
 		content.position.y = 0.055
 
 
 func _replace_dish_with_dirty(order_id: String) -> void:
-	var old := dish_models.get(order_id) as Node3D
-	if old == null or not is_instance_valid(old): return
-	var transform := old.global_transform
-	old.queue_free()
-	var dirty_path := "res://assets/equipment/plate_dirty.gltf"
-	var dirty := ModelFactory.instantiate_model(dirty_path, 0.55)
+	var dish := dish_models.get(order_id) as Node3D
+	if dish == null or not is_instance_valid(dish): return
+	for child: Node in dish.get_children():
+		dish.remove_child(child)
+		child.queue_free()
+	var kind := String(dish.get_meta("consumption_container", "plate"))
+	var dirty_path := "res://assets/equipment/bowl_dirty.gltf" if kind == "bowl" else "res://assets/equipment/plate_dirty.gltf"
+	var scale_factor := 0.58 if kind == "bowl" else 0.55
+	var dirty := ModelFactory.instantiate_model(dirty_path, scale_factor)
+	dirty.name = "DirtyContainer"
 	ModelFactory.align_visual_to_grid_origin(dirty)
-	add_child(dirty)
-	dirty.top_level = true
-	dirty.global_transform = transform
 	ModelFactory.set_shadow_casting(dirty, GeometryInstance3D.SHADOW_CASTING_SETTING_OFF)
-	dish_models[order_id] = dirty
+	dish.add_child(dirty)
 	_dish_consumption_stage[order_id] = 3
 
 

@@ -273,6 +273,15 @@ func _test_builder_and_seating(world: RestaurantWorld) -> void:
 	cutting_board.support_uid = preserved_support_uid
 	_expect(String(DataRegistry.build_by_id.prep_counter.get("station", "")).is_empty() and String(DataRegistry.build_by_id.prep_bowl.station) == "prep_counter" and String(DataRegistry.build_by_id.pass.get("station", "")).is_empty() and String(DataRegistry.build_by_id.pass_tray.station) == "pass", "generic counters gain their operational role from visible countertop tools")
 	_expect(String(DataRegistry.build_by_id.oven.placement) == "surface" and String(DataRegistry.build_by_id.pizza_oven.placement) == "surface" and String(DataRegistry.build_by_id.stove.get("placement", "cell")) == "cell" and String(DataRegistry.build_by_id.multi_stove.get("placement", "cell")) == "cell", "ovens require worktops while the two standalone cookers remain floor stations")
+	var fridge := world.placed_objects.get("fridge_1") as PlacedObject
+	var oven := world.placed_objects.get("oven_1") as PlacedObject
+	var stove := world.placed_objects.get("stove_1") as PlacedObject
+	_expect(fridge != null and not fridge._mechanism_nodes.is_empty() and oven != null and not oven._mechanism_nodes.is_empty() and stove != null and stove._burner_glow != null, "fridges and ovens expose animated doors while cookers expose a task-driven burner glow")
+	var closed_rotation := fridge._mechanism_nodes[0].rotation
+	fridge.play_access_animation()
+	fridge._process(0.28)
+	_expect(not fridge._mechanism_nodes[0].rotation.is_equal_approx(closed_rotation), "storage access visibly opens the refrigerator door instead of collecting ingredients through a closed prop")
+	fridge._process(1.0)
 	var oven_support := world.placed_objects.get("support_oven_1") as PlacedObject
 	_expect(not bool(world.validate_placement(oven_support.definition, Vector2i(0, 10), 1, oven_support).valid), "moving a counter also validates the operating face of its attached appliance")
 	var storage := world.placed_objects.get("storage_1") as PlacedObject
@@ -591,9 +600,16 @@ func _test_customer_lifecycle(world: RestaurantWorld) -> void:
 	customer._update_dish_consumption(staged_order_id, 0.50)
 	var staged_dish := customer.dish_models[staged_order_id] as Node3D
 	var staged_content := staged_dish.get_node_or_null("FoodContent") as Node3D
-	_expect(int(customer._dish_consumption_stage[staged_order_id]) == 1 and staged_content != null and staged_content.scale.x < 0.8, "the visible meal becomes partially eaten before turning into a dirty plate")
+	var staged_container := staged_dish.get_node_or_null("StableContainer") as Node3D
+	var staged_remainder := staged_dish.get_node_or_null("FoodRemainder") as Node3D
+	var clean_container_size := ModelFactory.calculate_visual_bounds(staged_container, true).size
+	_expect(int(customer._dish_consumption_stage[staged_order_id]) == 1 and staged_content != null and not staged_content.visible and staged_container != null and staged_container.visible and staged_remainder != null and staged_dish.scale.is_equal_approx(Vector3.ONE), "eating swaps only the food for discrete leftovers while the plate remains full-sized")
 	for order: Dictionary in customer.orders:
 		customer._replace_dish_with_dirty(String(order.id))
+	var dirty_dish := customer.dish_models[staged_order_id] as Node3D
+	var dirty_container := dirty_dish.get_node_or_null("DirtyContainer") as Node3D
+	var dirty_container_size := ModelFactory.calculate_visual_bounds(dirty_container, true).size
+	_expect(dirty_container != null and dirty_dish.scale.is_equal_approx(Vector3.ONE) and is_equal_approx(clean_container_size.x, dirty_container_size.x) and is_equal_approx(clean_container_size.z, dirty_container_size.z), "clean, partial and dirty phases keep the exact dirty-dish footprint")
 	customer._set_state("waiting_payment")
 	var payment := SimulationManager.request_service(customer, "payment", customer.get_service_position(), {"order_ids": customer.orders.map(func(entry: Dictionary): return entry.id)})
 	var payment_claim := SimulationManager.claim_service_task(waiter)

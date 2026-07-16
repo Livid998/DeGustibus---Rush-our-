@@ -13,6 +13,7 @@ var idle_time := 0.0
 var _thought: Label3D
 var _task_prop_anchor: Node3D
 var _hand_prop_anchor: Node3D
+var _left_hand_prop_anchor: Node3D
 var _task_prop: Node3D
 var _task_prop_is_tool := false
 var _travel_stage := ""
@@ -38,6 +39,7 @@ func setup(value: Dictionary, value_world: RestaurantWorld) -> void:
 
 
 func _process(delta: float) -> void:
+	_update_carried_prop_anchor()
 	if GameState.restaurant_state == "closed":
 		if state != "idle":
 			cancel_active_task()
@@ -287,6 +289,8 @@ func _consume_pickup_sources() -> void:
 			source.call("take_completed_output", dependency_id)
 	var source_task_id := String(active_task.get("payload", {}).get("source_task_id", ""))
 	for source: Node in _pickup_sources:
+		if source != null and is_instance_valid(source) and source.has_method("play_access_animation"):
+			source.call("play_access_animation")
 		if source != null and is_instance_valid(source) and source.has_method("take_completed_output") and not source_task_id.is_empty():
 			source.call("take_completed_output", source_task_id)
 	_pickup_sources.clear()
@@ -408,7 +412,7 @@ func _create_task_prop_anchor() -> void:
 	var skeleton := find_child("*", true, false) as Skeleton3D
 	for candidate: Node in find_children("*", "Skeleton3D", true, false):
 		skeleton = candidate as Skeleton3D
-		if skeleton.find_bone("Fist.R") >= 0:
+		if skeleton.find_bone("Fist.R") >= 0 and skeleton.find_bone("Fist.L") >= 0:
 			break
 	if skeleton != null and skeleton.find_bone("Fist.R") >= 0:
 		var attachment := BoneAttachment3D.new()
@@ -416,6 +420,12 @@ func _create_task_prop_anchor() -> void:
 		attachment.bone_name = "Fist.R"
 		skeleton.add_child(attachment)
 		_hand_prop_anchor = attachment
+		if skeleton.find_bone("Fist.L") >= 0:
+			var left_attachment := BoneAttachment3D.new()
+			left_attachment.name = "LeftHandCarryAnchor"
+			left_attachment.bone_name = "Fist.L"
+			skeleton.add_child(left_attachment)
+			_left_hand_prop_anchor = left_attachment
 	else:
 		_hand_prop_anchor = _task_prop_anchor
 
@@ -435,8 +445,9 @@ func _show_task_prop(working_tool: bool = false) -> void:
 		_task_prop = FoodVisualFactory.instantiate_recipe_dish(recipe_id, 0.72)
 		_task_prop.name = "CarriedDish"
 		_task_prop_anchor.add_child(_task_prop)
-		_task_prop.position = Vector3(0.0, 1.02, -0.34)
+		_task_prop.position = Vector3(0.0, 0.045, 0.0)
 		_task_prop_is_tool = false
+		_update_carried_prop_anchor()
 		return
 	if model_path.is_empty():
 		match action:
@@ -463,9 +474,11 @@ func _show_task_prop(working_tool: bool = false) -> void:
 		_task_prop.position = Vector3(-0.05, -0.03, -0.10)
 		_task_prop.rotation = Vector3(-PI * 0.42, 0.0, PI * 0.08)
 	elif action == "collect_dishes":
-		_task_prop.position = Vector3(0.0, 1.02, -0.35)
+		_task_prop.position = Vector3(0.0, 0.045, 0.0)
 	else:
-		_task_prop.position = Vector3(0.0, 1.00, -0.30)
+		_task_prop.position = Vector3(0.0, 0.045, 0.0)
+	if not _task_prop_is_tool:
+		_update_carried_prop_anchor()
 	ModelFactory.set_shadow_casting(_task_prop, GeometryInstance3D.SHADOW_CASTING_SETTING_OFF)
 
 
@@ -488,8 +501,9 @@ func _show_kitchen_carry_prop() -> void:
 	_task_prop = FoodVisualFactory.instantiate_parts(carried, 1.0, 7)
 	_task_prop.name = "CarriedPreparation"
 	_task_prop_anchor.add_child(_task_prop)
-	_task_prop.position = Vector3(0.0, 1.02, -0.34)
+	_task_prop.position = Vector3(0.0, 0.045, 0.0)
 	_task_prop_is_tool = false
+	_update_carried_prop_anchor()
 
 
 func _serve_recipe_id() -> String:
@@ -536,7 +550,19 @@ func _update_task_prop_motion() -> void:
 		var frequency := 8.0 if style in ["chop", "slice", "grate"] else 4.2
 		_hand_prop_anchor.rotation.z = sin(work_time * frequency) * (0.10 if style in ["chop", "slice", "grate"] else 0.045)
 	elif _task_prop.get_parent() == _task_prop_anchor:
-		_task_prop.position.y = 1.02 + sin(work_time * 2.2) * 0.008
+		_update_carried_prop_anchor()
+
+
+func _update_carried_prop_anchor() -> void:
+	if _task_prop == null or not is_instance_valid(_task_prop) or _task_prop_is_tool:
+		return
+	if _task_prop_anchor == null or _hand_prop_anchor == null or _left_hand_prop_anchor == null:
+		return
+	# The tray is driven by the animated fists themselves, not a torso offset.
+	# This keeps it inside both hands throughout Walk_Carry and turn blending.
+	var hand_midpoint := (_hand_prop_anchor.global_position + _left_hand_prop_anchor.global_position) * 0.5
+	_task_prop_anchor.position = to_local(hand_midpoint) + Vector3(0.0, 0.105, 0.04)
+	_task_prop_anchor.rotation = Vector3.ZERO
 
 
 func _clear_task_prop() -> void:
@@ -545,6 +571,7 @@ func _clear_task_prop() -> void:
 	_task_prop = null
 	_task_prop_is_tool = false
 	if _task_prop_anchor != null:
+		_task_prop_anchor.position = Vector3.ZERO
 		_task_prop_anchor.rotation = Vector3.ZERO
 	if _hand_prop_anchor != null:
 		_hand_prop_anchor.rotation = Vector3.ZERO

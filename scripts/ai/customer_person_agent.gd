@@ -205,6 +205,7 @@ func _maintain_seated_pose(delta: float = 0.0) -> void:
 	_seated_clock += delta
 	if _seated_mode == "eating" and meal_present:
 		_update_eating_gesture(delta)
+		_keep_utensil_above_table()
 	else:
 		_bite_active = false
 		_apply_conversation_gesture()
@@ -286,13 +287,29 @@ func _show_utensil() -> void:
 	var path := "res://assets/equipment/utensil_spoon.glb" if _utensil_kind == "spoon" else "res://assets/equipment/utensil_fork.glb"
 	if not ResourceLoader.exists(path):
 		return
-	_utensil_model = ModelFactory.instantiate_model(path, 0.30)
+	# The previous utensil was technically attached but too small and buried in
+	# the fist. A readable silhouette is more important than literal real scale
+	# at the game's isometric camera distance.
+	_utensil_model = ModelFactory.instantiate_model(path, 0.62)
 	_utensil_model.name = "DiningUtensil"
 	ModelFactory.align_visual_to_grid_origin(_utensil_model)
-	_utensil_model.position = Vector3(-0.045, -0.025, -0.10)
+	_utensil_model.position = Vector3(-0.02, -0.01, -0.16)
 	_utensil_model.rotation = Vector3(-PI * 0.46, 0.0, PI * 0.08)
 	ModelFactory.set_shadow_casting(_utensil_model, GeometryInstance3D.SHADOW_CASTING_SETTING_OFF)
 	_utensil_attachment.add_child(_utensil_model)
+	_keep_utensil_above_table()
+
+
+func _keep_utensil_above_table() -> void:
+	if _utensil_model == null or not is_instance_valid(_utensil_model):
+		return
+	var table_y := 1.0
+	if party != null:
+		var party_table: Dictionary = party.get("table")
+		table_y = float(party_table.get("table_surface_y", table_y))
+	var position := _utensil_model.global_position
+	position.y = maxf(position.y, table_y + 0.10)
+	_utensil_model.global_position = position
 
 
 func _hide_utensil() -> void:

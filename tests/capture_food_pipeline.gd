@@ -51,6 +51,33 @@ func _ready() -> void:
 		await get_tree().process_frame
 	await _save_frame("res://artifacts/customer_eating_gestures.png")
 	print("FOOD_CAPTURE eating saved")
+	# One frame documents the complete table lifecycle without continuously
+	# scaling a plated model: full serving, partial food, leftovers and dirt.
+	customer._update_dish_consumption("CAPTURE_1", 0.50)
+	customer._update_dish_consumption("CAPTURE_2", 0.20)
+	customer._replace_dish_with_dirty("CAPTURE_3")
+	for _frame: int in 5:
+		await get_tree().process_frame
+	await _save_frame("res://artifacts/customer_consumption_stages.png")
+	print("FOOD_CAPTURE consumption saved")
+	customer.visible = false
+	var waiter := _first_waiter(main.world)
+	if waiter != null:
+		waiter.set_process(false)
+		waiter.global_position = main.world.cell_to_world(Vector2i(11, 4))
+		waiter.rotation.y = 0.0
+		waiter.active_task = {"action":"serve", "payload":{"recipe_id":"classic_burger"}}
+		waiter._show_task_prop(false)
+		waiter.play_animation("Walk_Carry")
+		waiter._update_carried_prop_anchor()
+		main.world.camera_rig.zoom = 8.5
+		main.world.camera_rig.target = waiter.global_position
+		main.world.camera_rig.global_position = waiter.global_position
+		for _frame: int in 8:
+			await get_tree().process_frame
+			waiter._update_carried_prop_anchor()
+		await _save_frame("res://artifacts/waiter_carry_alignment.png")
+		print("FOOD_CAPTURE carry saved")
 	get_tree().quit()
 
 
@@ -105,6 +132,14 @@ func _seat_party(world: RestaurantWorld, size: int) -> CustomerAgent:
 	customer._thought.visible = false
 	customer._set_state("eating")
 	return customer
+
+
+func _first_waiter(world: RestaurantWorld) -> EmployeeAgent:
+	for value: Variant in world.staff_agents.values():
+		var employee := value as EmployeeAgent
+		if employee != null and String(employee.employee.get("role", "")) == "waiter":
+			return employee
+	return null
 
 
 func _save_frame(path: String) -> void:

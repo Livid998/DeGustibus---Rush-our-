@@ -70,7 +70,8 @@ static func instantiate_parts(parts: Array, scale_multiplier: float = 1.0, maxim
 		if part.is_empty():
 			continue
 		var model_path := String(part.get("model", ""))
-		if model_path.is_empty() or not ResourceLoader.exists(model_path):
+		var primitive := String(part.get("primitive", ""))
+		if primitive.is_empty() and (model_path.is_empty() or not ResourceLoader.exists(model_path)):
 			continue
 		var quantity := clampi(int(part.get("quantity", 1)), 1, 4)
 		for copy_index: int in quantity:
@@ -79,8 +80,7 @@ static func instantiate_parts(parts: Array, scale_multiplier: float = 1.0, maxim
 			var holder := Node3D.new()
 			holder.name = "FoodPart_%02d" % created
 			var scale_factor := float(part.get("scale", 0.40)) * scale_multiplier
-			var model := ModelFactory.instantiate_model(model_path, scale_factor)
-			ModelFactory.align_visual_to_grid_origin(model)
+			var model := _instantiate_part_visual(part, scale_factor)
 			ModelFactory.set_shadow_casting(model, GeometryInstance3D.SHADOW_CASTING_SETTING_OFF)
 			holder.add_child(model)
 			var offset := _vector3(part.get("offset", []), Vector3.ZERO)
@@ -119,6 +119,30 @@ static func instantiate_recipe_dish(recipe_id: String, scale_multiplier: float =
 		if not model_path.is_empty():
 			parts.append({"model": model_path, "scale": 0.50, "role": "food"})
 	return instantiate_parts(parts, scale_multiplier)
+
+
+static func instantiate_recipe_serving_food(recipe_id: String) -> Node3D:
+	var visual: Dictionary = DataRegistry.food_visuals_by_id.get(recipe_id, {})
+	var serving_parts := _normalize_parts(visual.get("serving_models", []), 0.40)
+	if serving_parts.is_empty():
+		return instantiate_recipe_dish(recipe_id, 1.0)
+	return instantiate_parts(serving_parts, 1.0)
+
+
+static func consumption_container(recipe_id: String) -> String:
+	var visual: Dictionary = DataRegistry.food_visuals_by_id.get(recipe_id, {})
+	return String(visual.get("consumption_container", "plate"))
+
+
+static func consumption_parts(recipe_id: String, stage: int) -> Array[Dictionary]:
+	var visual: Dictionary = DataRegistry.food_visuals_by_id.get(recipe_id, {})
+	var key := "partial_models" if stage <= 1 else "leftover_models"
+	return _normalize_parts(visual.get(key, []), 0.32)
+
+
+static func support_visible_with_full_dish(recipe_id: String) -> bool:
+	var visual: Dictionary = DataRegistry.food_visuals_by_id.get(recipe_id, {})
+	return bool(visual.get("support_visible_full", false))
 
 
 static func primary_output_model(task: Dictionary) -> String:
@@ -168,10 +192,11 @@ static func task_tool_model(task: Dictionary) -> String:
 static func all_declared_model_paths() -> Array[String]:
 	var result: Array[String] = []
 	for visual: Dictionary in DataRegistry.food_visuals:
-		for part: Dictionary in _normalize_parts(visual.get("models", []), 0.4):
-			var path := String(part.get("model", ""))
-			if not path.is_empty() and not result.has(path):
-				result.append(path)
+		for key: String in ["models", "serving_models", "partial_models", "leftover_models"]:
+			for part: Dictionary in _normalize_parts(visual.get(key, []), 0.4):
+				var path := String(part.get("model", ""))
+				if not path.is_empty() and not result.has(path):
+					result.append(path)
 	return result
 
 
@@ -233,11 +258,41 @@ static func _normalized_part(value: Variant, default_scale: float) -> Dictionary
 	elif value is Dictionary:
 		result = (value as Dictionary).duplicate(true)
 	var path := String(result.get("model", ""))
-	if path.is_empty():
+	if path.is_empty() and String(result.get("primitive", "")).is_empty():
 		return {}
 	result.scale = float(result.get("scale", default_scale))
 	result.role = String(result.get("role", "food"))
 	return result
+
+
+static func _instantiate_part_visual(part: Dictionary, scale_factor: float) -> Node3D:
+	var model_path := String(part.get("model", ""))
+	if not model_path.is_empty():
+		var model := ModelFactory.instantiate_model(model_path, scale_factor)
+		ModelFactory.align_visual_to_grid_origin(model)
+		return model
+	var mesh_instance := MeshInstance3D.new()
+	match String(part.get("primitive", "sphere")):
+		"disc":
+			var cylinder := CylinderMesh.new()
+			cylinder.top_radius = 0.5
+			cylinder.bottom_radius = 0.5
+			cylinder.height = 0.08
+			cylinder.radial_segments = 16
+			mesh_instance.mesh = cylinder
+		_:
+			var sphere := SphereMesh.new()
+			sphere.radius = 0.5
+			sphere.height = 1.0
+			sphere.radial_segments = 12
+			sphere.rings = 6
+			mesh_instance.mesh = sphere
+	var material := StandardMaterial3D.new()
+	material.albedo_color = Color.from_string(String(part.get("color", "#f4d58a")), Color.WHITE)
+	material.roughness = 0.78
+	mesh_instance.material_override = material
+	mesh_instance.scale = Vector3.ONE * scale_factor
+	return mesh_instance
 
 
 static func _vector3(value: Variant, fallback: Vector3) -> Vector3:
