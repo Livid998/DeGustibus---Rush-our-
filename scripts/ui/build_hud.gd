@@ -11,7 +11,7 @@ var current_category := "Sala"
 var is_open := false
 var attachment_cycle_by_support: Dictionary = {}
 
-const CATEGORIES := ["Strutture", "Sala", "Cucina"]
+const CATEGORIES := ["Strutture", "Sala", "Cucina", "Esterni"]
 
 
 func setup(value_ui: RestaurantUI, value_world: RestaurantWorld) -> void:
@@ -105,6 +105,8 @@ func _build() -> void:
 func refresh_catalog() -> void:
 	_clear(item_row)
 	for definition: Dictionary in DataRegistry.build_catalog:
+		if bool(definition.get("catalog_hidden", false)):
+			continue
 		if String(definition.category) != current_category:
 			continue
 		if GameState.restaurant_state == "open" and not world.build_system.can_edit_definition(definition):
@@ -150,8 +152,11 @@ func refresh_actions() -> void:
 		elif support != null:
 			action_row.add_child(_action_button("Supporto", func(): build.select_object(support), "blue"))
 		if editable:
-			action_row.add_child(_action_button("Sposta", build.move_selected, "yellow"))
-			action_row.add_child(_action_button("Vendi 60%", build.sell_selected, "red"))
+			var removal_cost := int(selected.definition.get("removal_cost", 0))
+			if removal_cost <= 0:
+				action_row.add_child(_action_button("Sposta", build.move_selected, "yellow"))
+			var sell_label := "Rimuovi · %d ●" % removal_cost if removal_cost > 0 else "Vendi 60%"
+			action_row.add_child(_action_button(sell_label, build.sell_selected, "red"))
 		action_row.add_child(_action_button("Deseleziona", build.clear_selection, "ghost"))
 	else:
 		label.text = "Trascina per muovere la mappa · rotella/pinch per zoom · tocca un oggetto per modificarlo"

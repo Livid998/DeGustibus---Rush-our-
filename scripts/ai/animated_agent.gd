@@ -257,7 +257,12 @@ func move_to(target: Vector3) -> bool:
 		play_animation("Idle")
 		return true
 	navigation_active = true
-	return _repath()
+	var accepted := _repath()
+	# A controller may assign the next route in the same tick in which the
+	# previous leg finished. Start locomotion immediately so that frame cannot
+	# be rendered as an Idle pose sliding away from the waypoint.
+	play_animation("Walk" if accepted else "Idle")
+	return accepted
 
 
 func _repath() -> bool:

@@ -241,7 +241,14 @@ func _test_builder_and_seating(world: RestaurantWorld) -> void:
 	var batched_floor_instances := 0
 	for batch: MultiMeshInstance3D in world.floor_batches.values():
 		batched_floor_instances += batch.multimesh.instance_count
-	_expect(world.floor_tiles.size() == RestaurantWorld.GRID_SIZE.x * RestaurantWorld.GRID_SIZE.y and world.floor_batches.size() == 2 and batched_floor_instances == world.floor_tiles.size(), "floor tiles are grouped into two GPU batches without overlap")
+	var expected_floor_styles := ["floor_dining", "floor_kitchen", "floor_grass", "floor_sidewalk", "floor_road"]
+	var has_every_floor_style := expected_floor_styles.all(func(style: String): return world.floor_batches.has(style))
+	var lot_tile_count := RestaurantWorld.LOT_REGION.size.x * RestaurantWorld.LOT_REGION.size.y
+	_expect(world.floor_tiles.size() == lot_tile_count and world.floor_batches.size() == expected_floor_styles.size() and has_every_floor_style and batched_floor_instances == world.floor_tiles.size(), "the complete lot is rendered once across five coherent GPU floor batches")
+	_expect(String(world.floor_tiles[RestaurantWorld.LOT_REGION.position]) == "floor_grass" and String(world.floor_tiles[Vector2i(world.entrance_cell.x, RestaurantWorld.SIDEWALK_Y)]) == "floor_sidewalk" and String(world.floor_tiles[Vector2i(world.entrance_cell.x, RestaurantWorld.ROAD_ROWS[0])]) == "floor_road", "the expanded lot keeps grass, sidewalk and road in their dedicated exterior bands")
+	var initial_obstacles := world.placed_objects.values().filter(func(object: PlacedObject): return object.uid.begins_with("exterior_obstacle_"))
+	var removable_obstacles := initial_obstacles.size() == 6 and initial_obstacles.all(func(object: PlacedObject): return bool(object.definition.get("catalog_hidden", false)) and int(object.definition.get("removal_cost", 0)) > 0)
+	_expect(removable_obstacles and ["exterior_tree", "exterior_bush", "exterior_bench", "exterior_streetlight"].all(func(item_id: String): return DataRegistry.build_by_id.has(item_id) and ResourceLoader.exists(String(DataRegistry.build_by_id[item_id].get("model", "")))), "the lot starts with six paid-removal obstacles and exposes valid purchasable exterior decorations")
 	var floor_test_cell := Vector2i(0, 0)
 	var original_floor_style := String(world.floor_tiles[floor_test_cell])
 	var changed_floor_style := "floor_kitchen" if original_floor_style != "floor_kitchen" else "floor_dining"
@@ -374,12 +381,30 @@ func _test_agent_navigation_and_appearance(world: RestaurantWorld) -> void:
 	world.customer_root.add_child(closing_customer)
 	closing_customer.global_position = world.cell_to_world(world.entrance_cell)
 	closing_customer.setup(world, 2)
+	var closing_queue_positions := world.customer_queue_positions(closing_customer)
+	_expect(closing_queue_positions.size() == closing_customer.group_size and closing_queue_positions.all(func(position: Vector3): return world.world_to_cell(position).y == RestaurantWorld.SIDEWALK_Y) and closing_queue_positions[0].distance_to(closing_queue_positions[1]) >= RestaurantWorld.CELL_SIZE - 0.01, "each visible guest receives a distinct single-file queue marker on the sidewalk")
 	GameState.set_restaurant_state("closing")
 	closing_customer._process(0.1)
-	_expect(closing_customer.state == "leaving", "unseated customers head for the exit as soon as restaurant closing begins")
+	_expect(closing_customer.state == "leaving" and closing_customer.people.all(func(person: CustomerPersonAgent): return person.target_tag == "despawn"), "unseated customers head along the exterior route as soon as restaurant closing begins")
 	closing_customer.global_position = world.cell_to_world(world.entrance_cell)
 	closing_customer._process(0.1)
-	_expect(closing_customer.is_queued_for_deletion(), "customers already at the exit are removed without blocking closing")
+	_expect(not closing_customer.is_queued_for_deletion(), "a party is not deleted merely because its controller crosses the old entrance cell")
+	for person: CustomerPersonAgent in closing_customer.people:
+		person.global_position = person.destination
+		person.phase = "arrived"
+	closing_customer._process(0.1)
+	_expect(closing_customer.is_queued_for_deletion(), "an unseated party is removed only after every physical guest reaches the exterior despawn point")
+	var exiting_dummy := Node.new()
+	var entering_dummy := Node.new()
+	world.add_child(exiting_dummy)
+	world.add_child(entering_dummy)
+	world.register_customer_exit(exiting_dummy)
+	var entry_blocked := not world.try_begin_customer_entry(entering_dummy)
+	var exit_admitted := world.try_begin_customer_exit(exiting_dummy)
+	_expect(entry_blocked and exit_admitted and world.door_owner == exiting_dummy, "the shared doorway gives an exiting customer priority over a new arrival")
+	world.finish_customer_exit(exiting_dummy)
+	exiting_dummy.queue_free()
+	entering_dummy.queue_free()
 	GameState.set_restaurant_state("closed")
 
 
@@ -436,21 +461,37 @@ func _test_customer_lifecycle(world: RestaurantWorld) -> void:
 		var claimed := SimulationManager.claim_service_task(waiter)
 		_expect(not service.is_empty() and String(claimed.get("id", "")) == String(service.id) and SimulationManager.begin_service_task(String(service.id)), "each ready dish receives one exclusive delivery task")
 		SimulationManager.complete_service_task(String(service.id))
-	_expect(customer.state == "eating" and customer.served_order_ids.size() == customer.group_size and customer.dish_models.size() == customer.group_size, "the party starts eating only when every guest has a visible dish")
+	_expect(customer.state == "eating" and customer.served_order_ids.size() == customer.group_size and customer.dish_models.size() == customer.group_size and customer.people.all(func(person: CustomerPersonAgent): return person.meal_present), "each diner receives one visible dish and enters the meal-specific seated state")
+	for order: Dictionary in customer.orders:
+		customer._replace_dish_with_dirty(String(order.id))
 	customer._set_state("waiting_payment")
 	var payment := SimulationManager.request_service(customer, "payment", customer.get_service_position(), {"order_ids": customer.orders.map(func(entry: Dictionary): return entry.id)})
 	var payment_claim := SimulationManager.claim_service_task(waiter)
 	SimulationManager.begin_service_task(String(payment_claim.get("id", "")))
 	SimulationManager.complete_service_task(String(payment.get("id", "")))
 	SimulationManager.complete_service_task(String(payment.get("id", "")))
-	_expect(customer.state == "standing_to_leave" and world.customer_owns_table(customer, table_uid) and int(SimulationManager.stats.customers_served) == customer.group_size, "payment is idempotent and the table stays reserved while guests stand up")
-	customer._process(1.0)
-	_expect(customer.state == "leaving" and not world.customer_owns_table(customer, table_uid), "the table is released only after the whole party has left its chairs")
+	_expect(customer.state == "waiting_exit_door" and world.customer_owns_table(customer, table_uid) and customer.people.all(func(person: CustomerPersonAgent): return person.phase == "seated") and int(SimulationManager.stats.customers_served) == customer.group_size, "payment is idempotent and guests remain seated while reserving exit priority")
+	customer._process(0.0)
+	_expect(customer.state == "leaving" and world.customer_owns_table(customer, table_uid), "starting the physical exit path does not prematurely free the table")
+	_expect(customer._exit_stage == "stand" and customer.people[0].phase == "stand_transition" and customer.people.slice(1).all(func(person: CustomerPersonAgent): return person.phase == "seated"), "the door owner stands one diner at a time while the rest remain seated")
+	_expect(_force_next_guest_outside(customer, world, 0) and world.customer_owns_table(customer, table_uid), "the table remains occupied while even one visible guest is still inside")
+	_expect(_force_next_guest_outside(customer, world, 1) and not world.customer_owns_table(customer, table_uid) and world.table_dirty_records.has(table_uid), "the table is released after the last guest crosses outside and becomes a persistent dirty table")
 	customer._set_state("waiting_table")
 	_expect(customer.state == "leaving", "departure is terminal and a customer can never return to waiting or seating")
-	SimulationManager.unregister_customer(customer, false)
-	customer._registered = false
-	customer.queue_free()
+	var dirty_replacement := CustomerAgent.new()
+	world.customer_root.add_child(dirty_replacement)
+	dirty_replacement.setup(world, 2)
+	dirty_replacement.table = world.request_table(dirty_replacement, 2)
+	_expect(String(dirty_replacement.table.get("uid", "")) != table_uid, "a released but dirty table cannot receive the next party before a waiter clears it")
+	world.release_table(dirty_replacement)
+	SimulationManager.unregister_customer(dirty_replacement, false)
+	dirty_replacement._registered = false
+	dirty_replacement.queue_free()
+	_cleanup_dirty_table_fixture(world, table_uid)
+	for person: CustomerPersonAgent in customer.people:
+		person.global_position = person.destination
+		person.phase = "arrived"
+	customer._update_exit_sequence()
 	SimulationManager.reset_service_stats()
 	var abandoning := CustomerAgent.new()
 	world.customer_root.add_child(abandoning)
@@ -470,10 +511,11 @@ func _test_customer_lifecycle(world: RestaurantWorld) -> void:
 	replacement.global_position = world.cell_to_world(world.entrance_cell)
 	replacement.setup(world, 2)
 	replacement.table = world.request_table(replacement, 2)
-	_expect(abandoning.state == "standing_to_leave" and all_cancelled and world.customer_owns_table(abandoning, abandoning_table_uid), "an impatient party atomically cancels its tickets but keeps its chairs while standing")
+	_expect(abandoning.state == "waiting_exit_door" and all_cancelled and world.customer_owns_table(abandoning, abandoning_table_uid), "an impatient party atomically cancels its tickets but keeps its chairs while reserving the exit")
 	_expect(String(replacement.table.get("uid", "")) != abandoning_table_uid, "a replacement party cannot reserve a table whose previous guests are still visible")
-	abandoning._process(1.0)
-	_expect(not world.customer_owns_table(abandoning, abandoning_table_uid), "an abandoned table becomes available after the stand-up transition")
+	abandoning._process(0.0)
+	_expect(_force_next_guest_outside(abandoning, world, 0) and world.customer_owns_table(abandoning, abandoning_table_uid), "an abandoned table stays reserved until every impatient guest has physically left")
+	_expect(_force_next_guest_outside(abandoning, world, 1) and not world.customer_owns_table(abandoning, abandoning_table_uid), "an abandoned table becomes available after the entire party crosses the exit")
 	world.release_table(replacement)
 	for departing: CustomerAgent in [abandoning, replacement]:
 		SimulationManager.unregister_customer(departing, false)
@@ -481,6 +523,40 @@ func _test_customer_lifecycle(world: RestaurantWorld) -> void:
 		departing.queue_free()
 	SimulationManager.reset_service_stats()
 	GameState.set_restaurant_state("closed")
+
+
+func _force_next_guest_outside(customer: CustomerAgent, world: RestaurantWorld, expected_index: int) -> bool:
+	if customer._exit_cursor != expected_index or customer._exit_stage != "stand":
+		return false
+	var person: CustomerPersonAgent = customer.people[expected_index]
+	person.tick_motion(person.transition_remaining + 0.05)
+	customer._update_exit_sequence()
+	if customer._exit_stage != "seat":
+		return false
+	person.global_position = person._local_target
+	person.tick_motion(0.0)
+	customer._update_exit_sequence()
+	if customer._exit_stage != "door":
+		return false
+	person.global_position = person.destination
+	person.phase = "arrived"
+	customer._update_exit_sequence()
+	if customer._exit_stage != "outside":
+		return false
+	person.global_position = person.destination
+	person.phase = "arrived"
+	customer._update_exit_sequence()
+	return customer._exit_cursor == expected_index + 1
+
+
+func _cleanup_dirty_table_fixture(world: RestaurantWorld, table_uid: String) -> void:
+	if not world.table_dirty_records.has(table_uid):
+		return
+	var record: Dictionary = world.table_dirty_records[table_uid]
+	for node: Node3D in record.get("nodes", []):
+		if is_instance_valid(node):
+			node.queue_free()
+	world.table_dirty_records.erase(table_uid)
 
 
 func _test_camera_input(world: RestaurantWorld) -> void:

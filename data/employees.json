@@ -4,14 +4,13 @@
   {"id":"e2","name":"Giulia","appearance":"Chef_Female","role":"cook","speed":0.98,"precision":0.92,"order":0.88,"stamina":0.78,"salary":105,"skills":{"cutting_board":0.92,"multi_stove":0.82}},
   {"id":"e3","name":"Samir","appearance":"Worker_Male","role":"cook","speed":1.12,"precision":0.75,"order":0.72,"stamina":0.9,"salary":88,"skills":{"stove":0.86,"dough":0.7}},
   {"id":"e4","name":"Elena","appearance":"Worker_Female","role":"waiter","speed":1.15,"precision":0.84,"order":0.8,"stamina":0.86,"salary":82,"skills":{"service":0.9}},
-  {"id":"e5","name":"Luca","appearance":"Casual_Male","role":"waiter","speed":1.04,"precision":0.78,"order":0.74,"stamina":0.8,"salary":76,"skills":{"service":0.82}}
+  {"id":"e5","name":"Luca","appearance":"Casual_Male","role":"waiter","speed":1.04,"precision":0.78,"order":0.74,"stamina":0.8,"salary":76,"skills":{"service":0.82}},
+  {"id":"e6","name":"Davide","appearance":"Worker_Male","role":"handyman","speed":0.95,"precision":0.8,"order":0.94,"stamina":0.92,"salary":80,"skills":{"sink":0.95}}
  ],
  "candidates":[
   {"id":"c1","name":"Aisha","appearance":"Chef_Female","role":"cook","speed":1.18,"precision":0.88,"order":0.76,"stamina":0.82,"salary":115,"hire_cost":650,"skills":{"pizza_oven":0.94}},
-  {"id":"c2","name":"Davide","appearance":"Worker_Male","role":"handyman","speed":0.95,"precision":0.8,"order":0.94,"stamina":0.92,"salary":80,"hire_cost":420,"skills":{"sink":0.95}},
   {"id":"c3","name":"Maya","appearance":"Casual2_Female","role":"waiter","speed":1.2,"precision":0.8,"order":0.76,"stamina":0.78,"salary":90,"hire_cost":520,"skills":{"service":0.93}},
   {"id":"c4","name":"Nico","appearance":"Chef_Male","role":"cook","speed":0.9,"precision":0.96,"order":0.9,"stamina":0.74,"salary":120,"hire_cost":720,"skills":{"oven":0.96}},
   {"id":"c5","name":"Sofia","appearance":"Worker_Female","role":"handyman","speed":1.1,"precision":0.84,"order":0.88,"stamina":0.9,"salary":86,"hire_cost":480,"skills":{"prep_counter":0.82,"sink":0.88}}
  ]
 }
-

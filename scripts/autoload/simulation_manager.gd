@@ -5,6 +5,7 @@ signal order_created(order: Dictionary)
 signal order_updated(order: Dictionary)
 signal dish_ready(order: Dictionary)
 signal service_task_created(task: Dictionary)
+signal maintenance_task_created(task: Dictionary)
 signal customer_count_changed(count: int)
 signal statistics_changed
 
@@ -13,12 +14,14 @@ var world: Node = null
 var tasks: Dictionary = {}
 var orders: Dictionary = {}
 var service_tasks: Dictionary = {}
+var maintenance_tasks: Dictionary = {}
 var stations: Dictionary = {}
 var customers: Array[Node] = []
 var stats: Dictionary = {}
 var _task_serial := 0
 var _order_serial := 0
 var _service_serial := 0
+var _maintenance_serial := 0
 var _simulation_tick_accumulator := 0.0
 var _maintenance_clock := 0.0
 
@@ -86,6 +89,8 @@ func close_immediately() -> void:
 	customers.clear()
 	for task_id: String in service_tasks:
 		service_tasks[task_id].state = "cancelled"
+	for task_id: String in maintenance_tasks:
+		_cancel_maintenance_record(maintenance_tasks[task_id], false)
 	GameState.set_restaurant_state("closed")
 	customer_count_changed.emit(0)
 	_prune_completed_work(true)
@@ -257,7 +262,9 @@ func _update_waiting_tasks(delta: float) -> void:
 
 
 func claim_kitchen_task(employee: Dictionary, from_position: Variant = null) -> Dictionary:
-	if String(employee.get("role", "")) == "waiter":
+	# Kitchen work is exclusive to cooks. Handymen have their own maintenance
+	# board, so a quiet dining room can never make them steal a recipe step.
+	if String(employee.get("role", "")) != "cook":
 		return {}
 	var best: Dictionary = {}
 	var best_score := -INF
@@ -386,7 +393,11 @@ func _complete_kitchen_task(task: Dictionary) -> void:
 		order.state = "at_pass"
 		dish_ready.emit(order)
 		if is_instance_valid(order.customer):
-			request_service(order.customer, "serve", order.customer.get_service_position(), {"order_id": order.id})
+			var recipe: Dictionary = DataRegistry.recipes_by_id.get(String(order.get("recipe_id", "")), {})
+			request_service(order.customer, "serve", order.customer.get_service_position(), {
+				"order_id": order.id,
+				"carry_model": String(recipe.get("dish_model", ""))
+			})
 	order_updated.emit(order)
 	_update_waiting_tasks(0.0)
 	task_board_changed.emit()
@@ -410,6 +421,21 @@ func cancel_employee_task(employee_id: String) -> void:
 			service_task.employee_id = ""
 			if service_task.state == "cancelled":
 				service_task.finished_at = GameState.service_seconds
+	for task_id: String in maintenance_tasks:
+		var maintenance_task: Dictionary = maintenance_tasks.get(task_id, {})
+		if String(maintenance_task.get("employee_id", "")) != employee_id or String(maintenance_task.get("state", "")) not in ["reserved", "in_progress"]:
+			continue
+		_release_station(maintenance_task)
+		maintenance_task.station_runtime = null
+		maintenance_task.employee_id = ""
+		if maintenance_task_is_actionable(maintenance_task):
+			maintenance_task.state = "queued"
+			var owner := maintenance_task.get("owner") as Node
+			if owner != null and is_instance_valid(owner) and owner.has_method("maintenance_interrupted"):
+				owner.call("maintenance_interrupted", String(maintenance_task.get("action", "")), maintenance_task.get("payload", {}))
+		else:
+			maintenance_task.state = "cancelled"
+			maintenance_task.finished_at = GameState.service_seconds
 	task_board_changed.emit()
 
 
@@ -428,9 +454,14 @@ func request_service(customer: Node, action: String, target: Vector3, payload: D
 		"action": action,
 		"target": target,
 		"payload": payload,
+		# Exposed at task level so an EmployeeAgent can instantiate the carried
+		# dish without coupling its visuals to a particular customer class.
+		"carry_model": String(payload.get("carry_model", "")),
 		"state": "queued",
 		"employee_id": "",
-		"reservation_key": str(customer.get_instance_id()),
+		# World-owned service jobs (for example one dirty-table batch) may expose
+		# their own key while customer jobs retain the historical per-party lock.
+		"reservation_key": String(payload.get("reservation_key", str(customer.get_instance_id()))),
 		"created_at": GameState.service_seconds,
 		"priority": 2 if action == "serve" else 1
 	}
@@ -514,6 +545,212 @@ func service_task_is_actionable(task: Dictionary) -> bool:
 	if customer.has_method("accepts_service_action"):
 		return customer.accepts_service_action(String(task.get("action", "")), task.get("payload", {}))
 	return true
+
+
+func request_maintenance_task(owner: Node, action: String, target: Vector3, payload: Dictionary = {}, priority: int = 1, duration: float = 1.5, tool_model: String = "") -> Dictionary:
+	if owner == null or not is_instance_valid(owner) or owner.is_queued_for_deletion():
+		return {}
+	if owner.has_method("accepts_maintenance_action") and not bool(owner.call("accepts_maintenance_action", action, payload)):
+		return {}
+	var reservation_key := String(payload.get("reservation_key", ""))
+	if reservation_key.is_empty():
+		reservation_key = "maintenance:%d:%s" % [owner.get_instance_id(), action]
+	for existing: Dictionary in maintenance_tasks.values():
+		if String(existing.get("reservation_key", "")) == reservation_key and String(existing.get("state", "")) not in ["completed", "cancelled"]:
+			return existing
+	_maintenance_serial += 1
+	var task_payload := payload.duplicate(true)
+	var station_id := String(task_payload.get("station_id", task_payload.get("station", "")))
+	var task := {
+		"id": "M%04d" % _maintenance_serial,
+		"task_kind": "maintenance",
+		"owner": owner,
+		"action": action,
+		"target": Vector3(target.x, 0.0, target.z),
+		"payload": task_payload,
+		"station": station_id,
+		"station_runtime": null,
+		"state": "queued",
+		"employee_id": "",
+		"reservation_key": reservation_key,
+		"created_at": GameState.service_seconds,
+		"priority": priority,
+		"duration": maxf(duration, 0.05),
+		"animation": String(task_payload.get("animation", "PickUp")),
+		"tool_model": tool_model if not tool_model.is_empty() else String(task_payload.get("tool_model", "")),
+		"carry_model": String(task_payload.get("carry_model", ""))
+	}
+	maintenance_tasks[task.id] = task
+	maintenance_task_created.emit(task)
+	task_board_changed.emit()
+	return task
+
+
+func request_maintenance(owner: Node, action: String, target: Vector3, payload: Dictionary = {}, priority: int = 1, duration: float = 1.5, tool_model: String = "") -> Dictionary:
+	return request_maintenance_task(owner, action, target, payload, priority, duration, tool_model)
+
+
+func claim_maintenance_task(employee: Dictionary, from_position: Variant = null) -> Dictionary:
+	if String(employee.get("role", "")) != "handyman":
+		return {}
+	var best: Dictionary = {}
+	var best_score := -INF
+	var best_runtime: Dictionary = {}
+	var best_slot := -1
+	var best_position := Vector3.ZERO
+	for task_id: String in maintenance_tasks:
+		var task: Dictionary = maintenance_tasks.get(task_id, {})
+		if task.is_empty() or String(task.get("state", "")) != "queued":
+			continue
+		if not maintenance_task_is_actionable(task):
+			_cancel_maintenance_record(task, false)
+			continue
+		if _maintenance_key_is_reserved(String(task.get("reservation_key", ""))):
+			continue
+		var station_id := String(task.get("station", ""))
+		if station_id.is_empty():
+			var target := Vector3(task.get("target", Vector3.ZERO))
+			if from_position is Vector3 and world != null and world.has_method("find_path") and world.find_path(Vector3(from_position), target).is_empty():
+				continue
+			var candidate := float(task.get("priority", 1)) * 100.0 + GameState.service_seconds - float(task.get("created_at", 0.0))
+			if from_position is Vector3:
+				candidate -= Vector3(from_position).distance_to(target)
+			if candidate > best_score:
+				best_score = candidate
+				best = task
+				best_runtime = {}
+				best_slot = -1
+				best_position = target
+			continue
+		for runtime: Dictionary in stations.get(station_id, []):
+			var slot := _free_station_slot(runtime)
+			if slot < 0:
+				continue
+			var positions: Array = runtime.get("interaction_positions", [])
+			if slot >= positions.size():
+				continue
+			var interaction_position := Vector3(positions[slot])
+			if world != null and world.has_method("is_work_position_available") and not world.is_work_position_available(interaction_position, String(employee.get("id", ""))):
+				continue
+			if from_position is Vector3 and world != null and world.has_method("find_path") and world.find_path(Vector3(from_position), interaction_position).is_empty():
+				continue
+			var candidate := float(task.get("priority", 1)) * 100.0 + GameState.service_seconds - float(task.get("created_at", 0.0))
+			if from_position is Vector3:
+				candidate -= Vector3(from_position).distance_to(interaction_position)
+			if candidate > best_score:
+				best_score = candidate
+				best = task
+				best_runtime = runtime
+				best_slot = slot
+				best_position = interaction_position
+	if best.is_empty():
+		return {}
+	best.state = "reserved"
+	best.employee_id = String(employee.get("id", ""))
+	best.target = best_position
+	if not best_runtime.is_empty():
+		best.station_runtime = best_runtime
+		best.interaction_slot = best_slot
+		best.interaction_position = best_position
+		best.station_runtime.reservations[best_slot] = String(employee.get("id", ""))
+		best.station_runtime.busy = best.station_runtime.reservations.size()
+	task_board_changed.emit()
+	return best
+
+
+func begin_maintenance_task(task_id: String) -> bool:
+	if not maintenance_tasks.has(task_id):
+		return false
+	var task: Dictionary = maintenance_tasks[task_id]
+	if String(task.get("state", "")) != "reserved" or not maintenance_task_is_actionable(task) or not maintenance_task_reservation_is_valid(task_id, String(task.get("employee_id", ""))):
+		if String(task.get("state", "")) == "reserved":
+			_cancel_maintenance_record(task, false)
+		return false
+	task.state = "in_progress"
+	var owner := task.get("owner") as Node
+	if owner != null and is_instance_valid(owner) and owner.has_method("maintenance_started"):
+		owner.call("maintenance_started", String(task.get("action", "")), task.get("payload", {}), String(task.get("employee_id", "")))
+	task_board_changed.emit()
+	return true
+
+
+func complete_maintenance_task(task_id: String) -> bool:
+	if not maintenance_tasks.has(task_id):
+		return false
+	var task: Dictionary = maintenance_tasks[task_id]
+	if String(task.get("state", "")) not in ["reserved", "in_progress"]:
+		return false
+	if not maintenance_task_is_actionable(task):
+		_cancel_maintenance_record(task, false)
+		return false
+	var employee_id := String(task.get("employee_id", ""))
+	_release_station(task)
+	task.station_runtime = null
+	task.state = "completed"
+	task.finished_at = GameState.service_seconds
+	if not employee_id.is_empty():
+		stats.employee_tasks[employee_id] = int(stats.employee_tasks.get(employee_id, 0)) + 1
+	var owner := task.get("owner") as Node
+	if owner != null and is_instance_valid(owner) and owner.has_method("maintenance_completed"):
+		owner.call("maintenance_completed", String(task.get("action", "")), task.get("payload", {}))
+	task_board_changed.emit()
+	return true
+
+
+func maintenance_task_is_actionable(task: Dictionary) -> bool:
+	if task.is_empty() or String(task.get("state", "")) in ["completed", "cancelled"]:
+		return false
+	var owner := task.get("owner") as Node
+	if owner == null or not is_instance_valid(owner) or owner.is_queued_for_deletion():
+		return false
+	if owner.has_method("accepts_maintenance_action"):
+		return bool(owner.call("accepts_maintenance_action", String(task.get("action", "")), task.get("payload", {})))
+	return true
+
+
+func maintenance_task_reservation_is_valid(task_id: String, employee_id: String) -> bool:
+	if not maintenance_tasks.has(task_id) or employee_id.is_empty():
+		return false
+	var task: Dictionary = maintenance_tasks[task_id]
+	if String(task.get("employee_id", "")) != employee_id:
+		return false
+	if String(task.get("station", "")).is_empty():
+		return String(task.get("state", "")) in ["reserved", "in_progress"]
+	return _station_reservation_is_owned(task)
+
+
+func cancel_maintenance_task(task_id: String) -> void:
+	if maintenance_tasks.has(task_id):
+		_cancel_maintenance_record(maintenance_tasks[task_id], true)
+
+
+func cancel_maintenance_for_owner(owner: Node) -> void:
+	for task: Dictionary in maintenance_tasks.values():
+		if task.get("owner") == owner and String(task.get("state", "")) not in ["completed", "cancelled"]:
+			_cancel_maintenance_record(task, true)
+
+
+func _cancel_maintenance_record(task: Dictionary, notify_owner: bool) -> void:
+	if task.is_empty() or String(task.get("state", "")) in ["completed", "cancelled"]:
+		return
+	_release_station(task)
+	task.station_runtime = null
+	task.employee_id = ""
+	task.state = "cancelled"
+	task.finished_at = GameState.service_seconds
+	var owner := task.get("owner") as Node
+	if notify_owner and owner != null and is_instance_valid(owner) and owner.has_method("maintenance_cancelled"):
+		owner.call("maintenance_cancelled", String(task.get("action", "")), task.get("payload", {}))
+	task_board_changed.emit()
+
+
+func _maintenance_key_is_reserved(key: String) -> bool:
+	if key.is_empty():
+		return false
+	for task: Dictionary in maintenance_tasks.values():
+		if String(task.get("reservation_key", "")) == key and String(task.get("state", "")) in ["reserved", "in_progress"]:
+			return true
+	return false
 
 
 func _service_key_is_reserved(key: String) -> bool:
@@ -722,6 +959,10 @@ func predicted_station_load(station_id: String) -> float:
 
 
 func reset_service_stats() -> void:
+	# Release runtime slots before dropping task records. This matters when a
+	# service is restarted without rebuilding the restaurant scene.
+	for maintenance_task: Dictionary in maintenance_tasks.values():
+		_release_station(maintenance_task)
 	stats = {
 		"revenue": 0,
 		"ingredient_cost": 0.0,
@@ -738,6 +979,7 @@ func reset_service_stats() -> void:
 	tasks.clear()
 	orders.clear()
 	service_tasks.clear()
+	maintenance_tasks.clear()
 	_simulation_tick_accumulator = 0.0
 	_maintenance_clock = 0.0
 	statistics_changed.emit()
@@ -752,6 +994,15 @@ func _prune_completed_work(force: bool = false) -> void:
 		var finished_at := float(service_task.get("finished_at", service_task.get("created_at", now)))
 		if force or now - finished_at >= COMPLETED_WORK_RETENTION:
 			service_tasks.erase(service_id)
+	for maintenance_id: String in maintenance_tasks.keys():
+		var maintenance_task: Dictionary = maintenance_tasks.get(maintenance_id, {})
+		if String(maintenance_task.get("state", "")) not in ["completed", "cancelled"] and not maintenance_task_is_actionable(maintenance_task):
+			_cancel_maintenance_record(maintenance_task, false)
+		if String(maintenance_task.get("state", "")) not in ["completed", "cancelled"]:
+			continue
+		var finished_at := float(maintenance_task.get("finished_at", maintenance_task.get("created_at", now)))
+		if force or now - finished_at >= COMPLETED_WORK_RETENTION:
+			maintenance_tasks.erase(maintenance_id)
 	for order_id: String in orders.keys():
 		var order: Dictionary = orders.get(order_id, {})
 		if String(order.get("state", "")) not in ["paid", "cancelled"]:

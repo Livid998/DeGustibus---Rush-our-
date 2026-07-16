@@ -3,6 +3,13 @@ extends Node3D
 
 const GRID_SIZE := Vector2i(18, 14)
 const CELL_SIZE := 2.0
+## The legacy dining-room transform deliberately keeps using GRID_SIZE.  The
+## larger region only extends the build/navigation graph, so old saves keep
+## exactly the same world coordinates.
+const LOT_REGION := Rect2i(Vector2i(-4, -4), Vector2i(32, 22))
+const SIDEWALK_Y := -1
+const ROAD_ROWS: Array[int] = [-3, -2]
+const CUSTOMER_QUEUE_SPACING := 1.12
 
 var entrance_cell := Vector2i(8, 0)
 var astar := AStarGrid2D.new()
@@ -10,6 +17,10 @@ var occupancy: Dictionary = {}
 var static_blocked: Dictionary = {}
 var placed_objects: Dictionary = {}
 var table_occupants: Dictionary = {}
+var table_dirty_records: Dictionary = {}
+var customer_queue: Array[Node] = []
+var door_owner: Node
+var exiting_customers: Dictionary = {}
 var staff_agents: Dictionary = {}
 var navigation_agents: Array[AnimatedAgent] = []
 var navigation_revision := 0
@@ -40,6 +51,11 @@ var _loading_layout := false
 var _blocked_edge_uids: Dictionary = {}
 var _grid_path_cache: Dictionary = {}
 var _path_cache_suspended := false
+var cleanup_root: Node3D
+var spill_records: Dictionary = {}
+var wash_batches: Dictionary = {}
+var _spill_serial := 0
+var _spill_clock := 18.0
 
 
 func _ready() -> void:
@@ -70,7 +86,12 @@ func _process(delta: float) -> void:
 			_update_station_queue_labels()
 	if GameState.restaurant_state != "open":
 		return
-	_spawn_clock -= delta * SimulationManager.simulation_speed
+	var scaled := delta * SimulationManager.simulation_speed
+	_spawn_clock -= scaled
+	_spill_clock -= scaled
+	if _spill_clock <= 0.0:
+		_spill_clock = randf_range(22.0, 34.0)
+		_spawn_service_spill()
 	var maximum := 8 if rush_mode else 5
 	if _spawn_clock <= 0.0 and SimulationManager.customers.size() < maximum:
 		spawn_customer_group()
@@ -129,6 +150,9 @@ func _create_roots() -> void:
 	customer_root = Node3D.new()
 	customer_root.name = "Customers"
 	add_child(customer_root)
+	cleanup_root = Node3D.new()
+	cleanup_root.name = "CleanupObjects"
+	add_child(cleanup_root)
 	camera_rig = RestaurantCamera.new()
 	camera_rig.name = "IsometricCamera"
 	add_child(camera_rig)
@@ -166,12 +190,16 @@ func apply_graphics_quality(_preset: String = "auto") -> void:
 
 
 func _create_grid() -> void:
-	astar.region = Rect2i(Vector2i.ZERO, GRID_SIZE)
+	astar.region = LOT_REGION
 	astar.cell_size = Vector2.ONE
 	astar.diagonal_mode = AStarGrid2D.DIAGONAL_MODE_NEVER
 	astar.default_compute_heuristic = AStarGrid2D.HEURISTIC_MANHATTAN
 	astar.default_estimate_heuristic = AStarGrid2D.HEURISTIC_MANHATTAN
 	astar.update()
+	# The road is scenery and a despawn boundary, not an indoor walking route.
+	for road_y: int in ROAD_ROWS:
+		for x: int in range(LOT_REGION.position.x, LOT_REGION.end.x):
+			static_blocked[Vector2i(x, road_y)] = true
 
 
 func _create_floor_and_walls() -> void:
@@ -200,15 +228,27 @@ func load_layout() -> void:
 	placed_objects.clear()
 	occupancy.clear()
 	table_occupants.clear()
+	table_dirty_records.clear()
+	customer_queue.clear()
+	door_owner = null
+	exiting_customers.clear()
 	waiting_reservations.clear()
 	staff_standby_reservations.clear()
 	corridor_reservations.clear()
 	agent_corridor_reservations.clear()
 	_loading_layout = true
 	floor_tiles.clear()
-	for y: int in GRID_SIZE.y:
-		for x: int in GRID_SIZE.x:
-			set_floor_style(Vector2i(x, y), "floor_dining" if y < 8 else "floor_kitchen")
+	for y: int in range(LOT_REGION.position.y, LOT_REGION.end.y):
+		for x: int in range(LOT_REGION.position.x, LOT_REGION.end.x):
+			var cell := Vector2i(x, y)
+			var style := "floor_grass"
+			if Rect2i(Vector2i.ZERO, GRID_SIZE).has_point(cell):
+				style = "floor_dining" if y < 8 else "floor_kitchen"
+			elif y == SIDEWALK_Y:
+				style = "floor_sidewalk"
+			elif y in ROAD_ROWS:
+				style = "floor_road"
+			set_floor_style(cell, style)
 	for record: Dictionary in GameState.layout:
 		var cell_data: Array = record.get("cell", [0, 0])
 		instantiate_layout_object(
@@ -585,7 +625,7 @@ func structural_edge_at(cell: Vector2i, rotation_steps: int, ignored: PlacedObje
 
 
 func validate_placement(definition: Dictionary, cell: Vector2i, rotation_steps: int, ignored: PlacedObject = null, support_uid: String = "", attachment_slot: int = -1) -> Dictionary:
-	if cell.x < 0 or cell.y < 0:
+	if not LOT_REGION.has_point(cell):
 		return {"valid": false, "reason": "Fuori dall'area costruibile"}
 	var placement := String(definition.get("placement", "cell"))
 	if is_attachment_placement(definition):
@@ -663,7 +703,7 @@ func validate_placement(definition: Dictionary, cell: Vector2i, rotation_steps: 
 
 
 func _operational_access_error(new_definition: Dictionary, new_cells: Array[Vector2i], rotation_steps: int, ignored: PlacedObject, support_uid: String = "", baseline_access: Dictionary = {}) -> String:
-	if bool(baseline_access.get("__kitchen", true)) and _grid_path(entrance_cell, _nearest_open_cell(Vector2i(9, 8))).is_empty():
+	if bool(baseline_access.get("__kitchen", true)) and _interior_grid_path(entrance_cell, _nearest_open_cell(Vector2i(9, 8))).is_empty():
 		return "Bloccherebbe il passaggio tra ingresso e cucina"
 	for object: PlacedObject in placed_objects.values():
 		if object == ignored or not is_instance_valid(object):
@@ -699,7 +739,7 @@ func _operational_access_error(new_definition: Dictionary, new_cells: Array[Vect
 
 
 func _accessibility_snapshot(ignored: PlacedObject = null) -> Dictionary:
-	var result := {"__kitchen": not _grid_path(entrance_cell, _nearest_open_cell(Vector2i(9, 8))).is_empty()}
+	var result := {"__kitchen": not _interior_grid_path(entrance_cell, _nearest_open_cell(Vector2i(9, 8))).is_empty()}
 	for object: PlacedObject in placed_objects.values():
 		if object == ignored or not is_instance_valid(object):
 			continue
@@ -708,6 +748,37 @@ func _accessibility_snapshot(ignored: PlacedObject = null) -> Dictionary:
 		if object.station_id.is_empty() and not object.item_id.begins_with("table"):
 			continue
 		result[object.uid] = _object_has_operational_access(object)
+	return result
+
+
+func _interior_grid_path(from_cell: Vector2i, to_cell: Vector2i) -> Array[Vector2i]:
+	var interior := Rect2i(Vector2i.ZERO, GRID_SIZE)
+	var empty: Array[Vector2i] = []
+	if not interior.has_point(from_cell) or not interior.has_point(to_cell) or astar.is_point_solid(from_cell) or astar.is_point_solid(to_cell):
+		return empty
+	var frontier: Array[Vector2i] = [from_cell]
+	var came_from: Dictionary = {from_cell: from_cell}
+	var head := 0
+	while head < frontier.size():
+		var current := frontier[head]
+		head += 1
+		if current == to_cell:
+			break
+		for offset: Vector2i in [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]:
+			var neighbor := current + offset
+			if not interior.has_point(neighbor) or astar.is_point_solid(neighbor) or came_from.has(neighbor) or _wall_blocks_step(current, neighbor):
+				continue
+			came_from[neighbor] = current
+			frontier.append(neighbor)
+	if not came_from.has(to_cell):
+		return empty
+	var result: Array[Vector2i] = []
+	var cursor := to_cell
+	while cursor != from_cell:
+		result.append(cursor)
+		cursor = Vector2i(came_from[cursor])
+	result.append(from_cell)
+	result.reverse()
 	return result
 
 
@@ -1173,6 +1244,11 @@ func _corridor_key(start: Vector2i) -> String:
 
 
 func _is_narrow_corridor_cell(cell: Vector2i) -> bool:
+	# The pavement is intentionally a FIFO waiting lane.  Treating the whole
+	# long sidewalk as one exclusive indoor corridor lets the first queued body
+	# reserve it forever and deadlocks everybody behind it.
+	if cell.y < 0:
+		return false
 	return astar.is_in_boundsv(cell) and not astar.is_point_solid(cell) and _open_neighbor_count(cell) <= 2
 
 
@@ -1279,8 +1355,10 @@ func compute_agent_velocity(agent: AnimatedAgent, desired_velocity: Vector3) -> 
 		if distance > separation * 3.2:
 			continue
 		var away := offset.normalized() if distance > 0.01 else Vector3.RIGHT.rotated(Vector3.UP, float(agent.get_instance_id() % 4) * PI * 0.5)
-		if agent is EmployeeAgent and other is CustomerAgent and String(other.get("state")) in ["walking_to_table", "retrying_table_route", "seating"]:
-			result += away * agent.movement_speed * 1.8
+		if agent is EmployeeAgent and other is CustomerPersonAgent:
+			var party := (other as CustomerPersonAgent).party
+			if party != null and String(party.get("state")) in ["admitting", "walking_to_table", "seating", "leaving"]:
+				result += away * agent.movement_speed * 1.8
 		if distance < separation * 1.35:
 			result += away * agent.movement_speed * (separation * 1.35 - distance) / maxf(separation, 0.01) * 2.2
 		var desired_direction := desired_velocity.normalized()
@@ -1468,8 +1546,8 @@ func can_visual_person_step(owner: AnimatedAgent, from_position: Vector3, to_pos
 
 
 func _nearest_open_cell(cell: Vector2i) -> Vector2i:
-	cell.x = clampi(cell.x, 0, GRID_SIZE.x - 1)
-	cell.y = clampi(cell.y, 0, GRID_SIZE.y - 1)
+	cell.x = clampi(cell.x, LOT_REGION.position.x, LOT_REGION.end.x - 1)
+	cell.y = clampi(cell.y, LOT_REGION.position.y, LOT_REGION.end.y - 1)
 	if not astar.is_point_solid(cell):
 		return cell
 	for radius: int in range(1, 5):
@@ -1513,8 +1591,112 @@ func spawn_customer_group() -> void:
 		return
 	var customer := CustomerAgent.new()
 	customer_root.add_child(customer)
-	customer.global_position = find_safe_agent_position(cell_to_world(entrance_cell), customer)
+	customer.global_position = customer_spawn_position(customer)
 	customer.setup(self, _random_customer_group_size())
+
+
+func enqueue_customer(customer: Node) -> void:
+	_cleanup_customer_flow()
+	if customer != null and is_instance_valid(customer) and not customer_queue.has(customer):
+		customer_queue.append(customer)
+
+
+func dequeue_customer(customer: Node) -> void:
+	customer_queue.erase(customer)
+	release_waiting_position(customer)
+
+
+func customer_is_queue_head(customer: Node) -> bool:
+	_cleanup_customer_flow()
+	return not customer_queue.is_empty() and customer_queue[0] == customer
+
+
+func customer_queue_positions(customer: Node) -> Array[Vector3]:
+	_cleanup_customer_flow()
+	var result: Array[Vector3] = []
+	var ordinal := 0
+	for queued: Node in customer_queue:
+		if queued == customer:
+			break
+		ordinal += int(queued.get("group_size"))
+	var size := int(customer.get("group_size")) if customer != null and is_instance_valid(customer) else 1
+	# Keep the pavement directly in front of the door free. Human-scale spacing
+	# lets the maximum eight four-person parties fit on the straight sidewalk
+	# without ever sharing a destination at the far end of the lot.
+	var queue_origin := cell_to_world(Vector2i(entrance_cell.x + 1, SIDEWALK_Y))
+	var queue_end_x := cell_to_world(Vector2i(LOT_REGION.end.x - 1, SIDEWALK_Y)).x
+	for member_index: int in size:
+		var queue_x := minf(queue_origin.x + float(ordinal + member_index) * CUSTOMER_QUEUE_SPACING, queue_end_x)
+		result.append(Vector3(queue_x, 0.0, queue_origin.z))
+	return result
+
+
+func customer_spawn_position(_customer: Node = null) -> Vector3:
+	return cell_to_world(Vector2i(LOT_REGION.end.x - 1, SIDEWALK_Y))
+
+
+func customer_inside_door_position(member_index: int = 0) -> Vector3:
+	var base := cell_to_world(entrance_cell)
+	return base + Vector3((float(member_index % 2) - 0.5) * 0.16, 0.0, 0.18)
+
+
+func customer_outside_door_position(member_index: int = 0) -> Vector3:
+	var base := cell_to_world(Vector2i(entrance_cell.x, SIDEWALK_Y))
+	return base + Vector3((float(member_index % 2) - 0.5) * 0.16, 0.0, 0.0)
+
+
+func customer_despawn_position(member_index: int = 0) -> Vector3:
+	return cell_to_world(Vector2i(LOT_REGION.position.x, SIDEWALK_Y)) + Vector3(0.0, 0.0, float(member_index % 2) * 0.16)
+
+
+func position_is_inside_restaurant(position: Vector3) -> bool:
+	return world_to_cell(position).y >= 0
+
+
+func try_begin_customer_entry(customer: Node) -> bool:
+	_cleanup_customer_flow()
+	if customer == null or not is_instance_valid(customer) or not exiting_customers.is_empty():
+		return false
+	if door_owner == null:
+		door_owner = customer
+	return door_owner == customer
+
+
+func finish_customer_entry(customer: Node) -> void:
+	if door_owner == customer:
+		door_owner = null
+
+
+func register_customer_exit(customer: Node) -> void:
+	if customer != null and is_instance_valid(customer):
+		exiting_customers[customer.get_instance_id()] = customer
+
+
+func try_begin_customer_exit(customer: Node) -> bool:
+	register_customer_exit(customer)
+	_cleanup_customer_flow()
+	if door_owner == null:
+		door_owner = customer
+	return door_owner == customer
+
+
+func finish_customer_exit(customer: Node) -> void:
+	if customer != null:
+		exiting_customers.erase(customer.get_instance_id())
+	if door_owner == customer:
+		door_owner = null
+
+
+func _cleanup_customer_flow() -> void:
+	for queued: Node in customer_queue.duplicate():
+		if queued == null or not is_instance_valid(queued) or queued.is_queued_for_deletion():
+			customer_queue.erase(queued)
+	for key: int in exiting_customers.keys():
+		var candidate := exiting_customers.get(key) as Node
+		if candidate == null or not is_instance_valid(candidate) or candidate.is_queued_for_deletion():
+			exiting_customers.erase(key)
+	if door_owner != null and (not is_instance_valid(door_owner) or door_owner.is_queued_for_deletion()):
+		door_owner = null
 
 
 func _random_customer_group_size() -> int:
@@ -1536,6 +1718,8 @@ func request_table(customer: Node, group_size: int) -> Dictionary:
 		if table_occupants[uid] != null and not is_instance_valid(table_occupants[uid]):
 			table_occupants[uid] = null
 		if table_occupants[uid] != null:
+			continue
+		if table_dirty_records.has(uid):
 			continue
 		var table_object: PlacedObject = placed_objects.get(uid)
 		if table_object == null or not is_instance_valid(table_object):
@@ -1610,25 +1794,8 @@ func set_rush_mode(enabled: bool) -> void:
 
 
 func waiting_position(customer: Node) -> Vector3:
-	var key := customer.get_instance_id()
-	if waiting_reservations.has(key):
-		return Vector3(waiting_reservations[key])
-	var slots := [Vector2i(8, 1), Vector2i(7, 2), Vector2i(9, 2), Vector2i(6, 2), Vector2i(10, 2), Vector2i(8, 2)]
-	for slot: Vector2i in slots:
-		if not astar.is_in_boundsv(slot) or astar.is_point_solid(slot):
-			continue
-		var position := cell_to_world(slot)
-		var reserved := false
-		for existing: Vector3 in waiting_reservations.values():
-			if existing.distance_to(position) < 0.5:
-				reserved = true
-				break
-		if not reserved and not find_path(customer.global_position, position).is_empty():
-			waiting_reservations[key] = position
-			return position
-	var fallback := find_safe_agent_position(cell_to_world(entrance_cell), customer as AnimatedAgent)
-	waiting_reservations[key] = fallback
-	return fallback
+	var positions := customer_queue_positions(customer)
+	return positions[0] if not positions.is_empty() else customer_spawn_position(customer)
 
 
 func release_waiting_position(customer: Node) -> void:
@@ -1659,11 +1826,19 @@ func _seat_assignments_for_table(table_object: PlacedObject) -> Array[Dictionary
 		var occupant_position := chair.global_position
 		var toward_table := chair.global_position.direction_to(table_object.global_position)
 		occupant_position += toward_table * float(table_object.definition.get("occupant_inset", 0.0))
+		var away := table_object.global_position.direction_to(chair.global_position)
+		away.y = 0.0
+		if away.length_squared() <= 0.001:
+			away = Vector3.FORWARD
+		var staging_position := chair.global_position + away.normalized() * 0.82
+		staging_position.y = 0.0
 		result.append({
 			"chair_uid": chair.uid,
 			"slot": chair.attachment_slot,
 			"chair_position": chair.global_position,
 			"position": occupant_position,
+			"staging_position": staging_position,
+			"exit_staging_position": staging_position,
 			"rotation": chair.rotation.y
 		})
 	return result
@@ -1691,8 +1866,183 @@ func _service_position_for_table(table_object: PlacedObject) -> Vector3:
 	return table_object.global_position + Vector3(-CELL_SIZE, 0, 0)
 
 
+func adopt_dirty_table(_customer: Node, table_uid: String, source_dishes: Array) -> void:
+	if table_uid.is_empty() or not placed_objects.has(table_uid):
+		return
+	var dirty_nodes: Array[Node3D] = []
+	for source: Node3D in source_dishes:
+		if source == null or not is_instance_valid(source):
+			continue
+		var source_transform := source.global_transform
+		source.queue_free()
+		var dirty := ModelFactory.instantiate_model("res://assets/equipment/plate_dirty.gltf", 0.55)
+		ModelFactory.align_visual_to_grid_origin(dirty)
+		cleanup_root.add_child(dirty)
+		dirty.global_transform = source_transform
+		ModelFactory.set_shadow_casting(dirty, GeometryInstance3D.SHADOW_CASTING_SETTING_OFF)
+		dirty_nodes.append(dirty)
+	if dirty_nodes.is_empty():
+		return
+	var table_object := placed_objects.get(table_uid) as PlacedObject
+	var service_position := _service_position_for_table(table_object) if table_object != null else cell_to_world(entrance_cell)
+	var sink_position := _sink_interaction_position()
+	table_dirty_records[table_uid] = {
+		"table_uid": table_uid,
+		"nodes": dirty_nodes,
+		"state": "dirty",
+		"service_position": service_position
+	}
+	var task := SimulationManager.request_service(self, "collect_dishes", service_position, {
+		"table_uid": table_uid,
+		"reservation_key": "dirty:%s" % table_uid,
+		"secondary_target": sink_position,
+		"carry_model": "res://assets/equipment/plate_dirty.gltf"
+	})
+	if not task.is_empty():
+		table_dirty_records[table_uid].task_id = String(task.id)
+
+
+func accepts_service_action(action: String, payload: Dictionary = {}) -> bool:
+	if action != "collect_dishes":
+		return false
+	var table_uid := String(payload.get("table_uid", ""))
+	if not table_dirty_records.has(table_uid):
+		return false
+	return String(table_dirty_records[table_uid].get("state", "")) in ["dirty", "busing"]
+
+
+func service_task_stage(action: String, payload: Dictionary, stage: String) -> void:
+	if action != "collect_dishes" or stage != "pickup":
+		return
+	var table_uid := String(payload.get("table_uid", ""))
+	if not table_dirty_records.has(table_uid):
+		return
+	var record: Dictionary = table_dirty_records[table_uid]
+	record.state = "busing"
+	for node: Node3D in record.get("nodes", []):
+		if is_instance_valid(node):
+			node.visible = false
+
+
+func service_completed(action: String, payload: Dictionary) -> void:
+	if action != "collect_dishes":
+		return
+	var table_uid := String(payload.get("table_uid", ""))
+	if not table_dirty_records.has(table_uid):
+		return
+	var record: Dictionary = table_dirty_records[table_uid]
+	for node: Node3D in record.get("nodes", []):
+		if is_instance_valid(node):
+			node.queue_free()
+	table_dirty_records.erase(table_uid)
+	wash_batches[table_uid] = true
+	var station_available := SimulationManager.stations.has("sink") and not (SimulationManager.stations.get("sink", []) as Array).is_empty()
+	SimulationManager.request_maintenance_task(self, "wash_dishes", _sink_interaction_position(), {
+		"table_uid": table_uid,
+		"reservation_key": "wash:%s" % table_uid,
+		"station_id": "sink" if station_available else "",
+		"animation": "PickUp"
+	}, 2, 2.4, "res://assets/cleaning/Cleaning_Sponge.glb")
+
+
+func _sink_interaction_position() -> Vector3:
+	for runtime: Dictionary in SimulationManager.stations.get("sink", []):
+		var positions: Array = runtime.get("interaction_positions", [])
+		if not positions.is_empty():
+			return Vector3(positions[0])
+	return cell_to_world(Vector2i(7, 11))
+
+
+func _spawn_service_spill() -> void:
+	if spill_records.size() >= 3 or cleanup_root == null:
+		return
+	var candidates: Array[Vector2i] = []
+	for y: int in range(1, GRID_SIZE.y - 1):
+		for x: int in range(1, GRID_SIZE.x - 1):
+			var cell := Vector2i(x, y)
+			if astar.is_point_solid(cell) or _grid_path(entrance_cell, cell).is_empty():
+				continue
+			var occupied_by_spill := false
+			for record: Dictionary in spill_records.values():
+				if Vector2i(record.get("cell", Vector2i(-99, -99))).distance_to(cell) < 2.0:
+					occupied_by_spill = true
+					break
+			if not occupied_by_spill:
+				candidates.append(cell)
+	if candidates.is_empty():
+		return
+	candidates.shuffle()
+	_spill_serial += 1
+	var spill_id := "spill_%04d" % _spill_serial
+	var cell := candidates[0]
+	var visual := _create_spill_visual(spill_id)
+	cleanup_root.add_child(visual)
+	visual.global_position = cell_to_world(cell) + Vector3.UP * 0.035
+	spill_records[spill_id] = {"id": spill_id, "cell": cell, "node": visual, "state": "dirty"}
+	var task := SimulationManager.request_maintenance_task(self, "clean_spill", visual.global_position, {
+		"spill_id": spill_id,
+		"reservation_key": spill_id,
+		"animation": "PickUp"
+	}, 2, 1.8, "res://assets/cleaning/Tool_Mop.glb")
+	if not task.is_empty():
+		spill_records[spill_id].task_id = String(task.id)
+
+
+func _create_spill_visual(spill_id: String) -> Node3D:
+	var root := Node3D.new()
+	root.name = spill_id
+	var material := StandardMaterial3D.new()
+	material.albedo_color = [Color("79533acb"), Color("b58a45c9"), Color("778b4dcc")].pick_random()
+	material.roughness = 0.88
+	material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	for index: int in 3:
+		var blob := MeshInstance3D.new()
+		var mesh := CylinderMesh.new()
+		mesh.top_radius = 0.22 + float(index) * 0.06
+		mesh.bottom_radius = mesh.top_radius
+		mesh.height = 0.012
+		mesh.radial_segments = 14
+		mesh.material = material
+		blob.mesh = mesh
+		blob.scale = Vector3(randf_range(0.75, 1.4), 1.0, randf_range(0.55, 1.05))
+		blob.position = Vector3(randf_range(-0.24, 0.24), float(index) * 0.004, randf_range(-0.18, 0.18))
+		blob.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		root.add_child(blob)
+	return root
+
+
+func accepts_maintenance_action(action: String, payload: Dictionary = {}) -> bool:
+	match action:
+		"clean_spill":
+			var spill_id := String(payload.get("spill_id", ""))
+			return spill_records.has(spill_id) and String(spill_records[spill_id].get("state", "")) != "clean"
+		"wash_dishes":
+			return wash_batches.has(String(payload.get("table_uid", "")))
+	return false
+
+
+func maintenance_started(action: String, payload: Dictionary, _employee_id: String) -> void:
+	if action == "clean_spill":
+		var spill_id := String(payload.get("spill_id", ""))
+		if spill_records.has(spill_id):
+			spill_records[spill_id].state = "cleaning"
+
+
+func maintenance_completed(action: String, payload: Dictionary) -> void:
+	match action:
+		"clean_spill":
+			var spill_id := String(payload.get("spill_id", ""))
+			if spill_records.has(spill_id):
+				var node := spill_records[spill_id].get("node") as Node3D
+				if node != null and is_instance_valid(node):
+					node.queue_free()
+				spill_records.erase(spill_id)
+		"wash_dishes":
+			wash_batches.erase(String(payload.get("table_uid", "")))
+
+
 func set_floor_style(cell: Vector2i, item_id: String) -> void:
-	if not Rect2i(Vector2i.ZERO, GRID_SIZE).has_point(cell) or floor_root == null:
+	if not LOT_REGION.has_point(cell) or floor_root == null:
 		return
 	floor_tiles[cell] = item_id
 	if not _loading_layout:
@@ -1712,8 +2062,7 @@ func _rebuild_floor_batches() -> void:
 			cells_by_style[style] = []
 		cells_by_style[style].append(cell)
 	for style: String in cells_by_style:
-		var path := "res://assets/environment/floor_kitchen.gltf" if style == "floor_kitchen" else "res://assets/environment/floor_kitchen_styleB.gltf"
-		var source := ModelFactory.instantiate_model(path)
+		var source := _floor_source(style)
 		var mesh_data: Dictionary = {}
 		_find_first_floor_mesh(source, Transform3D.IDENTITY, mesh_data)
 		if mesh_data.is_empty():
@@ -1725,9 +2074,10 @@ func _rebuild_floor_batches() -> void:
 		multimesh.mesh = mesh_data.mesh
 		multimesh.instance_count = cells.size()
 		var mesh_transform: Transform3D = mesh_data.transform
+		var tile_scale := 1.0 if style in ["floor_grass", "floor_road", "floor_sidewalk"] else 0.5
 		for index: int in cells.size():
 			var cell: Vector2i = cells[index]
-			var tile_transform := Transform3D(Basis.IDENTITY.scaled(Vector3.ONE * 0.5), cell_to_world(cell))
+			var tile_transform := Transform3D(Basis.IDENTITY.scaled(Vector3.ONE * tile_scale), cell_to_world(cell))
 			multimesh.set_instance_transform(index, tile_transform * mesh_transform)
 		var batch := MultiMeshInstance3D.new()
 		batch.name = "FloorBatch_%s" % style
@@ -1736,6 +2086,27 @@ func _rebuild_floor_batches() -> void:
 		floor_root.add_child(batch)
 		floor_batches[style] = batch
 		source.free()
+
+
+func _floor_source(style: String) -> Node3D:
+	if style in ["floor_sidewalk", "floor_grass"]:
+		var root := Node3D.new()
+		var mesh_instance := MeshInstance3D.new()
+		var box := BoxMesh.new()
+		box.size = Vector3(CELL_SIZE, 0.10, CELL_SIZE)
+		var material := StandardMaterial3D.new()
+		material.albedo_color = Color("d8c8a7") if style == "floor_sidewalk" else Color("78ad55")
+		material.roughness = 0.92
+		box.material = material
+		mesh_instance.mesh = box
+		mesh_instance.position.y = -0.045
+		root.add_child(mesh_instance)
+		return root
+	var path := "res://assets/environment/floor_kitchen_styleB.gltf"
+	match style:
+		"floor_kitchen": path = "res://assets/environment/floor_kitchen.gltf"
+		"floor_road": path = "res://assets/exterior/city/road_straight.gltf"
+	return ModelFactory.instantiate_model(path)
 
 
 func _find_first_floor_mesh(node: Node, parent_transform: Transform3D, result: Dictionary) -> void:
@@ -1763,15 +2134,15 @@ func _create_grid_overlay() -> void:
 	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	material.albedo_color = Color(0.1, 0.55, 0.62, 0.34)
 	mesh.surface_begin(Mesh.PRIMITIVE_LINES, material)
-	var left := cell_to_world(Vector2i(0, 0)).x - CELL_SIZE * 0.5
-	var right := cell_to_world(Vector2i(GRID_SIZE.x - 1, 0)).x + CELL_SIZE * 0.5
-	var top := cell_to_world(Vector2i(0, 0)).z - CELL_SIZE * 0.5
-	var bottom := cell_to_world(Vector2i(0, GRID_SIZE.y - 1)).z + CELL_SIZE * 0.5
-	for x: int in range(GRID_SIZE.x + 1):
+	var left := cell_to_world(LOT_REGION.position).x - CELL_SIZE * 0.5
+	var right := cell_to_world(Vector2i(LOT_REGION.end.x - 1, LOT_REGION.position.y)).x + CELL_SIZE * 0.5
+	var top := cell_to_world(LOT_REGION.position).z - CELL_SIZE * 0.5
+	var bottom := cell_to_world(Vector2i(LOT_REGION.position.x, LOT_REGION.end.y - 1)).z + CELL_SIZE * 0.5
+	for x: int in range(LOT_REGION.size.x + 1):
 		var world_x := left + x * CELL_SIZE
 		mesh.surface_add_vertex(Vector3(world_x, 0.09, top))
 		mesh.surface_add_vertex(Vector3(world_x, 0.09, bottom))
-	for y: int in range(GRID_SIZE.y + 1):
+	for y: int in range(LOT_REGION.size.y + 1):
 		var world_z := top + y * CELL_SIZE
 		mesh.surface_add_vertex(Vector3(left, 0.09, world_z))
 		mesh.surface_add_vertex(Vector3(right, 0.09, world_z))

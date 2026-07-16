@@ -9,7 +9,7 @@ signal employees_changed
 signal layout_changed
 signal toast_requested(message: String, tone: String)
 
-const SAVE_VERSION := 7
+const SAVE_VERSION := 8
 
 var money: int = 10000
 var reputation: float = 1.0
@@ -107,6 +107,7 @@ func _default_layout() -> Array:
 		{"uid":"plant_1","item":"plant","cell":[15,3],"rotation":0}
 	]
 	result.append_array(_initial_wall_records())
+	result.append_array(_initial_exterior_records())
 	return result
 
 
@@ -273,6 +274,8 @@ func deserialize(data: Dictionary) -> void:
 		_migrate_attachments_v6()
 	if loaded_version < 7:
 		_migrate_attachment_integrity_v7()
+	if loaded_version < 8:
+		_migrate_exterior_v8()
 	settings.merge(data.get("settings", {}), true)
 	tutorial.merge(data.get("tutorial", {}), true)
 	purchased_preparations.merge(data.get("purchased_preparations", {}), true)
@@ -561,6 +564,31 @@ func _layout_mark_slots(support_uid: String, slots: Array[int], used_slots: Dict
 		used_slots[support_uid] = {}
 	for slot: int in slots:
 		used_slots[support_uid][slot] = true
+
+
+func _migrate_exterior_v8() -> void:
+	var existing_uids: Dictionary = {}
+	for record: Dictionary in layout:
+		existing_uids[String(record.get("uid", ""))] = true
+	for exterior_record: Dictionary in _initial_exterior_records():
+		var uid := String(exterior_record.get("uid", ""))
+		if uid.is_empty() or existing_uids.has(uid):
+			continue
+		layout.append(exterior_record.duplicate(true))
+		existing_uids[uid] = true
+
+
+func _initial_exterior_records() -> Array:
+	# The sidewalk and road occupy y=-1..-3. Keep the initial clearing work
+	# around the other three sides of the lot so it never blocks the queue.
+	return [
+		{"uid":"exterior_obstacle_tree_1", "item":"exterior_obstacle_tree_a", "cell":[-3, 2], "rotation":0},
+		{"uid":"exterior_obstacle_tree_2", "item":"exterior_obstacle_tree_b", "cell":[23, 2], "rotation":1},
+		{"uid":"exterior_obstacle_tree_3", "item":"exterior_obstacle_tree_c", "cell":[-3, 14], "rotation":2},
+		{"uid":"exterior_obstacle_bush_1", "item":"exterior_obstacle_bush_a", "cell":[23, 15], "rotation":0},
+		{"uid":"exterior_obstacle_bush_2", "item":"exterior_obstacle_bush_b", "cell":[5, 16], "rotation":3},
+		{"uid":"exterior_obstacle_rock_1", "item":"exterior_obstacle_rock", "cell":[17, 16], "rotation":0}
+	]
 
 
 func _initial_wall_records() -> Array:

@@ -143,5 +143,6 @@ func pan_by(delta: Vector2) -> void:
 	var right := Vector3(camera.global_transform.basis.x.x, 0, camera.global_transform.basis.x.z).normalized()
 	var forward := Vector3(camera.global_transform.basis.y.x, 0, camera.global_transform.basis.y.z).normalized()
 	target += (-right * delta.x + forward * delta.y) * zoom * 0.0022
-	target.x = clampf(target.x, -12.0, 12.0)
-	target.z = clampf(target.z, -9.0, 9.0)
+	# The buildable lot extends well beyond the original dining room.
+	target.x = clampf(target.x, -24.0, 36.0)
+	target.z = clampf(target.z, -20.0, 20.0)

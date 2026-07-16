@@ -1,0 +1,1 @@
+CUSTOMER FLOW SMOKE: PASS served=12 queue=0 active=0

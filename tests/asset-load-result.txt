@@ -50,6 +50,7 @@ res://assets/equipment/icecream_machine.gltf | exists=true | packed_scene=true
 res://assets/equipment/stand_mixer.gltf | exists=true | packed_scene=true
 res://assets/environment/floor_kitchen.gltf | exists=true | packed_scene=true
 res://assets/environment/floor_kitchen_styleB.gltf | exists=true | packed_scene=true
+res://assets/exterior/city/base.gltf | exists=true | packed_scene=true
 res://assets/environment/wall.gltf | exists=true | packed_scene=true
 res://assets/environment/wall_window_closed.gltf | exists=true | packed_scene=true
 res://assets/environment/wall_doorway.gltf | exists=true | packed_scene=true
@@ -66,6 +67,14 @@ res://assets/equipment/bowl.gltf | exists=true | packed_scene=true
 res://assets/equipment/cuttingboard.gltf | exists=true | packed_scene=true
 res://assets/equipment/plate.gltf | exists=true | packed_scene=true
 res://assets/equipment/rollingpin.gltf | exists=true | packed_scene=true
+res://assets/exterior/nature/Tree_2_A_Color1.gltf | exists=true | packed_scene=true
+res://assets/exterior/nature/Bush_4_A_Color1.gltf | exists=true | packed_scene=true
+res://assets/exterior/city/bench.gltf | exists=true | packed_scene=true
+res://assets/exterior/city/streetlight.gltf | exists=true | packed_scene=true
+res://assets/exterior/nature/Tree_1_A_Color1.gltf | exists=true | packed_scene=true
+res://assets/exterior/nature/Tree_4_A_Color1.gltf | exists=true | packed_scene=true
+res://assets/exterior/nature/Bush_1_A_Color1.gltf | exists=true | packed_scene=true
+res://assets/exterior/nature/Rock_1_A_Color1.gltf | exists=true | packed_scene=true
 res://assets/characters/Chef_Male.gltf | exists=true | packed_scene=true
 res://assets/characters/Chef_Female.gltf | exists=true | packed_scene=true
 res://assets/characters/Worker_Male.gltf | exists=true | packed_scene=true
@@ -85,4 +94,4 @@ res://assets/characters/Doctor_Male_Young.gltf | exists=true | packed_scene=true
 res://assets/characters/Doctor_Female_Young.gltf | exists=true | packed_scene=true
 res://assets/characters/Doctor_Male_Old.gltf | exists=true | packed_scene=true
 res://assets/characters/Doctor_Female_Old.gltf | exists=true | packed_scene=true
-ASSET CHECK: 87 unique paths, 0 failures
+ASSET CHECK: 96 unique paths, 0 failures

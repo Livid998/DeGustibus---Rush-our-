@@ -1,6 +1,7 @@
 [
  {"id":"floor_kitchen","name":"Pavimento cucina","category":"Strutture","price":25,"footprint":[1,1],"blocking":false,"model_scale":[0.5,0.5,0.5],"model":"res://assets/environment/floor_kitchen.gltf"},
  {"id":"floor_dining","name":"Pavimento sala","category":"Strutture","price":25,"footprint":[1,1],"blocking":false,"model_scale":[0.5,0.5,0.5],"model":"res://assets/environment/floor_kitchen_styleB.gltf"},
+ {"id":"floor_grass","name":"Terreno erboso","category":"Esterni","price":15,"footprint":[1,1],"blocking":false,"preview_tint":"78ad55","model":"res://assets/exterior/city/base.gltf"},
  {"id":"wall","name":"Muro pieno","category":"Strutture","price":80,"footprint":[1,1],"placement":"edge","edge_depth":0.5,"blocking":true,"model_scale":[0.5,1.0,1.0],"model":"res://assets/environment/wall.gltf"},
  {"id":"wall_window","name":"Muro con finestra","category":"Strutture","price":110,"footprint":[1,1],"placement":"edge","edge_depth":0.5,"replaces_wall":true,"blocking":true,"model_scale":[0.5,1.0,1.0],"model":"res://assets/environment/wall_window_closed.gltf"},
  {"id":"door","name":"Porta","category":"Strutture","price":140,"footprint":[1,1],"placement":"edge","edge_depth":0.5,"replaces_wall":true,"blocking":false,"model_scale":[0.5,1.0,1.0],"model":"res://assets/environment/wall_doorway.gltf","embedded_model":"res://assets/environment/door_A.gltf"},
@@ -30,5 +31,15 @@
  {"id":"pass_tray","name":"Vassoio pass","category":"Cucina","price":150,"footprint":[1,1],"placement":"surface","requires_support":"worktop","blocking":false,"station":"pass","model":"res://assets/equipment/plate.gltf"},
  {"id":"dessert","name":"Stazione dessert","category":"Cucina","price":900,"footprint":[1,1],"blocking":true,"station":"dessert","model":"res://assets/equipment/icecream_machine.gltf"},
  {"id":"dough","name":"Impastatrice","category":"Cucina","price":880,"footprint":[1,1],"placement":"surface","requires_support":"worktop","blocking":false,"station":"dough","model":"res://assets/equipment/stand_mixer.gltf"},
- {"id":"rolling_pin","name":"Mattarello","category":"Cucina","price":160,"footprint":[2,1],"placement":"surface","requires_support":"worktop","surface_span":2,"blocking":false,"station":"dough","model":"res://assets/equipment/rollingpin.gltf"}
+ {"id":"rolling_pin","name":"Mattarello","category":"Cucina","price":160,"footprint":[2,1],"placement":"surface","requires_support":"worktop","surface_span":2,"blocking":false,"station":"dough","model":"res://assets/equipment/rollingpin.gltf"},
+ {"id":"exterior_tree","name":"Albero ornamentale","category":"Esterni","price":360,"footprint":[2,2],"blocking":true,"model":"res://assets/exterior/nature/Tree_2_A_Color1.gltf"},
+ {"id":"exterior_bush","name":"Cespuglio ornamentale","category":"Esterni","price":110,"footprint":[1,1],"blocking":true,"model_scale":[2.0,2.0,2.0],"model":"res://assets/exterior/nature/Bush_4_A_Color1.gltf"},
+ {"id":"exterior_bench","name":"Panchina esterna","category":"Esterni","price":240,"footprint":[1,1],"blocking":true,"model_scale":[3.0,3.0,3.0],"model":"res://assets/exterior/city/bench.gltf"},
+ {"id":"exterior_streetlight","name":"Lampione","category":"Esterni","price":290,"footprint":[1,1],"blocking":true,"model_scale":[3.0,3.0,3.0],"model":"res://assets/exterior/city/streetlight.gltf"},
+ {"id":"exterior_obstacle_tree_a","name":"Albero del lotto","category":"Esterni","price":0,"footprint":[2,2],"blocking":true,"catalog_hidden":true,"removal_cost":180,"model":"res://assets/exterior/nature/Tree_1_A_Color1.gltf"},
+ {"id":"exterior_obstacle_tree_b","name":"Albero del lotto","category":"Esterni","price":0,"footprint":[2,2],"blocking":true,"catalog_hidden":true,"removal_cost":200,"model":"res://assets/exterior/nature/Tree_2_A_Color1.gltf"},
+ {"id":"exterior_obstacle_tree_c","name":"Albero del lotto","category":"Esterni","price":0,"footprint":[2,2],"blocking":true,"catalog_hidden":true,"removal_cost":220,"model":"res://assets/exterior/nature/Tree_4_A_Color1.gltf"},
+ {"id":"exterior_obstacle_bush_a","name":"Cespuglio spontaneo","category":"Esterni","price":0,"footprint":[1,1],"blocking":true,"catalog_hidden":true,"removal_cost":70,"model_scale":[3.0,3.0,3.0],"model":"res://assets/exterior/nature/Bush_1_A_Color1.gltf"},
+ {"id":"exterior_obstacle_bush_b","name":"Cespuglio spontaneo","category":"Esterni","price":0,"footprint":[1,1],"blocking":true,"catalog_hidden":true,"removal_cost":85,"model_scale":[2.0,2.0,2.0],"model":"res://assets/exterior/nature/Bush_4_A_Color1.gltf"},
+ {"id":"exterior_obstacle_rock","name":"Masso del lotto","category":"Esterni","price":0,"footprint":[1,1],"blocking":true,"catalog_hidden":true,"removal_cost":95,"model_scale":[1.8,1.8,1.8],"model":"res://assets/exterior/nature/Rock_1_A_Color1.gltf"}
 ]

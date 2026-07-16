@@ -92,10 +92,16 @@ func sell_selected() -> bool:
 	if selected_object == null or not is_instance_valid(selected_object) or not can_edit_definition(selected_object.definition):
 		return false
 	var attached := world.attached_objects(selected_object.uid)
-	var refund := int(round(float(selected_object.definition.get("price", 0)) * 0.6))
-	for dependent: PlacedObject in attached:
-		refund += int(round(float(dependent.definition.get("price", 0)) * 0.6))
-	GameState.earn(refund, "Vendita %s%s" % [selected_object.definition.name, " con %d agganci" % attached.size() if not attached.is_empty() else ""])
+	var removal_cost := maxi(int(selected_object.definition.get("removal_cost", 0)), 0)
+	if removal_cost > 0:
+		if not GameState.spend(removal_cost, "Rimozione %s" % selected_object.definition.name):
+			GameState.toast_requested.emit("Monete insufficienti per la rimozione", "warning")
+			return false
+	else:
+		var refund := int(round(float(selected_object.definition.get("price", 0)) * 0.6))
+		for dependent: PlacedObject in attached:
+			refund += int(round(float(dependent.definition.get("price", 0)) * 0.6))
+		GameState.earn(refund, "Vendita %s%s" % [selected_object.definition.name, " con %d agganci" % attached.size() if not attached.is_empty() else ""])
 	world.remove_placed_object(selected_object)
 	_clear_selection()
 	SaveManager.save_game()
@@ -312,6 +318,13 @@ func _create_preview() -> void:
 	preview_visual = ModelFactory.instantiate_build_visual(current_definition, not String(current_definition.id).begins_with("floor_"))
 	preview_visual.name = "VisualModel"
 	ModelFactory.align_visual_to_grid_origin(preview_visual, not String(current_definition.id).begins_with("floor_"))
+	var preview_tint := String(current_definition.get("preview_tint", ""))
+	if not preview_tint.is_empty():
+		var tint_material := StandardMaterial3D.new()
+		tint_material.albedo_color = Color(preview_tint)
+		tint_material.roughness = 0.94
+		for geometry: Node in preview_visual.find_children("*", "GeometryInstance3D", true, false):
+			(geometry as GeometryInstance3D).material_override = tint_material
 	preview.add_child(preview_visual)
 	var raw: Array = current_definition.get("footprint", [1, 1])
 	var footprint_mesh := MeshInstance3D.new()

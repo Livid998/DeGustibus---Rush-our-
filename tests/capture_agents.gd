@@ -25,8 +25,10 @@ func _ready() -> void:
 	second._thought.visible = false
 	for _frame: int in 70:
 		await get_tree().process_frame
-	first._maintain_seated_pose()
-	second._maintain_seated_pose()
+	for person: CustomerPersonAgent in first.people:
+		person._maintain_seated_pose()
+	for person: CustomerPersonAgent in second.people:
+		person._maintain_seated_pose()
 	await _save_frame("res://artifacts/agents_seated_variety.png")
 	get_tree().quit()
 
@@ -38,7 +40,8 @@ func _seat_group(world: RestaurantWorld, size: int) -> CustomerAgent:
 	customer.setup(world, size)
 	customer.table = world.request_table(customer, size)
 	customer._seat_group()
-	customer.play_animation("SitDown")
+	for person: CustomerPersonAgent in customer.people:
+		person._lock_animation_pose("SitDown", 1.0)
 	customer._set_state("waiting_food")
 	customer.state_elapsed = 2.0
 	return customer

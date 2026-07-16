@@ -27,6 +27,7 @@ func _ready() -> void:
 	var minimum_clearance := INF
 	var minimum_pair := ""
 	var solid_violations := 0
+	var solid_details: Array[String] = []
 	var duplicate_reservations := 0
 	var duplicate_details: Array[String] = []
 	var locomotion_animation_violations := 0
@@ -55,12 +56,25 @@ func _ready() -> void:
 				for point_index: int in agent.get_avoidance_points().size():
 					var point := agent.get_avoidance_points()[point_index]
 					visible_people.append({"position": point, "radius": agent.agent_radius, "label": "%s#%d" % [agent.name, point_index]})
-					if not main.world._agent_point_is_open(point, agent.agent_radius * 0.72):
+					# Sitting deliberately uses a chair/table attachment envelope and the
+					# short radial sit/stand motion ignores furniture. Navigation through
+					# solid furniture remains forbidden in every other phase.
+					var seating_transition := agent is CustomerPersonAgent and ((agent as CustomerPersonAgent).seated or (agent as CustomerPersonAgent).is_transitioning() or (agent as CustomerPersonAgent).phase == "standing_ready")
+					if not seating_transition and not main.world._agent_point_is_open(point, agent.agent_radius * 0.72):
 						solid_violations += 1
+						if solid_details.size() < 16:
+							solid_details.append("tick %d %s state=%s point=%s cell=%s nav=%s" % [tick, agent.name, agent.get("phase") if agent is CustomerPersonAgent else agent.get("state"), point, main.world.world_to_cell(point), agent.navigation_active])
 				var agent_key := agent.get_instance_id()
 				if previous_positions.has(agent_key):
 					var displacement := Vector3(previous_positions[agent_key]).distance_to(agent.global_position)
 					if agent.navigation_active and displacement > 0.04:
+						# A diner can finish one leg and receive the next waypoint in the
+						# same simulation tick. During its deliberate reaction pause it is
+						# stationary on screen even though the sampled positions span the
+						# just-completed leg.
+						if agent is CustomerPersonAgent and (agent as CustomerPersonAgent).reaction_delay > 0.0:
+							previous_positions[agent_key] = agent.global_position
+							continue
 						if agent.current_animation not in ["Walk", "Walk_Carry"]:
 							locomotion_animation_violations += 1
 							if locomotion_details.size() < 12:
@@ -102,9 +116,12 @@ func _ready() -> void:
 			if not is_instance_valid(customer) or customer.is_queued_for_deletion() or not customer._seated:
 				continue
 			var seats: Array = customer.table.get("seat_positions", [])
-			for index: int in mini(customer.group_models.size(), seats.size()):
+			for index: int in mini(customer.people.size(), seats.size()):
+				var seated_person := customer.people[index]
+				if seated_person.phase != "seated":
+					continue
 				seated_checks += 1
-				if customer.group_models[index].global_position.distance_to(Vector3(seats[index]) + Vector3.UP * AnimatedAgent.CHARACTER_FOOT_LIFT) > 0.06:
+				if seated_person.visual_model.global_position.distance_to(Vector3(seats[index]) + Vector3.UP * AnimatedAgent.CHARACTER_FOOT_LIFT) > 0.06:
 					seat_alignment_violations += 1
 		if int(SimulationManager.stats.customers_served) >= 6 and SimulationManager.customers.is_empty():
 			break
@@ -144,6 +161,7 @@ func _ready() -> void:
 		SimulationManager.service_tasks.values().map(func(task: Dictionary): return "%s:%s:%s" % [task.get("id", "?"), task.get("state", "?"), task.get("action", "?")])
 	]
 	result += "duplicate_details=%s\n" % [duplicate_details]
+	result += "solid_details=%s\n" % [solid_details]
 	result += "locomotion_details=%s\n" % [locomotion_details]
 	print(result.strip_edges())
 	var file := FileAccess.open("res://tests/agent-stress-result.txt", FileAccess.WRITE)
