@@ -22,6 +22,17 @@ var _seat_center := Vector3.ZERO
 var _seat_facing := 0.0
 var _seated_mode := "waiting"
 var _phase_seed := 0.0
+var _seated_clock := 0.0
+var _bite_elapsed := 0.0
+var _bite_duration := 1.0
+var _next_bite_in := 1.0
+var _bite_active := false
+var _bite_count := 0
+var _skeleton: Skeleton3D
+var _bone_indices: Dictionary = {}
+var _utensil_attachment: BoneAttachment3D
+var _utensil_model: Node3D
+var _utensil_kind := "fork"
 
 
 func setup_person(value_party: Node, value_world: RestaurantWorld, index: int, appearance: String, skin_tone: Color) -> void:
@@ -34,6 +45,7 @@ func setup_person(value_party: Node, value_world: RestaurantWorld, index: int, a
 	arrival_tolerance = 0.13
 	_phase_seed = randf_range(0.0, TAU)
 	visual_model = add_character_model("res://assets/characters/%s.gltf" % appearance, Vector3.ZERO, skin_tone)
+	_configure_seated_rig()
 	configure_navigation(0.31, 2)
 	validate_animations()
 	_randomize_idle_phase()
@@ -95,7 +107,7 @@ func tick_motion(delta: float) -> void:
 				seated = true
 				collision_mask = 3
 		"seated":
-			_maintain_seated_pose()
+			_maintain_seated_pose(delta)
 		"stand_transition":
 			transition_remaining -= delta
 			if transition_remaining <= 0.0:
@@ -133,16 +145,27 @@ func _tick_local_seat(delta: float) -> void:
 	transition_remaining = _animation_length("SitDown", 0.96)
 
 
-func set_seated_mode(value: String, has_meal: bool = false) -> void:
+func set_seated_mode(value: String, has_meal: bool = false, utensil_kind: String = "fork") -> void:
+	var mode_changed := _seated_mode != value or meal_present != has_meal
 	_seated_mode = value
 	meal_present = has_meal
+	_utensil_kind = utensil_kind
+	if mode_changed:
+		_bite_active = false
+		_bite_elapsed = 0.0
+		_next_bite_in = randf_range(1.0, 2.2)
+		if _seated_mode == "eating" and meal_present:
+			_show_utensil()
+		else:
+			_hide_utensil()
 	if phase == "seated":
-		_maintain_seated_pose()
+		_maintain_seated_pose(0.0)
 
 
 func begin_standing() -> void:
 	if phase == "stand_transition" or phase == "standing_ready":
 		return
+	_hide_utensil()
 	seated = true
 	phase = "stand_transition"
 	rotation.y = _seat_facing
@@ -175,15 +198,115 @@ func _tick_local_leave(delta: float) -> void:
 	play_animation("Idle")
 
 
-func _maintain_seated_pose() -> void:
+func _maintain_seated_pose(delta: float = 0.0) -> void:
 	global_position = Vector3(Vector3(seat_assignment.get("position", global_position)).x, 0.0, Vector3(seat_assignment.get("position", global_position)).z)
-	var yaw_offset := 0.0
-	if _seated_mode in ["waiting", "conversation"] and party != null and int(party.get("group_size")) > 1:
-		yaw_offset = sin(Time.get_ticks_msec() * 0.00055 + _phase_seed) * 0.085
-	elif _seated_mode == "eating" and meal_present:
-		yaw_offset = sin(Time.get_ticks_msec() * 0.00042 + _phase_seed) * 0.025
-	rotation.y = _seat_facing + yaw_offset
+	rotation.y = _seat_facing
 	_lock_animation_pose("SitDown", 1.0)
+	_seated_clock += delta
+	if _seated_mode == "eating" and meal_present:
+		_update_eating_gesture(delta)
+	else:
+		_bite_active = false
+		_apply_conversation_gesture()
+
+
+func _configure_seated_rig() -> void:
+	for candidate: Node in visual_model.find_children("*", "Skeleton3D", true, false):
+		_skeleton = candidate as Skeleton3D
+		break
+	if _skeleton == null:
+		return
+	for bone_name: String in ["Head", "Torso", "UpperArm.R", "LowerArm.R", "Fist.R", "UpperArm.L", "LowerArm.L"]:
+		_bone_indices[bone_name] = _skeleton.find_bone(bone_name)
+	if int(_bone_indices.get("Fist.R", -1)) >= 0:
+		_utensil_attachment = BoneAttachment3D.new()
+		_utensil_attachment.name = "DiningUtensilAnchor"
+		_utensil_attachment.bone_name = "Fist.R"
+		_skeleton.add_child(_utensil_attachment)
+
+
+func _update_eating_gesture(delta: float) -> void:
+	if not _bite_active:
+		_next_bite_in -= delta
+		if _next_bite_in <= 0.0:
+			_bite_active = true
+			_bite_elapsed = 0.0
+			_bite_duration = randf_range(0.88, 1.24)
+			_bite_count += 1
+	if not _bite_active:
+		# A quiet seated idle between bites: breathing and a tiny glance, not a
+		# permanent loop of the same eating motion.
+		_apply_bone_delta("Head", Vector3.UP, sin(_seated_clock * 0.72 + _phase_seed) * 0.025)
+		_apply_bone_delta("Torso", Vector3.RIGHT, sin(_seated_clock * 1.05 + _phase_seed) * 0.012)
+		return
+	_bite_elapsed += delta
+	var progress := clampf(_bite_elapsed / maxf(_bite_duration, 0.01), 0.0, 1.0)
+	# Smooth anticipation -> bite -> recovery. The arm reaches the face only in
+	# the middle third; head and torso meet it slightly instead of hinging as one.
+	var weight := sin(progress * PI)
+	var anticipation := smoothstep(0.0, 0.35, progress) * (1.0 - smoothstep(0.68, 1.0, progress))
+	_apply_bone_delta("UpperArm.R", Vector3.RIGHT, -0.72 * weight)
+	_apply_bone_delta("LowerArm.R", Vector3.RIGHT, -0.92 * weight)
+	_apply_bone_delta("Fist.R", Vector3.FORWARD, 0.18 * weight)
+	_apply_bone_delta("Torso", Vector3.RIGHT, -0.09 * anticipation)
+	_apply_bone_delta("Head", Vector3.RIGHT, 0.08 * anticipation)
+	_apply_bone_delta("Head", Vector3.UP, sin(progress * PI * 2.0) * 0.018)
+	if progress >= 1.0:
+		_bite_active = false
+		_bite_elapsed = 0.0
+		_next_bite_in = randf_range(1.35, 3.10)
+
+
+func _apply_conversation_gesture() -> void:
+	if party == null or int(party.get("group_size")) <= 1:
+		_apply_bone_delta("Torso", Vector3.RIGHT, sin(_seated_clock * 0.9 + _phase_seed) * 0.012)
+		return
+	var glance := sin(_seated_clock * 0.58 + _phase_seed)
+	var emphasis := pow(absf(sin(_seated_clock * 0.31 + _phase_seed * 0.7)), 7.0)
+	_apply_bone_delta("Head", Vector3.UP, glance * 0.10)
+	_apply_bone_delta("Torso", Vector3.UP, glance * 0.035)
+	_apply_bone_delta("UpperArm.L", Vector3.FORWARD, emphasis * 0.10)
+	_apply_bone_delta("LowerArm.L", Vector3.RIGHT, -emphasis * 0.12)
+
+
+func _apply_bone_delta(bone_name: String, axis: Vector3, angle: float) -> void:
+	if _skeleton == null:
+		return
+	var bone_index := int(_bone_indices.get(bone_name, -1))
+	if bone_index < 0:
+		return
+	var base := _skeleton.get_bone_pose_rotation(bone_index)
+	_skeleton.set_bone_pose_rotation(bone_index, base * Quaternion(axis.normalized(), angle))
+
+
+func _show_utensil() -> void:
+	if _utensil_attachment == null:
+		return
+	_hide_utensil()
+	var path := "res://assets/equipment/utensil_spoon.glb" if _utensil_kind == "spoon" else "res://assets/equipment/utensil_fork.glb"
+	if not ResourceLoader.exists(path):
+		return
+	_utensil_model = ModelFactory.instantiate_model(path, 0.30)
+	_utensil_model.name = "DiningUtensil"
+	ModelFactory.align_visual_to_grid_origin(_utensil_model)
+	_utensil_model.position = Vector3(-0.045, -0.025, -0.10)
+	_utensil_model.rotation = Vector3(-PI * 0.46, 0.0, PI * 0.08)
+	ModelFactory.set_shadow_casting(_utensil_model, GeometryInstance3D.SHADOW_CASTING_SETTING_OFF)
+	_utensil_attachment.add_child(_utensil_model)
+
+
+func _hide_utensil() -> void:
+	if _utensil_model != null and is_instance_valid(_utensil_model):
+		_utensil_model.queue_free()
+	_utensil_model = null
+
+
+func is_biting() -> bool:
+	return _bite_active and meal_present and _seated_mode == "eating"
+
+
+func bite_count() -> int:
+	return _bite_count
 
 
 func _animation_length(requested: String, fallback: float) -> float:

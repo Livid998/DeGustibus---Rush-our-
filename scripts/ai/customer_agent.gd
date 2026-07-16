@@ -1,6 +1,8 @@
 class_name CustomerAgent
 extends AnimatedAgent
 
+const TABLE_WAIT_PATIENCE_MULTIPLIER := 1.75
+
 ## Party controller.  Every visible guest is a CustomerPersonAgent with its own
 ## body, route and animation timeline; this node owns only the shared table,
 ## orders, patience and lifecycle barriers.
@@ -42,7 +44,9 @@ var _door_released := false
 var _outside_departure := false
 var _dirty_transferred := false
 var _diner_eat_remaining: Dictionary = {}
+var _diner_eat_total: Dictionary = {}
 var _diner_finished: Dictionary = {}
+var _dish_consumption_stage: Dictionary = {}
 var _entry_leg_failures := 0
 var _entry_leg_elapsed := 0.0
 var _exit_leg_failures := 0
@@ -180,7 +184,7 @@ func _update_queue(delta: float) -> void:
 			_set_state("waiting_table", false)
 			_thought.text = "ATTESA TURNO"
 			_thought.visible = true
-			if state_elapsed > patience * 1.35:
+			if state_elapsed > patience * TABLE_WAIT_PATIENCE_MULTIPLIER:
 				_leave_lost("TROPPA ATTESA")
 			return
 		table = world.request_table(self, group_size)
@@ -188,7 +192,7 @@ func _update_queue(delta: float) -> void:
 		_set_state("waiting_table", false)
 		_thought.text = "ATTESA TAVOLO"
 		_thought.visible = true
-		if state_elapsed > patience * 1.35:
+		if state_elapsed > patience * TABLE_WAIT_PATIENCE_MULTIPLIER:
 			_leave_lost("TROPPA ATTESA")
 		return
 	if not world.try_begin_customer_entry(self):
@@ -309,6 +313,7 @@ func service_completed(action: String, payload: Dictionary) -> void:
 			orders.clear()
 			served_order_ids.clear()
 			_diner_eat_remaining.clear()
+			_diner_eat_total.clear()
 			_diner_finished.clear()
 			for guest_index: int in group_size:
 				var recipe := _choose_recipe()
@@ -333,8 +338,12 @@ func service_completed(action: String, payload: Dictionary) -> void:
 			served_order_ids[order_id] = true
 			_show_dish(order)
 			var diner_index := int(order.get("diner_index", 0))
-			_diner_eat_remaining[diner_index] = randf_range(5.2, 8.0) + float(diner_index) * randf_range(0.12, 0.32)
-			people[diner_index].set_seated_mode("eating", true)
+			# Keep dining readable without holding a table artificially long: the
+			# procedural bite scheduler supplies pauses and variety inside this span.
+			var eating_duration := randf_range(5.2, 8.0) + float(diner_index) * randf_range(0.12, 0.32)
+			_diner_eat_remaining[diner_index] = eating_duration
+			_diner_eat_total[diner_index] = eating_duration
+			people[diner_index].set_seated_mode("eating", true, _utensil_for_recipe(String(order.get("recipe_id", ""))))
 			_set_state("eating", false)
 			_thought.text = "%d/%d SERVITI" % [served_order_ids.size(), orders.size()]
 		"payment":
@@ -358,6 +367,9 @@ func _update_dining(delta: float) -> void:
 		if not _diner_eat_remaining.has(diner_index) or _diner_finished.has(diner_index):
 			continue
 		_diner_eat_remaining[diner_index] = float(_diner_eat_remaining[diner_index]) - delta
+		var remaining := maxf(float(_diner_eat_remaining[diner_index]), 0.0)
+		var total := maxf(float(_diner_eat_total.get(diner_index, 1.0)), 0.01)
+		_update_dish_consumption(String(order.id), remaining / total)
 		if float(_diner_eat_remaining[diner_index]) <= 0.0:
 			_diner_finished[diner_index] = true
 			people[diner_index].set_seated_mode("conversation", false)
@@ -640,15 +652,14 @@ func _set_people_mode(mode: String, has_meal: bool) -> void:
 func _show_dish(order: Dictionary) -> void:
 	var order_id := String(order.get("id", ""))
 	if order_id.is_empty() or dish_models.has(order_id): return
-	var recipe: Dictionary = DataRegistry.recipes_by_id.get(String(order.get("recipe_id", "")), {})
-	var model_path := ""
-	var steps: Array = recipe.get("steps", [])
-	for index: int in range(steps.size() - 1, -1, -1):
-		model_path = String(steps[index].get("model", ""))
-		if not model_path.is_empty(): break
-	if model_path.is_empty(): return
-	var dish := ModelFactory.instantiate_model(model_path, 0.55)
-	ModelFactory.align_visual_to_grid_origin(dish)
+	var recipe_id := String(order.get("recipe_id", ""))
+	var dish := Node3D.new()
+	dish.name = "TableDish_%s" % order_id
+	var content := FoodVisualFactory.instantiate_recipe_dish(recipe_id, 1.0)
+	content.name = "FoodContent"
+	dish.add_child(content)
+	if recipe_id in ["classic_burger", "cheeseburger", "veggie_burger", "icecream_cone"]:
+		_add_support_plate(dish)
 	add_child(dish)
 	dish.top_level = true
 	var diner_index := clampi(int(order.get("diner_index", 0)), 0, group_size - 1)
@@ -658,8 +669,49 @@ func _show_dish(order: Dictionary) -> void:
 	var dish_position := center.lerp(seat_position, 0.43)
 	dish_position.y = float(table.get("table_surface_y", 1.0))
 	dish.global_position = dish_position
+	dish.rotation.y = people[diner_index]._seat_facing
 	ModelFactory.set_shadow_casting(dish, GeometryInstance3D.SHADOW_CASTING_SETTING_OFF)
+	dish.set_meta("recipe_id", recipe_id)
+	_dish_consumption_stage[order_id] = 0
 	dish_models[order_id] = dish
+
+
+func _update_dish_consumption(order_id: String, remaining_ratio: float) -> void:
+	var dish := dish_models.get(order_id) as Node3D
+	if dish == null or not is_instance_valid(dish):
+		return
+	var desired_stage := 0
+	if remaining_ratio <= 0.28:
+		desired_stage = 2
+	elif remaining_ratio <= 0.64:
+		desired_stage = 1
+	if int(_dish_consumption_stage.get(order_id, 0)) >= desired_stage:
+		return
+	_dish_consumption_stage[order_id] = desired_stage
+	_add_support_plate(dish)
+	var content := dish.get_node_or_null("FoodContent") as Node3D
+	if content == null:
+		return
+	if desired_stage == 1:
+		content.scale = Vector3.ONE * 0.74
+		content.position = Vector3(-0.035, 0.055, 0.025)
+	else:
+		content.scale = Vector3.ONE * 0.34
+		content.position = Vector3(0.075, 0.055, -0.045)
+
+
+func _add_support_plate(dish: Node3D) -> void:
+	if dish.has_node("SupportPlate"):
+		return
+	var plate := ModelFactory.instantiate_model("res://assets/equipment/plate.gltf", 0.55)
+	plate.name = "SupportPlate"
+	ModelFactory.align_visual_to_grid_origin(plate)
+	ModelFactory.set_shadow_casting(plate, GeometryInstance3D.SHADOW_CASTING_SETTING_OFF)
+	dish.add_child(plate)
+	dish.move_child(plate, 0)
+	var content := dish.get_node_or_null("FoodContent") as Node3D
+	if content != null and content.position.y < 0.05:
+		content.position.y = 0.055
 
 
 func _replace_dish_with_dirty(order_id: String) -> void:
@@ -675,12 +727,18 @@ func _replace_dish_with_dirty(order_id: String) -> void:
 	dirty.global_transform = transform
 	ModelFactory.set_shadow_casting(dirty, GeometryInstance3D.SHADOW_CASTING_SETTING_OFF)
 	dish_models[order_id] = dirty
+	_dish_consumption_stage[order_id] = 3
 
 
 func _clear_dishes() -> void:
 	for dish: Node3D in dish_models.values():
 		if is_instance_valid(dish): dish.queue_free()
 	dish_models.clear()
+	_dish_consumption_stage.clear()
+
+
+func _utensil_for_recipe(recipe_id: String) -> String:
+	return "spoon" if recipe_id in ["beef_stew", "mixed_sundae", "icecream_cone"] else "fork"
 
 
 func _local_order(order_id: String) -> Dictionary:

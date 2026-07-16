@@ -13,6 +13,7 @@ func _run() -> void:
 	SaveManager.writes_enabled = false
 	await get_tree().process_frame
 	_test_registry()
+	_test_food_visual_pipeline()
 	_test_graphics_profiles()
 	_test_stock_consumption()
 	_test_reorder()
@@ -87,6 +88,52 @@ func _test_registry() -> void:
 			preparation_icons += 1
 	_expect(preparation_icons >= 12, "the supplied individual food pack provides dedicated icons for current market preparations")
 	_expect(DataRegistry.recipes_by_id.margherita.steps.size() >= 5, "margherita is a multi-step process")
+
+
+func _test_food_visual_pipeline() -> void:
+	_expect(DataRegistry.food_visuals.size() >= 20, "food visual registry covers composites, semilavorati and final dishes")
+	var corrected_ingredients := {
+		"flour":"res://assets/food/flour_sack_closed.gltf",
+		"egg":"res://assets/food/egg.glb",
+		"milk":"res://assets/food/milk.gltf",
+		"ice_vanilla":"res://assets/food/icecream_container_icecream_vanilla.gltf",
+		"ice_chocolate":"res://assets/food/icecream_container_icecream_chocolate.gltf",
+		"ice_strawberry":"res://assets/food/icecream_container_icecream_strawberry.gltf"
+	}
+	for ingredient_id: String in corrected_ingredients:
+		var expected_path := String(corrected_ingredients[ingredient_id])
+		_expect(String(DataRegistry.ingredients_by_id[ingredient_id].model) == expected_path and ResourceLoader.exists(expected_path), "%s uses its dedicated 3D ingredient model" % ingredient_id)
+	var output_ids: Dictionary = {}
+	var dish_signatures: Dictionary = {}
+	for recipe: Dictionary in DataRegistry.recipes:
+		_expect(String(recipe.steps[-1].station) == "pass", "%s finishes on the pass before service" % recipe.id)
+		var dish_parts := FoodVisualFactory.parts_for_id(String(recipe.id))
+		_expect(not dish_parts.is_empty(), "%s has a resolvable final 3D dish" % recipe.id)
+		var signature := JSON.stringify(dish_parts)
+		dish_signatures[signature] = true
+		for step: Dictionary in recipe.steps:
+			var task := {
+				"recipe_step_id":String(step.id),
+				"station":String(step.station),
+				"inputs":step.get("inputs", {}).duplicate(true),
+				"dependencies":[],
+				"output":String(step.get("output", "")),
+				"model":String(step.get("model", "")),
+				"visual":step.get("visual", {}).duplicate(true)
+			}
+			var output_parts := FoodVisualFactory.parts_for_task(task, "output")
+			output_ids[String(step.get("output", ""))] = true
+			_expect(not output_parts.is_empty(), "%s/%s has a visible output model or composite" % [recipe.id, step.id])
+			for part: Dictionary in output_parts:
+				_expect(ResourceLoader.exists(String(part.get("model", ""))), "%s/%s references an importable output model" % [recipe.id, step.id])
+			var tool_path := FoodVisualFactory.task_tool_model(task)
+			if FoodVisualFactory.task_style(task) in ["chop", "slice", "grate", "knead", "mix", "sauce", "toss", "cook", "fry", "sear", "simmer", "scoop"]:
+				_expect(not tool_path.is_empty() and ResourceLoader.exists(tool_path), "%s/%s has a real task tool" % [recipe.id, step.id])
+	_expect(output_ids.size() >= 38, "the recipe graph exposes a broad set of visible raw, processed and plated outputs")
+	_expect(dish_signatures.size() == DataRegistry.recipes.size(), "all twelve recipes have visually distinct final dish descriptors")
+	for item_id: String in ["prep_bowl", "cutting_board", "stove", "multi_stove", "oven", "pizza_oven", "pass_tray", "dessert", "dough"]:
+		var definition: Dictionary = DataRegistry.build_by_id[item_id]
+		_expect(definition.get("work_anchor", []).size() == 3, "%s defines a deliberate food work anchor" % item_id)
 
 
 func _test_graphics_profiles() -> void:
@@ -533,6 +580,18 @@ func _test_customer_lifecycle(world: RestaurantWorld) -> void:
 		_expect(not service.is_empty() and String(claimed.get("id", "")) == String(service.id) and SimulationManager.begin_service_task(String(service.id)), "each ready dish receives one exclusive delivery task")
 		SimulationManager.complete_service_task(String(service.id))
 	_expect(customer.state == "eating" and customer.served_order_ids.size() == customer.group_size and customer.dish_models.size() == customer.group_size and customer.people.all(func(person: CustomerPersonAgent): return person.meal_present), "each diner receives one visible dish and enters the meal-specific seated state")
+	var test_eater := customer.people[0]
+	test_eater._next_bite_in = 0.0
+	test_eater._maintain_seated_pose(0.12)
+	_expect(test_eater.is_biting() and test_eater.bite_count() == 1 and test_eater._utensil_model != null, "a served diner starts one intermittent bone-driven bite with a visible utensil")
+	test_eater.set_seated_mode("conversation", false)
+	test_eater._maintain_seated_pose(0.12)
+	_expect(not test_eater.is_biting() and test_eater._utensil_model == null, "eating gestures and utensils stop immediately when no meal is present")
+	var staged_order_id := String(customer.orders[0].id)
+	customer._update_dish_consumption(staged_order_id, 0.50)
+	var staged_dish := customer.dish_models[staged_order_id] as Node3D
+	var staged_content := staged_dish.get_node_or_null("FoodContent") as Node3D
+	_expect(int(customer._dish_consumption_stage[staged_order_id]) == 1 and staged_content != null and staged_content.scale.x < 0.8, "the visible meal becomes partially eaten before turning into a dirty plate")
 	for order: Dictionary in customer.orders:
 		customer._replace_dish_with_dirty(String(order.id))
 	customer._set_state("waiting_payment")

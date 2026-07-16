@@ -4,6 +4,7 @@ signal registry_loaded
 
 var ingredients: Array = []
 var preparations: Array = []
+var food_visuals: Array = []
 var recipes: Array = []
 var stations: Array = []
 var suppliers: Array = []
@@ -12,6 +13,7 @@ var employee_data: Dictionary = {}
 
 var ingredients_by_id: Dictionary = {}
 var preparations_by_id: Dictionary = {}
+var food_visuals_by_id: Dictionary = {}
 var recipes_by_id: Dictionary = {}
 var stations_by_id: Dictionary = {}
 var suppliers_by_id: Dictionary = {}
@@ -21,6 +23,7 @@ var build_by_id: Dictionary = {}
 func _ready() -> void:
 	ingredients = _load_json_array("res://data/ingredients.json")
 	preparations = _load_json_array("res://data/preparations.json")
+	food_visuals = _load_json_array("res://data/food_visuals.json")
 	recipes = _load_json_array("res://data/recipes.json")
 	stations = _load_json_array("res://data/stations.json")
 	suppliers = _load_json_array("res://data/suppliers.json")
@@ -28,6 +31,7 @@ func _ready() -> void:
 	employee_data = _load_json_dictionary("res://data/employees.json")
 	ingredients_by_id = _index(ingredients)
 	preparations_by_id = _index(preparations)
+	food_visuals_by_id = _index(food_visuals)
 	recipes_by_id = _index(recipes)
 	stations_by_id = _index(stations)
 	suppliers_by_id = _index(suppliers)
@@ -94,4 +98,3 @@ func required_station_ids(recipe: Dictionary) -> Array[String]:
 		if not result.has(station_id):
 			result.append(station_id)
 	return result
-

@@ -205,6 +205,8 @@ func create_order(recipe_id: String, table_id: String, customer: Node) -> Dictio
 			"duration": float(step.get("time", 1.0)),
 			"animation": String(step.get("animation", "PickUp")),
 			"model": String(step.get("model", "")),
+			"visual": step.get("visual", {}).duplicate(true),
+			"quantity": int(step.get("quantity", 1)),
 			"created_at": GameState.service_seconds,
 			"station_runtime": null,
 			"stock_consumed": false,
@@ -230,6 +232,8 @@ func _update_waiting_tasks(delta: float) -> void:
 	var changed := false
 	for task_id: String in tasks:
 		var task: Dictionary = tasks.get(task_id, {})
+		if float(task.get("handoff_grace", 0.0)) > 0.0:
+			task.handoff_grace = maxf(float(task.handoff_grace) - delta, 0.0)
 		if task.is_empty() or not task.has("state"):
 			continue
 		if bool(orders.get(String(task.get("order_id", "")), {}).get("suspended", false)):
@@ -275,6 +279,9 @@ func claim_kitchen_task(employee: Dictionary, from_position: Variant = null) -> 
 	for task_id: String in tasks:
 		var task: Dictionary = tasks.get(task_id, {})
 		if task.is_empty() or String(task.get("state", "")) != "queued":
+			continue
+		var handoff_employee := String(task.get("handoff_employee_id", ""))
+		if not handoff_employee.is_empty() and handoff_employee != String(employee.get("id", "")) and float(task.get("handoff_grace", 0.0)) > 0.0:
 			continue
 		if bool(orders.get(String(task.get("order_id", "")), {}).get("suspended", false)):
 			continue
@@ -379,9 +386,29 @@ func _complete_kitchen_task(task: Dictionary) -> void:
 	if not employee_id.is_empty():
 		stats.employee_tasks[employee_id] = int(stats.employee_tasks.get(employee_id, 0)) + 1
 	if task.station_runtime:
+		var output_node := task.station_runtime.get("node") as Node3D
+		if output_node != null and is_instance_valid(output_node):
+			task.output_station_node = output_node
+			task.output_position = output_node.global_position
 		task.station_runtime.completed += 1
 		task.station_runtime.wait_total += float(task.get("wait_age", 0.0))
 	_release_station(task)
+	# Give the cook who just produced the last missing component a brief first
+	# refusal on its successor. This keeps the object in the same hands for the
+	# assembly/pass hand-off instead of letting a distant cook materialise it.
+	if not employee_id.is_empty():
+		for successor_id: String in tasks:
+			var successor: Dictionary = tasks.get(successor_id, {})
+			if successor.is_empty() or not successor.get("dependencies", []).has(String(task.get("id", ""))):
+				continue
+			var dependencies_ready := true
+			for dependency_id: String in successor.get("dependencies", []):
+				if String(tasks.get(dependency_id, {}).get("state", "")) != "completed":
+					dependencies_ready = false
+					break
+			if dependencies_ready:
+				successor.handoff_employee_id = employee_id
+				successor.handoff_grace = 0.75
 	var order: Dictionary = orders.get(task.order_id, {})
 	var all_done := not order.is_empty()
 	for task_id: String in order.get("task_ids", []):
@@ -396,7 +423,11 @@ func _complete_kitchen_task(task: Dictionary) -> void:
 			var recipe: Dictionary = DataRegistry.recipes_by_id.get(String(order.get("recipe_id", "")), {})
 			request_service(order.customer, "serve", order.customer.get_service_position(), {
 				"order_id": order.id,
-				"carry_model": String(recipe.get("dish_model", ""))
+				"recipe_id": String(order.get("recipe_id", "")),
+				"carry_model": String(recipe.get("dish_model", "")),
+				"pickup_node": task.get("output_station_node"),
+				"pickup_position": task.get("output_position", Vector3.ZERO),
+				"source_task_id": String(task.get("id", ""))
 			})
 	order_updated.emit(order)
 	_update_waiting_tasks(0.0)

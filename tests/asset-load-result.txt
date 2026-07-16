@@ -9,15 +9,18 @@ res://assets/food/food_ingredient_dough.gltf | exists=true | packed_scene=true
 res://assets/food/food_ingredient_bun.gltf | exists=true | packed_scene=true
 res://assets/food/food_ingredient_burger_uncooked.gltf | exists=true | packed_scene=true
 res://assets/food/food_ingredient_steak.gltf | exists=true | packed_scene=true
+res://assets/food/flour_sack_closed.gltf | exists=true | packed_scene=true
 res://assets/food/food_ingredient_vegetableburger_uncooked.gltf | exists=true | packed_scene=true
 res://assets/food/food_ingredient_ham.gltf | exists=true | packed_scene=true
 res://assets/food/food_ingredient_pepperoni.gltf | exists=true | packed_scene=true
-res://assets/food/food_icecream_cone_vanilla.gltf | exists=true | packed_scene=true
-res://assets/food/food_icecream_cone_chocolate.gltf | exists=true | packed_scene=true
-res://assets/food/food_icecream_cone_strawberry.gltf | exists=true | packed_scene=true
+res://assets/food/egg.glb | exists=true | packed_scene=true
+res://assets/food/milk.gltf | exists=true | packed_scene=true
+res://assets/food/icecream_container_icecream_vanilla.gltf | exists=true | packed_scene=true
+res://assets/food/icecream_container_icecream_chocolate.gltf | exists=true | packed_scene=true
+res://assets/food/icecream_container_icecream_strawberry.gltf | exists=true | packed_scene=true
 res://assets/food/food_ingredient_tomato_sauce.gltf | exists=true | packed_scene=true
 res://assets/food/food_ingredient_dough_base.gltf | exists=true | packed_scene=true
-res://assets/food/food_ingredient_tomato_slice.gltf | exists=true | packed_scene=true
+res://assets/food/food_ingredient_tomato_slices.gltf | exists=true | packed_scene=true
 res://assets/food/food_ingredient_mushroom_chopped.gltf | exists=true | packed_scene=true
 res://assets/food/food_ingredient_onion_chopped.gltf | exists=true | packed_scene=true
 res://assets/food/food_ingredient_cheese_grated.gltf | exists=true | packed_scene=true
@@ -32,9 +35,14 @@ res://assets/food/food_pizza_cheese_plated.gltf | exists=true | packed_scene=tru
 res://assets/food/food_pizza_mushroom_plated.gltf | exists=true | packed_scene=true
 res://assets/food/food_pizza_pepperoni_plated.gltf | exists=true | packed_scene=true
 res://assets/food/food_burger.gltf | exists=true | packed_scene=true
+res://assets/food/food_cheeseburger.glb | exists=true | packed_scene=true
 res://assets/food/food_vegetableburger.gltf | exists=true | packed_scene=true
-res://assets/food/food_dinner.gltf | exists=true | packed_scene=true
+res://assets/equipment/plate.gltf | exists=true | packed_scene=true
+res://assets/food/food_mixed_salad.glb | exists=true | packed_scene=true
 res://assets/food/food_stew.gltf | exists=true | packed_scene=true
+res://assets/food/food_dinner.gltf | exists=true | packed_scene=true
+res://assets/food/food_icecream_cone_vanilla.gltf | exists=true | packed_scene=true
+res://assets/food/icecream_bowl_decorated_A.gltf | exists=true | packed_scene=true
 res://assets/equipment/fridge_A_decorated.gltf | exists=true | packed_scene=true
 res://assets/decor/shelf_B_large_decorated.gltf | exists=true | packed_scene=true
 res://assets/equipment/kitchentable_A_large.gltf | exists=true | packed_scene=true
@@ -65,7 +73,6 @@ res://assets/decor/lamp_standing.gltf | exists=true | packed_scene=true
 res://assets/decor/monstera_plant_medium_potted.gltf | exists=true | packed_scene=true
 res://assets/equipment/bowl.gltf | exists=true | packed_scene=true
 res://assets/equipment/cuttingboard.gltf | exists=true | packed_scene=true
-res://assets/equipment/plate.gltf | exists=true | packed_scene=true
 res://assets/equipment/rollingpin.gltf | exists=true | packed_scene=true
 res://assets/exterior/nature/Tree_2_A_Color1.gltf | exists=true | packed_scene=true
 res://assets/exterior/nature/Bush_4_A_Color1.gltf | exists=true | packed_scene=true
@@ -94,4 +101,4 @@ res://assets/characters/Doctor_Male_Young.gltf | exists=true | packed_scene=true
 res://assets/characters/Doctor_Female_Young.gltf | exists=true | packed_scene=true
 res://assets/characters/Doctor_Male_Old.gltf | exists=true | packed_scene=true
 res://assets/characters/Doctor_Female_Old.gltf | exists=true | packed_scene=true
-ASSET CHECK: 96 unique paths, 0 failures
+ASSET CHECK: 103 unique paths, 0 failures
