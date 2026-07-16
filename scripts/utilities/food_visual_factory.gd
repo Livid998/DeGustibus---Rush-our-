@@ -5,6 +5,21 @@ extends RefCounted
 ## workstation feedback and table dishes all use the same descriptors, so a
 ## semilavorato cannot silently turn into a placeholder between two systems.
 
+const _CONTAINER_SPECS := {
+	"plate": {
+		"clean": "res://assets/equipment/plate.gltf",
+		"dirty": "res://assets/equipment/plate_dirty.gltf",
+		"reference_scale": 0.55
+	},
+	"bowl": {
+		"clean": "res://assets/equipment/bowl.gltf",
+		"dirty": "res://assets/equipment/bowl_dirty.gltf",
+		"reference_scale": 0.58
+	}
+}
+
+static var _canonical_container_sizes: Dictionary = {}
+
 
 static func parts_for_id(food_id: String) -> Array[Dictionary]:
 	var result: Array[Dictionary] = []
@@ -129,9 +144,74 @@ static func instantiate_recipe_serving_food(recipe_id: String) -> Node3D:
 	return instantiate_parts(serving_parts, 1.0)
 
 
+## Creates the complete serving used by pass, waiter and table visuals.  The
+## container is never embedded in the food root: one canonical clean container
+## remains underneath assembled food at exactly the dirty-container footprint.
+static func instantiate_canonical_serving(recipe_id: String) -> Node3D:
+	var root := Node3D.new()
+	root.name = "CanonicalServing"
+	var kind := consumption_container(recipe_id)
+	var container := instantiate_canonical_container(kind, false)
+	container.name = "StableContainer"
+	root.add_child(container)
+	var food := instantiate_recipe_serving_food(recipe_id)
+	food.name = "FoodContent"
+	root.add_child(food)
+	root.set_meta("recipe_id", recipe_id)
+	root.set_meta("consumption_container", kind)
+	return root
+
+
+## Every clean/dirty/table/carried container is normalized against the actual
+## rendered bounds of the dirty asset.  Comparing Node.scale is insufficient:
+## source meshes can have different native dimensions or nested transforms.
+static func instantiate_canonical_container(kind: String, dirty: bool = false) -> Node3D:
+	kind = _normalized_container_kind(kind)
+	var spec: Dictionary = _CONTAINER_SPECS[kind]
+	var path := String(spec.get("dirty" if dirty else "clean", ""))
+	var container := ModelFactory.instantiate_model(path, 1.0)
+	var native_bounds := ModelFactory.calculate_visual_bounds(container, true)
+	var target_size := canonical_container_size(kind)
+	if not native_bounds.size.is_zero_approx() and not target_size.is_zero_approx():
+		container.scale = Vector3(
+			target_size.x / maxf(native_bounds.size.x, 0.0001),
+			target_size.y / maxf(native_bounds.size.y, 0.0001),
+			target_size.z / maxf(native_bounds.size.z, 0.0001)
+		)
+	ModelFactory.align_visual_to_grid_origin(container)
+	ModelFactory.set_shadow_casting(container, GeometryInstance3D.SHADOW_CASTING_SETTING_OFF)
+	container.set_meta("canonical_container_kind", kind)
+	container.set_meta("canonical_container_dirty", dirty)
+	return container
+
+
+static func canonical_container_size(kind: String) -> Vector3:
+	kind = _normalized_container_kind(kind)
+	if _canonical_container_sizes.has(kind):
+		return Vector3(_canonical_container_sizes[kind])
+	var spec: Dictionary = _CONTAINER_SPECS[kind]
+	var reference := ModelFactory.instantiate_model(String(spec.dirty), float(spec.reference_scale))
+	var bounds := ModelFactory.calculate_visual_bounds(reference, true)
+	var size := bounds.size
+	reference.free()
+	_canonical_container_sizes[kind] = size
+	return size
+
+
+static func canonical_container_scale(kind: String) -> float:
+	kind = _normalized_container_kind(kind)
+	return float((_CONTAINER_SPECS[kind] as Dictionary).reference_scale)
+
+
+static func canonical_container_path(kind: String, dirty: bool = false) -> String:
+	kind = _normalized_container_kind(kind)
+	var spec: Dictionary = _CONTAINER_SPECS[kind]
+	return String(spec.get("dirty" if dirty else "clean", ""))
+
+
 static func consumption_container(recipe_id: String) -> String:
 	var visual: Dictionary = DataRegistry.food_visuals_by_id.get(recipe_id, {})
-	return String(visual.get("consumption_container", "plate"))
+	return _normalized_container_kind(String(visual.get("consumption_container", "plate")))
 
 
 static func consumption_parts(recipe_id: String, stage: int) -> Array[Dictionary]:
@@ -301,3 +381,7 @@ static func _vector3(value: Variant, fallback: Vector3) -> Vector3:
 	if value is Array and value.size() >= 3:
 		return Vector3(float(value[0]), float(value[1]), float(value[2]))
 	return fallback
+
+
+static func _normalized_container_kind(kind: String) -> String:
+	return kind if _CONTAINER_SPECS.has(kind) else "plate"

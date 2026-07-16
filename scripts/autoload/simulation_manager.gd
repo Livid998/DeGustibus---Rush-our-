@@ -516,6 +516,8 @@ func claim_service_task(employee: Dictionary, from_position: Variant = null) -> 
 			continue
 		if _service_key_is_reserved(String(task.get("reservation_key", ""))):
 			continue
+		if world != null and world.has_method("is_work_position_available") and not world.is_work_position_available(Vector3(task.target), String(employee.get("id", ""))):
+			continue
 		if from_position is Vector3 and world != null and world.has_method("find_path") and world.find_path(Vector3(from_position), Vector3(task.target)).is_empty():
 			continue
 		var candidate := float(task.priority) * 100.0 + GameState.service_seconds - float(task.created_at)
@@ -641,6 +643,8 @@ func claim_maintenance_task(employee: Dictionary, from_position: Variant = null)
 		var station_id := String(task.get("station", ""))
 		if station_id.is_empty():
 			var target := Vector3(task.get("target", Vector3.ZERO))
+			if world != null and world.has_method("is_work_position_available") and not world.is_work_position_available(target, String(employee.get("id", ""))):
+				continue
 			if from_position is Vector3 and world != null and world.has_method("find_path") and world.find_path(Vector3(from_position), target).is_empty():
 				continue
 			var candidate := float(task.get("priority", 1)) * 100.0 + GameState.service_seconds - float(task.get("created_at", 0.0))
@@ -1048,8 +1052,8 @@ func _prune_completed_work(force: bool = false) -> void:
 
 func summary() -> Dictionary:
 	var served := int(stats.customers_served)
-	var top_recipe := "—"
-	var low_recipe := "—"
+	var top_recipe := "N/D"
+	var low_recipe := "N/D"
 	var top_count := -1
 	var low_count := 999999
 	for recipe_id: String in stats.recipe_sales:

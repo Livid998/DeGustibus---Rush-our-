@@ -8,6 +8,13 @@ const LOCK_TEXTURE: Texture2D = preload("res://assets/ui/lock_icon.png")
 const COIN_TEXTURE: Texture2D = preload("res://assets/ui/food_icon_pack/ui/coin_stack.png")
 const REPUTATION_TEXTURE: Texture2D = preload("res://assets/ui/food_icon_pack/ui/star_filled.png")
 const LEVEL_TEXTURE: Texture2D = preload("res://assets/ui/food_icon_pack/ui/restaurant_level_badge.png")
+const ROTATE_LEFT_TEXTURE: Texture2D = preload("res://assets/ui/control_rotate_left.svg")
+const ROTATE_RIGHT_TEXTURE: Texture2D = preload("res://assets/ui/control_rotate_right.svg")
+const PREVIOUS_TEXTURE: Texture2D = preload("res://assets/ui/control_previous.svg")
+const NEXT_TEXTURE: Texture2D = preload("res://assets/ui/control_next.svg")
+const PLAY_TEXTURE: Texture2D = preload("res://assets/ui/control_play.svg")
+const PAUSE_TEXTURE: Texture2D = preload("res://assets/ui/control_pause.svg")
+const PRIORITY_TEXTURE: Texture2D = preload("res://assets/ui/control_priority.svg")
 const RARITY_TEXTURES := [
 	preload("res://assets/ui/food_icon_pack/ui/rarity_one_star.png"),
 	preload("res://assets/ui/food_icon_pack/ui/rarity_two_stars.png"),
@@ -71,6 +78,34 @@ static func reputation_icon() -> Texture2D:
 
 static func level_icon() -> Texture2D:
 	return LEVEL_TEXTURE
+
+
+static func rotate_left_icon() -> Texture2D:
+	return ROTATE_LEFT_TEXTURE
+
+
+static func rotate_right_icon() -> Texture2D:
+	return ROTATE_RIGHT_TEXTURE
+
+
+static func previous_icon() -> Texture2D:
+	return PREVIOUS_TEXTURE
+
+
+static func next_icon() -> Texture2D:
+	return NEXT_TEXTURE
+
+
+static func play_icon() -> Texture2D:
+	return PLAY_TEXTURE
+
+
+static func pause_icon() -> Texture2D:
+	return PAUSE_TEXTURE
+
+
+static func priority_icon() -> Texture2D:
+	return PRIORITY_TEXTURE
 
 
 static func rarity_icon(rarity: int) -> Texture2D:

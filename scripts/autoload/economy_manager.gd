@@ -103,12 +103,12 @@ func pay_shift_wages() -> int:
 	if paid > 0:
 		GameState.spend(paid, "Stipendi del servizio")
 	if paid < due:
-		GameState.toast_requested.emit("Stipendi parziali: mancano %d ●" % (due - paid), "warning")
+		GameState.toast_requested.emit("Stipendi parziali: mancano %d monete" % (due - paid), "warning")
 	return paid
 
 
 func _complete_delivery(delivery: Dictionary) -> void:
 	GameState.add_stock(delivery.ingredient_id, int(delivery.amount), float(delivery.unit_cost))
 	GameState.deliveries.erase(delivery)
-	GameState.toast_requested.emit("Consegna arrivata: %s ×%d" % [DataRegistry.ingredients_by_id[delivery.ingredient_id].name, delivery.amount], "income")
+	GameState.toast_requested.emit("Consegna arrivata: %s x%d" % [DataRegistry.ingredients_by_id[delivery.ingredient_id].name, delivery.amount], "income")
 	delivery_arrived.emit(delivery)

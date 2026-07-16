@@ -130,7 +130,7 @@
   ],"serving_models":[
     {"model":"res://assets/food/food_burger.gltf","scale":0.52,"offset":[0.0,0.08,0.0]}
   ],"partial_models":[
-    {"model":"res://assets/food/food_burger.gltf","scale":0.43,"offset":[0.03,0.08,-0.01]}
+    {"model":"res://assets/food/food_burger.gltf","scale":0.52,"offset":[0.0,0.08,0.0]}
   ],"leftover_models":[
     {"model":"res://assets/food/food_ingredient_burger_trash.gltf","scale":0.36,"offset":[0.05,0.08,-0.03]}
   ]},
@@ -139,7 +139,7 @@
   ],"serving_models":[
     {"model":"res://assets/food/food_cheeseburger.glb","scale":1.30,"offset":[0.0,0.08,0.0]}
   ],"partial_models":[
-    {"model":"res://assets/food/food_cheeseburger.glb","scale":1.05,"offset":[0.03,0.08,-0.01]}
+    {"model":"res://assets/food/food_cheeseburger.glb","scale":1.30,"offset":[0.0,0.08,0.0]}
   ],"leftover_models":[
     {"model":"res://assets/food/food_ingredient_burger_trash.gltf","scale":0.36,"offset":[0.05,0.08,-0.03]}
   ]},
@@ -148,10 +148,9 @@
   ],"serving_models":[
     {"model":"res://assets/food/food_vegetableburger.gltf","scale":0.52,"offset":[0.0,0.08,0.0]}
   ],"partial_models":[
-    {"model":"res://assets/food/food_vegetableburger.gltf","scale":0.43,"offset":[0.03,0.08,-0.01]}
+    {"model":"res://assets/food/food_vegetableburger.gltf","scale":0.52,"offset":[0.0,0.08,0.0]}
   ],"leftover_models":[
-    {"model":"res://assets/food/food_ingredient_lettuce_chopped.gltf","scale":0.22,"offset":[0.04,0.08,-0.04]},
-    {"model":"res://assets/food/food_ingredient_tomato_slice.gltf","scale":0.21,"offset":[-0.06,0.08,0.04]}
+    {"model":"res://assets/food/food_ingredient_burger_trash.gltf","scale":0.36,"offset":[0.05,0.08,-0.03]}
   ]},
   {"id":"mixed_salad","consumption_container":"bowl","models":[
     {"model":"res://assets/food/food_mixed_salad.glb","scale":0.90,"offset":[0.0,0.0,0.0]}
@@ -160,12 +159,14 @@
     {"model":"res://assets/food/food_ingredient_tomato_slices.gltf","scale":0.17,"offset":[0.07,0.13,0.02],"quantity":2,"spacing":0.09},
     {"model":"res://assets/food/food_ingredient_carrot_chopped.gltf","scale":0.16,"offset":[0.0,0.13,0.06]}
   ],"partial_models":[
+    {"primitive":"disc","color":"#6f9f3f","scale":0.36,"offset":[0.0,0.115,0.0],"role":"food"},
     {"model":"res://assets/food/food_ingredient_lettuce_chopped.gltf","scale":0.20,"offset":[-0.05,0.13,0.0],"quantity":3,"spacing":0.10},
     {"model":"res://assets/food/food_ingredient_tomato_slices.gltf","scale":0.17,"offset":[0.07,0.13,0.02],"quantity":2,"spacing":0.09},
     {"model":"res://assets/food/food_ingredient_carrot_chopped.gltf","scale":0.16,"offset":[0.0,0.13,0.06]}
   ],"leftover_models":[
-    {"model":"res://assets/food/food_ingredient_lettuce_chopped.gltf","scale":0.16,"offset":[-0.04,0.13,-0.03]},
-    {"model":"res://assets/food/food_ingredient_tomato_slice.gltf","scale":0.16,"offset":[0.05,0.13,0.02]},
+    {"primitive":"disc","color":"#6f9f3f","scale":0.25,"offset":[0.0,0.115,0.0],"role":"food"},
+    {"model":"res://assets/food/food_ingredient_lettuce_chopped.gltf","scale":0.15,"offset":[-0.04,0.13,-0.03],"quantity":2,"spacing":0.08},
+    {"model":"res://assets/food/food_ingredient_tomato_slice.gltf","scale":0.15,"offset":[0.05,0.13,0.02]},
     {"model":"res://assets/food/food_ingredient_carrot_chopped.gltf","scale":0.14,"offset":[0.01,0.13,0.06]}
   ]},
   {"id":"beef_stew","consumption_container":"bowl","models":[
@@ -176,10 +177,13 @@
     {"model":"res://assets/food/food_ingredient_potato_chopped.gltf","scale":0.16,"offset":[0.07,0.14,0.02],"quantity":2,"spacing":0.08},
     {"model":"res://assets/food/food_ingredient_carrot_chopped.gltf","scale":0.14,"offset":[0.0,0.14,0.06]}
   ],"partial_models":[
+    {"primitive":"disc","color":"#7a3f24","scale":0.36,"offset":[0.0,0.12,0.0],"role":"food"},
     {"model":"res://assets/food/food_ingredient_steak_pieces.gltf","scale":0.20,"offset":[-0.07,0.13,0.0]},
     {"model":"res://assets/food/food_ingredient_carrot_chopped.gltf","scale":0.18,"offset":[0.08,0.13,0.02]}
   ],"leftover_models":[
-    {"model":"res://assets/food/food_ingredient_steak_pieces.gltf","scale":0.16,"offset":[0.04,0.13,-0.03]}
+    {"primitive":"disc","color":"#754128","scale":0.24,"offset":[0.0,0.12,0.0],"role":"food"},
+    {"model":"res://assets/food/food_ingredient_steak_pieces.gltf","scale":0.15,"offset":[-0.03,0.13,-0.03]},
+    {"model":"res://assets/food/food_ingredient_carrot_chopped.gltf","scale":0.13,"offset":[0.05,0.13,0.02]}
   ]},
   {"id":"steak_plate","consumption_container":"plate","models":[
     {"model":"res://assets/food/food_dinner.gltf","scale":0.50,"offset":[0.0,0.0,0.0]}
@@ -198,7 +202,7 @@
   ],"serving_models":[
     {"model":"res://assets/food/food_icecream_cone_vanilla.gltf","scale":0.52,"offset":[0.0,0.08,0.0]}
   ],"partial_models":[
-    {"model":"res://assets/food/food_icecream_cone_vanilla.gltf","scale":0.40,"offset":[0.04,0.08,-0.02]}
+    {"model":"res://assets/food/food_icecream_cone_vanilla.gltf","scale":0.52,"offset":[0.0,0.08,0.0]}
   ],"leftover_models":[]},
   {"id":"mixed_sundae","consumption_container":"bowl","models":[
     {"model":"res://assets/food/icecream_bowl_decorated_A.gltf","scale":0.50,"offset":[0.0,0.0,0.0]}

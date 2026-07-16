@@ -27,6 +27,11 @@ if (-not $resolvedBuild.StartsWith($resolvedProject + '\', [StringComparison]::O
 New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
 Get-ChildItem -LiteralPath $BuildDir -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
 
+& $Godot --headless --path $ProjectRoot --scene 'res://tests/ui_glyph_audit.tscn'
+if ($LASTEXITCODE -ne 0) {
+    throw "Audit glifi UI/Web fallito con codice $LASTEXITCODE"
+}
+
 $exportMode = if ($DebugBuild) { '--export-debug' } else { '--export-release' }
 & $Godot --headless --path $ProjectRoot $exportMode 'PWA' (Join-Path $BuildDir 'index.html')
 if ($LASTEXITCODE -ne 0) {

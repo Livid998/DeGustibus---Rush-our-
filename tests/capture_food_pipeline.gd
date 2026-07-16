@@ -51,6 +51,17 @@ func _ready() -> void:
 		await get_tree().process_frame
 	await _save_frame("res://artifacts/customer_eating_gestures.png")
 	print("FOOD_CAPTURE eating saved")
+	main.world.camera_rig.zoom = 4.6
+	main.world.camera_rig.target = customer.people[0].global_position
+	main.world.camera_rig.global_position = main.world.camera_rig.target
+	for _frame: int in 4:
+		await get_tree().process_frame
+		customer.people[0]._maintain_seated_pose(0.0)
+	await _save_frame("res://artifacts/customer_utensil_grip.png")
+	print("FOOD_CAPTURE utensil grip saved")
+	main.world.camera_rig.zoom = 10.8
+	main.world.camera_rig.target = main.world.cell_to_world(Vector2i(11, 3))
+	main.world.camera_rig.global_position = main.world.camera_rig.target
 	# One frame documents the complete table lifecycle without continuously
 	# scaling a plated model: full serving, partial food, leftovers and dirt.
 	customer._update_dish_consumption("CAPTURE_1", 0.50)

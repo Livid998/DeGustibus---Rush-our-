@@ -96,7 +96,7 @@ static func _menu(content: VBoxContainer, ui: RestaurantUI) -> void:
 		price.min_value = 5
 		price.max_value = 80
 		price.value = float(state.price)
-		price.suffix = " ●"
+		price.suffix = " monete"
 		price.custom_minimum_size.x = 105
 		price.value_changed.connect(func(value: float): GameState.menu[recipe_id].price = int(value))
 		top.add_child(price)
@@ -171,7 +171,7 @@ static func _stock(content: VBoxContainer, ui: RestaurantUI) -> void:
 		progress.custom_minimum_size.y = 12
 		box.add_child(progress)
 		var stock_meta := Label.new()
-		stock_meta.text = "Qualità fornitura %d/3 · costo medio %.1f ● · lotto %d" % [int(entry.quality), float(entry.average_cost), int(entry.lot)]
+		stock_meta.text = "Qualità fornitura %d/3 · costo medio %.1f monete · lotto %d" % [int(entry.quality), float(entry.average_cost), int(entry.lot)]
 		stock_meta.add_theme_color_override("font_color", Color("60767a"))
 		box.add_child(stock_meta)
 		var controls := HBoxContainer.new()
@@ -353,7 +353,7 @@ static func _album(content: VBoxContainer, ui: RestaurantUI) -> void:
 		box.add_child(stars)
 		var unlock_cost := int(ingredient.get("unlock_cost", 0))
 		if not is_unlocked and unlock_cost > 0:
-			var button := ui.make_button("Sblocca · %d ●" % unlock_cost, func():
+			var button := ui.make_button("Sblocca · %d [coin]" % unlock_cost, func():
 				if GameState.spend(unlock_cost, "Sblocco %s" % ingredient.name):
 					GameState.unlock_ingredient(ingredient_id, "Acquisto album")
 					ui.refresh_screen(), "yellow")
@@ -424,7 +424,7 @@ static func _legacy_album(content: VBoxContainer, ui: RestaurantUI) -> void:
 			detail_text.text = "%s\n%s\nRicette compatibili: %d" % [selected.category, selected.get("unlock", "Sbloccato inizialmente"), _compatible_recipe_count(ingredient_id)]
 			var cost := int(selected.get("unlock_cost", 0))
 			unlock_button.visible = not available and cost > 0
-			unlock_button.text = "Sblocca una tantum · %d ●" % cost
+			ui.set_button_content(unlock_button, "Sblocca una tantum · %d [coin]" % cost)
 			unlock_button.set_meta("ingredient_id", ingredient_id)
 			unlock_button.set_meta("unlock_cost", cost), "green" if is_unlocked else "ghost")
 		select.custom_minimum_size = Vector2(170, 82)
@@ -479,7 +479,7 @@ static func _missing_ingredients(recipe: Dictionary) -> Array[String]:
 
 
 static func _recipe_hottest_station(recipe: Dictionary) -> Dictionary:
-	var result := {"name": "—", "load": 0.0}
+	var result := {"name": "N/D", "load": 0.0}
 	for station_id: String in DataRegistry.required_station_ids(recipe):
 		var load := SimulationManager.predicted_station_load(station_id)
 		if load > float(result.load):
@@ -503,7 +503,7 @@ static func _legacy_stock(content: VBoxContainer, ui: RestaurantUI) -> void:
 		card.add_child(box)
 		var top := HBoxContainer.new()
 		var ingredient_path := String(ingredient.model)
-		var select := ui.make_button(("🔒 " if not entry.unlocked else "") + ingredient.name, func(): preview.set_model(ingredient_path), "yellow" if not entry.unlocked else "blue")
+		var select := ui.make_button(("[lock] " if not entry.unlocked else "") + ingredient.name, func(): preview.set_model(ingredient_path), "yellow" if not entry.unlocked else "blue")
 		select.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		top.add_child(select)
 		var amount := Label.new()
@@ -562,7 +562,7 @@ static func _legacy_stock(content: VBoxContainer, ui: RestaurantUI) -> void:
 			supplier_row.add_child(ui.make_button("Ordine urgente", func(): EconomyManager.order_stock(ingredient_id, int(GameState.stock[ingredient_id].lot), true), "red"))
 			box.add_child(supplier_row)
 		else:
-			box.add_child(ui.make_button("Sblocca una tantum · 350 ●", func(): if GameState.spend(350, "Sblocco %s" % ingredient.name): GameState.stock[ingredient_id].unlocked = true; ui.refresh_screen(), "yellow"))
+			box.add_child(ui.make_button("Sblocca una tantum · 350 [coin]", func(): if GameState.spend(350, "Sblocco %s" % ingredient.name): GameState.stock[ingredient_id].unlocked = true; ui.refresh_screen(), "yellow"))
 		content.add_child(card)
 	preview.set_model.call_deferred(first_path)
 
@@ -593,7 +593,7 @@ static func _market(content: VBoxContainer, ui: RestaurantUI) -> void:
 		row.add_child(offer_icon)
 		var label := Label.new()
 		label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		label.text = "%s\n%s ×%d · Qualità %d/3 · %.1f cad. · %ds" % [offer.seller, offer.name, int(offer.amount), int(offer.quality), float(offer.unit_price), int(offer.remaining)]
+		label.text = "%s\n%s x%d · Qualità %d/3 · %.1f cad. · %ds" % [offer.seller, offer.name, int(offer.amount), int(offer.quality), float(offer.unit_price), int(offer.remaining)]
 		label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 		row.add_child(label)
 		var offer_id := String(offer.id)
@@ -628,11 +628,11 @@ static func _market(content: VBoxContainer, ui: RestaurantUI) -> void:
 			prep_icon.tooltip_text = String(prep.name)
 			prep_row.add_child(prep_icon)
 			var prep_label := Label.new()
-			prep_label.text = "%s · %.1f ● · disponibili %d" % [prep.name, float(prep.market_price), int(GameState.purchased_preparations.get(prep_id_value, 0))]
+			prep_label.text = "%s · %.1f monete · disponibili %d" % [prep.name, float(prep.market_price), int(GameState.purchased_preparations.get(prep_id_value, 0))]
 			prep_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 			prep_row.add_child(prep_label)
 			var prep_id := prep_id_value
-			var buy := ui.make_button("Compra ×5", func(): EconomyManager.buy_preparation(prep_id, 5); ui.refresh_screen(), "green")
+			var buy := ui.make_button("Compra x5", func(): EconomyManager.buy_preparation(prep_id, 5); ui.refresh_screen(), "green")
 			buy.custom_minimum_size = Vector2(116, 38)
 			prep_row.add_child(buy)
 			shop_box.add_child(prep_row)
@@ -646,7 +646,7 @@ static func _staff(content: VBoxContainer, ui: RestaurantUI) -> void:
 		var box := VBoxContainer.new()
 		card.add_child(box)
 		var title := Label.new()
-		title.text = "%s · %s · %d ●/turno" % [employee.name, _role_name(String(employee.role)), int(employee.salary)]
+		title.text = "%s · %s · %d monete/turno" % [employee.name, _role_name(String(employee.role)), int(employee.salary)]
 		box.add_child(title)
 		var stats := Label.new()
 		stats.text = "Velocità %.0f%% · Precisione %.0f%% · Ordine %.0f%% · Resistenza %.0f%%" % [float(employee.speed)*100, float(employee.precision)*100, float(employee.order)*100, float(employee.stamina)*100]
@@ -686,7 +686,7 @@ static func _staff(content: VBoxContainer, ui: RestaurantUI) -> void:
 		card.add_child(row)
 		var label := Label.new()
 		label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		label.text = "%s · %s\nIngaggio %d ● · salario %d · velocità %.0f%%" % [candidate.name, String(candidate.role).capitalize(), int(candidate.hire_cost), int(candidate.salary), float(candidate.speed)*100]
+		label.text = "%s · %s\nIngaggio %d monete · salario %d · velocità %.0f%%" % [candidate.name, String(candidate.role).capitalize(), int(candidate.hire_cost), int(candidate.salary), float(candidate.speed)*100]
 		row.add_child(label)
 		var candidate_id := String(candidate.id)
 		row.add_child(ui.make_button("Assumi", func(): EconomyManager.hire(candidate_id); ui.refresh_screen(), "green"))
@@ -698,7 +698,7 @@ static func _statistics(content: VBoxContainer, ui: RestaurantUI) -> void:
 	content.add_child(ui.make_section("Statistiche di servizio", "Aggiornamento continuo; code e capacità provengono dalla task board reale."))
 	var overview := ui.make_card()
 	var text := Label.new()
-	text.text = "Ricavi %d ● · Ingredienti %d ● · Personale %d ● · Utile %d ●\nServiti %d · Persi %d · Soddisfazione %.0f%% · Tempo medio %.1fs\nPiù venduto: %s · Meno venduto: %s · Spreco %d · Terminati: %s" % [summary.revenue, summary.ingredient_cost, summary.labor_cost, summary.profit, summary.customers_served, summary.customers_lost, float(summary.satisfaction)*100, float(summary.average_time), summary.top_recipe, summary.low_recipe, summary.waste, ", ".join(summary.ingredients_out) if not summary.ingredients_out.is_empty() else "nessuno"]
+	text.text = "Ricavi %d monete · Ingredienti %d monete · Personale %d monete · Utile %d monete\nServiti %d · Persi %d · Soddisfazione %.0f%% · Tempo medio %.1fs\nPiù venduto: %s · Meno venduto: %s · Spreco %d · Terminati: %s" % [summary.revenue, summary.ingredient_cost, summary.labor_cost, summary.profit, summary.customers_served, summary.customers_lost, float(summary.satisfaction)*100, float(summary.average_time), summary.top_recipe, summary.low_recipe, summary.waste, ", ".join(summary.ingredients_out) if not summary.ingredients_out.is_empty() else "nessuno"]
 	text.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	overview.add_child(text)
 	content.add_child(overview)

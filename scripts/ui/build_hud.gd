@@ -112,7 +112,7 @@ func refresh_catalog() -> void:
 		if GameState.restaurant_state == "open" and not world.build_system.can_edit_definition(definition):
 			continue
 		var item_id := String(definition.id)
-		var button := ui.make_button("%s\n%d ●" % [definition.name, int(definition.price)], func(): world.build_system.start_place(item_id), "blue")
+		var button := ui.make_button("%s\n%d [coin]" % [definition.name, int(definition.price)], func(): world.build_system.start_place(item_id), "blue")
 		button.custom_minimum_size = Vector2(146, 64)
 		button.tooltip_text = "%s · ingombro %s" % [definition.name, definition.footprint]
 		item_row.add_child(button)
@@ -133,13 +133,21 @@ func refresh_actions() -> void:
 	label.add_theme_color_override("font_color", Color("294b50"))
 	if build.active:
 		var cost := 0 if build.move_source else int(build.current_definition.get("price", 0))
-		label.text = "%s  ·  %s%s" % [build.current_definition.get("name", "Oggetto"), build.reason, "  ·  %d ●" % cost if cost > 0 else ""]
+		label.text = "%s  ·  %s%s" % [build.current_definition.get("name", "Oggetto"), build.reason, "  ·  %d monete" % cost if cost > 0 else ""]
 		action_row.add_child(label)
 		if world.is_edge_placement(build.current_definition) or String(build.current_definition.get("placement", "cell")) == "wall_mount":
-			action_row.add_child(_action_button("◀ Bordo", build.rotate_preview_back, "ghost"))
-			action_row.add_child(_action_button("Bordo ▶", build.rotate_preview, "yellow"))
+			var previous := _action_button("Bordo prec.", build.rotate_preview_back, "ghost")
+			previous.icon = GameIcons.previous_icon()
+			previous.expand_icon = true
+			previous.add_theme_constant_override("icon_max_width", 20)
+			action_row.add_child(previous)
+			var next := _action_button("Bordo succ.", build.rotate_preview, "yellow")
+			next.icon = GameIcons.next_icon()
+			next.expand_icon = true
+			next.add_theme_constant_override("icon_max_width", 20)
+			action_row.add_child(next)
 		else:
-			action_row.add_child(_action_button("Ruota 90°", build.rotate_preview, "yellow"))
+			action_row.add_child(_action_button("Ruota 90 gradi", build.rotate_preview, "yellow"))
 		var confirm := _action_button("Conferma", build.confirm, "green")
 		confirm.disabled = not build.placement_valid
 		action_row.add_child(confirm)
@@ -159,7 +167,7 @@ func refresh_actions() -> void:
 			var removal_cost := int(selected.definition.get("removal_cost", 0))
 			if removal_cost <= 0:
 				action_row.add_child(_action_button("Sposta", build.move_selected, "yellow"))
-			var sell_label := "Rimuovi · %d ●" % removal_cost if removal_cost > 0 else "Vendi 60%"
+			var sell_label := "Rimuovi · %d [coin]" % removal_cost if removal_cost > 0 else "Vendi 60%"
 			action_row.add_child(_action_button(sell_label, build.sell_selected, "red"))
 		action_row.add_child(_action_button("Deseleziona", build.clear_selection, "ghost"))
 	else:

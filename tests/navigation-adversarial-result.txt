@@ -1,0 +1,1 @@
+NAVIGATION ADVERSARIAL: PASS | 12 checks | { &"corridor_seconds": 15.8799999999998, &"corridor_min_clearance": 0.25668188810349, &"corridor_recoveries": 2, &"crossing_min_clearance": 0.08297321081162, &"station_claims": 1, &"station_slots": 1 }

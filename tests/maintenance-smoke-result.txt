@@ -1,1 +1,1 @@
-MAINTENANCE SMOKE: PASS | checks=8 failures=0
+MAINTENANCE SMOKE: PASS | checks=15 failures=0

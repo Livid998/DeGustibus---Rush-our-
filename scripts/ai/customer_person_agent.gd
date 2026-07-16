@@ -290,14 +290,28 @@ func _show_utensil() -> void:
 	# The previous utensil was technically attached but too small and buried in
 	# the fist. A readable silhouette is more important than literal real scale
 	# at the game's isometric camera distance.
-	_utensil_model = ModelFactory.instantiate_model(path, 0.62)
+	_utensil_model = Node3D.new()
 	_utensil_model.name = "DiningUtensil"
-	ModelFactory.align_visual_to_grid_origin(_utensil_model)
+	var visual := ModelFactory.instantiate_model(path, 0.62)
+	visual.name = "UtensilVisual"
+	_utensil_model.add_child(visual)
+	_align_utensil_handle(visual)
 	_utensil_model.position = Vector3(-0.02, -0.01, -0.16)
 	_utensil_model.rotation = Vector3(-PI * 0.46, 0.0, PI * 0.08)
 	ModelFactory.set_shadow_casting(_utensil_model, GeometryInstance3D.SHADOW_CASTING_SETTING_OFF)
 	_utensil_attachment.add_child(_utensil_model)
 	_keep_utensil_above_table()
+
+
+func _align_utensil_handle(visual: Node3D) -> void:
+	var bounds := ModelFactory.calculate_visual_bounds(visual, true)
+	if bounds.size.is_zero_approx():
+		return
+	var center := bounds.get_center()
+	# Forks/spoons are authored along local X. Put the very end of the handle in
+	# the fist and let the utensil extend outwards; centering it made the hand
+	# visibly grab the middle of the shaft.
+	visual.position += Vector3(-center.x + bounds.size.x * 0.44, -center.y, -center.z)
 
 
 func _keep_utensil_above_table() -> void:

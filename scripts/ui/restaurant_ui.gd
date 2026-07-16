@@ -106,6 +106,7 @@ func show_screen(screen_name: String, sound: bool = true) -> void:
 		return
 	_clear(screen_content)
 	ManagementScreens.populate(screen_name, screen_content, self)
+	GameFonts.sanitize_control_tree(screen_content)
 	screen_title_label.text = screen_name.to_upper()
 	var animate_open := sound or not screen_panel.visible
 	screen_panel.visible = true
@@ -139,19 +140,34 @@ func refresh_screen() -> void:
 
 func make_button(text: String, callback: Callable, tone: String = "blue") -> Button:
 	var button := Button.new()
-	var display_text := text
-	if "●" in display_text:
-		button.icon = GameIcons.scaled_icon(GameIcons.currency_icon(), 24)
-		display_text = display_text.replace("●", "").strip_edges()
-	button.text = display_text
+	set_button_content(button, text)
 	button.custom_minimum_size = Vector2(112, 48)
 	button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	button.tooltip_text = text
 	button.pressed.connect(callback)
 	button.add_theme_stylebox_override("normal", _button_style(tone))
 	button.add_theme_stylebox_override("hover", _button_style("green" if tone != "red" else "yellow"))
 	button.add_theme_stylebox_override("pressed", _button_style("yellow"))
 	return button
+
+
+func set_button_content(button: Button, value: String) -> void:
+	var display_text := value
+	var icon_texture: Texture2D
+	var tooltip := value
+	if "[coin]" in display_text:
+		icon_texture = GameIcons.currency_icon()
+		display_text = display_text.replace("[coin]", "").strip_edges()
+		tooltip = tooltip.replace("[coin]", "monete")
+	elif "[lock]" in display_text:
+		icon_texture = GameIcons.lock_icon()
+		display_text = display_text.replace("[lock]", "").strip_edges()
+		tooltip = tooltip.replace("[lock]", "Bloccato")
+	button.text = GameFonts.web_safe_text(display_text)
+	button.tooltip_text = GameFonts.web_safe_text(tooltip)
+	button.icon = GameIcons.scaled_icon(icon_texture, 24) if icon_texture else null
+	button.expand_icon = icon_texture != null
+	if icon_texture:
+		button.add_theme_constant_override("icon_max_width", 24)
 
 
 func make_section(title: String, subtitle: String = "") -> VBoxContainer:
@@ -190,7 +206,7 @@ func make_card() -> PanelContainer:
 
 
 func show_toast(message: String, tone: String = "info") -> void:
-	toast_label.text = message
+	toast_label.text = GameFonts.web_safe_text(message)
 	toast_label.visible = true
 	toast_label.modulate = Color.WHITE
 	toast_label.add_theme_color_override("font_color", {
@@ -276,7 +292,7 @@ func _build_top_bar() -> void:
 	customer_label = Label.new()
 	customer_label.add_theme_color_override("font_color", Color("f5fbf9"))
 	var speed := OptionButton.new()
-	for label: String in ["1×", "2×", "4×"]:
+	for label: String in ["1x", "2x", "4x"]:
 		speed.add_item(label)
 	speed_icon_rect = _top_bar_icon(GameIcons.speed_icon(0))
 	speed.item_selected.connect(func(index: int):
@@ -394,7 +410,10 @@ func _build_camera_controls() -> void:
 	row.alignment = BoxContainer.ALIGNMENT_CENTER
 	row.add_theme_constant_override("separation", 7)
 	camera_controls.add_child(row)
-	var rotate_left_button := make_button("↶", func(): if world: world.camera_rig.rotate_left(), "blue")
+	var rotate_left_button := make_button("", func(): if world: world.camera_rig.rotate_left(), "blue")
+	rotate_left_button.icon = GameIcons.rotate_left_icon()
+	rotate_left_button.expand_icon = true
+	rotate_left_button.add_theme_constant_override("icon_max_width", 30)
 	rotate_left_button.custom_minimum_size = Vector2(54, 48)
 	rotate_left_button.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 	rotate_left_button.tooltip_text = "Ruota la mappa a sinistra"
@@ -406,7 +425,10 @@ func _build_camera_controls() -> void:
 	wall_visibility_button.tooltip_text = "Alterna muri interi e muretti bassi sui lati non nascosti"
 	wall_visibility_button.add_theme_font_size_override("font_size", 14)
 	row.add_child(wall_visibility_button)
-	var rotate_right_button := make_button("↷", func(): if world: world.camera_rig.rotate_right(), "blue")
+	var rotate_right_button := make_button("", func(): if world: world.camera_rig.rotate_right(), "blue")
+	rotate_right_button.icon = GameIcons.rotate_right_icon()
+	rotate_right_button.expand_icon = true
+	rotate_right_button.add_theme_constant_override("icon_max_width", 30)
 	rotate_right_button.custom_minimum_size = Vector2(54, 48)
 	rotate_right_button.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 	rotate_right_button.tooltip_text = "Ruota la mappa a destra"
@@ -548,7 +570,7 @@ func _update_top_bar() -> void:
 	state_button.add_theme_stylebox_override("normal", _button_style("green" if GameState.restaurant_state == "open" else "yellow" if GameState.restaurant_state == "closing" else "red"))
 	var minutes := int(GameState.service_seconds) / 60
 	var seconds := int(GameState.service_seconds) % 60
-	clock_label.text = "%02d:%02d · %.0f×" % [minutes, seconds, SimulationManager.simulation_speed]
+	clock_label.text = "%02d:%02d · %.0fx" % [minutes, seconds, SimulationManager.simulation_speed]
 	var guest_count := 0
 	for customer: Node in SimulationManager.customers:
 		guest_count += int(customer.get("group_size"))
@@ -613,12 +635,19 @@ func _update_pass() -> void:
 		row.add_child(label)
 		var ticket_actions := VBoxContainer.new()
 		ticket_actions.add_theme_constant_override("separation", 2)
-		var suspend := make_button("▶" if bool(order.get("suspended", false)) else "Ⅱ", func(): SimulationManager.toggle_order_suspended(order_id), "green" if bool(order.get("suspended", false)) else "ghost")
+		var suspended := bool(order.get("suspended", false))
+		var suspend := make_button("", func(): SimulationManager.toggle_order_suspended(order_id), "green" if suspended else "ghost")
+		suspend.icon = GameIcons.play_icon() if suspended else GameIcons.pause_icon()
+		suspend.expand_icon = true
+		suspend.add_theme_constant_override("icon_max_width", 20)
 		suspend.tooltip_text = "Riprendi piatto" if bool(order.get("suspended", false)) else "Sospendi piatto"
 		suspend.custom_minimum_size = Vector2(34, 28)
 		suspend.size_flags_horizontal = Control.SIZE_SHRINK_END
 		ticket_actions.add_child(suspend)
-		var priority := make_button("↑", func(): SimulationManager.raise_order_priority(order_id), "yellow")
+		var priority := make_button("", func(): SimulationManager.raise_order_priority(order_id), "yellow")
+		priority.icon = GameIcons.priority_icon()
+		priority.expand_icon = true
+		priority.add_theme_constant_override("icon_max_width", 20)
 		priority.tooltip_text = "Aumenta priorità"
 		priority.custom_minimum_size = Vector2(34, 28)
 		priority.size_flags_horizontal = Control.SIZE_SHRINK_END
@@ -630,6 +659,7 @@ func _update_pass() -> void:
 		empty.text = "Nessuna comanda"
 		empty.add_theme_color_override("font_color", Color("f2faf8"))
 		pass_content.add_child(empty)
+	GameFonts.sanitize_control_tree(pass_content)
 	var portrait := root.size.y > root.size.x
 	for screen_name: String in nav_buttons:
 		var nav_button: Button = nav_buttons[screen_name]

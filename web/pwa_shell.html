@@ -233,7 +233,7 @@ const engine = new Engine(GODOT_CONFIG);
 				if (manual) show('La PWA sarà aggiornabile dopo la prima installazione.', false);
 				return 'Prima installazione PWA in corso';
 			}
-			if (manual) show('Controllo aggiornamenti…', false);
+			if (manual) show('Controllo aggiornamenti...', false);
 			await current.update();
 			if (current.waiting) {
 				show('Nuova versione pronta.', true);

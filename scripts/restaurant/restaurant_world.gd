@@ -32,6 +32,7 @@ var waiting_reservations: Dictionary = {}
 var staff_standby_reservations: Dictionary = {}
 var corridor_reservations: Dictionary = {}
 var agent_corridor_reservations: Dictionary = {}
+var agent_motion_intents: Dictionary = {}
 var customer_root: Node3D
 var object_root: Node3D
 var preview_root: Node3D
@@ -54,6 +55,8 @@ var _validation_ignored_edge_uid := ""
 var _loading_layout := false
 var _blocked_edge_uids: Dictionary = {}
 var _grid_path_cache: Dictionary = {}
+var _corridor_key_cache: Dictionary = {}
+var _traffic_epoch := 0
 var _path_cache_suspended := false
 var cleanup_root: Node3D
 var spill_records: Dictionary = {}
@@ -80,6 +83,7 @@ func _ready() -> void:
 
 
 func _process(delta: float) -> void:
+	_traffic_epoch += 1
 	if camera_rig:
 		var long_press: Variant = camera_rig.consume_long_press()
 		if long_press != null:
@@ -320,6 +324,7 @@ func load_layout() -> void:
 	staff_standby_reservations.clear()
 	corridor_reservations.clear()
 	agent_corridor_reservations.clear()
+	agent_motion_intents.clear()
 	_loading_layout = true
 	floor_tiles.clear()
 	for y: int in range(LOT_REGION.position.y, LOT_REGION.end.y):
@@ -995,6 +1000,7 @@ func _rebuild_astar() -> void:
 		if is_instance_valid(object) and is_edge_placement(object.definition) and bool(object.definition.get("blocking", true)):
 			_blocked_edge_uids[edge_key(object.grid_cell, object.rotation_steps)] = object.uid
 	_grid_path_cache.clear()
+	_corridor_key_cache.clear()
 	navigation_revision += 1
 	for agent: AnimatedAgent in navigation_agents.duplicate():
 		if not is_instance_valid(agent) or agent.is_queued_for_deletion() or not agent.is_collision_enabled():
@@ -1250,9 +1256,16 @@ func register_navigation_agent(agent: AnimatedAgent) -> void:
 
 func unregister_navigation_agent(agent: AnimatedAgent) -> void:
 	navigation_agents.erase(agent)
+	agent_motion_intents.erase(agent.get_instance_id())
 	release_waiting_position(agent)
 	staff_standby_reservations.erase(agent.get_instance_id())
 	_release_agent_corridor(agent)
+
+
+func finish_agent_navigation(agent: AnimatedAgent) -> void:
+	var key := String(agent_corridor_reservations.get(agent.get_instance_id(), ""))
+	if key.is_empty() or not _agent_is_inside_corridor(agent, key):
+		_release_agent_corridor(agent)
 
 
 func can_agent_advance_route(agent: AnimatedAgent, route: PackedVector3Array, route_index: int) -> bool:
@@ -1281,7 +1294,7 @@ func can_agent_advance_route(agent: AnimatedAgent, route: PackedVector3Array, ro
 		candidates = [agent]
 	var winner: AnimatedAgent = candidates[0]
 	for candidate: AnimatedAgent in candidates:
-		if candidate.navigation_priority < winner.navigation_priority or (candidate.navigation_priority == winner.navigation_priority and candidate.get_instance_id() < winner.get_instance_id()):
+		if _agent_has_right_of_way(candidate, winner, requested_key):
 			winner = candidate
 	var owner_id := int(corridor_reservations.get(requested_key, 0))
 	var owner := instance_from_id(owner_id) as AnimatedAgent if owner_id != 0 else null
@@ -1292,6 +1305,41 @@ func can_agent_advance_route(agent: AnimatedAgent, route: PackedVector3Array, ro
 	corridor_reservations[requested_key] = agent_id
 	agent_corridor_reservations[agent_id] = requested_key
 	return true
+
+
+func _agent_has_right_of_way(candidate: AnimatedAgent, incumbent: AnimatedAgent, corridor_key: String = "") -> bool:
+	if candidate == incumbent:
+		return false
+	var candidate_inside := not corridor_key.is_empty() and _agent_is_inside_corridor(candidate, corridor_key)
+	var incumbent_inside := not corridor_key.is_empty() and _agent_is_inside_corridor(incumbent, corridor_key)
+	if candidate_inside != incumbent_inside:
+		return candidate_inside
+	# When two bodies somehow start inside the same passage (for example after a
+	# layout reload), let the one nearest its forward exit clear first.
+	if candidate_inside:
+		var candidate_remaining := _remaining_corridor_steps(candidate, corridor_key)
+		var incumbent_remaining := _remaining_corridor_steps(incumbent, corridor_key)
+		if candidate_remaining != incumbent_remaining:
+			return candidate_remaining < incumbent_remaining
+	if candidate.navigation_priority != incumbent.navigation_priority:
+		return candidate.navigation_priority < incumbent.navigation_priority
+	# Route tickets are monotonically assigned by move_to(). FIFO is stable
+	# across frame/process order and prevents the same low instance id from
+	# winning every successive bottleneck forever.
+	if candidate.route_ticket != incumbent.route_ticket:
+		return candidate.route_ticket < incumbent.route_ticket
+	return candidate.get_instance_id() < incumbent.get_instance_id()
+
+
+func _remaining_corridor_steps(agent: AnimatedAgent, corridor_key: String) -> int:
+	var remaining := 0
+	for index: int in range(agent.path_index, agent.path.size()):
+		if _corridor_key(world_to_cell(agent.path[index])) != corridor_key:
+			if remaining > 0:
+				break
+			continue
+		remaining += 1
+	return remaining
 
 
 func _upcoming_corridor_key(agent: AnimatedAgent, route: PackedVector3Array, route_index: int) -> String:
@@ -1307,7 +1355,10 @@ func _upcoming_corridor_key(agent: AnimatedAgent, route: PackedVector3Array, rou
 
 
 func _corridor_key(start: Vector2i) -> String:
+	if _corridor_key_cache.has(start):
+		return String(_corridor_key_cache[start])
 	if not _is_narrow_corridor_cell(start):
+		_corridor_key_cache[start] = ""
 		return ""
 	var cells: Array[Vector2i] = [start]
 	var visited: Dictionary = {start: true}
@@ -1325,7 +1376,13 @@ func _corridor_key(start: Vector2i) -> String:
 	var parts: PackedStringArray = []
 	for cell: Vector2i in cells:
 		parts.append("%d,%d" % [cell.x, cell.y])
-	return ";".join(parts)
+	var key := ";".join(parts)
+	# Corridor topology only changes when the navigation graph is rebuilt.
+	# Caching the connected component avoids a flood-fill for every agent, on
+	# every rendered frame -- a particularly expensive hot path in WebGL.
+	for cell: Vector2i in cells:
+		_corridor_key_cache[cell] = key
+	return key
 
 
 func _is_narrow_corridor_cell(cell: Vector2i) -> bool:
@@ -1361,6 +1418,130 @@ func _cleanup_corridor_reservations() -> void:
 		if owner == null or not is_instance_valid(owner) or owner.is_queued_for_deletion():
 			corridor_reservations.erase(key)
 			agent_corridor_reservations.erase(owner_id)
+
+
+func agent_is_inside_contested_corridor(agent: AnimatedAgent) -> bool:
+	var key := _corridor_key(world_to_cell(agent.global_position))
+	if key.is_empty():
+		return false
+	for other: AnimatedAgent in navigation_agents:
+		if other == agent or not is_instance_valid(other) or other.is_queued_for_deletion() or not other.is_collision_enabled():
+			continue
+		if _agent_is_inside_corridor(other, key) or (other.navigation_active and _upcoming_corridor_key(other, other.path, other.path_index) == key):
+			return true
+	return false
+
+
+func find_agent_recovery_detour(agent: AnimatedAgent, final_destination: Vector3) -> Dictionary:
+	var blocker := _nearest_conflicting_agent(agent)
+	if blocker == null:
+		return {}
+	var corridor_key := _corridor_key(world_to_cell(agent.global_position))
+	if corridor_key.is_empty():
+		corridor_key = _upcoming_corridor_key(agent, agent.path, agent.path_index)
+	# Only the yielding participant leaves the main route. The winner remains
+	# predictable, so two agents never mirror one another into the same alcove.
+	if not _agent_has_right_of_way(blocker, agent, corridor_key):
+		return {}
+	var from_cell := _nearest_open_cell(world_to_cell(agent.global_position))
+	var candidates: Array[Vector2i] = []
+	if not corridor_key.is_empty() and _agent_is_inside_corridor(agent, corridor_key):
+		var corridor_cells := _decode_corridor_cells(corridor_key)
+		var corridor_lookup: Dictionary = {}
+		for cell: Vector2i in corridor_cells:
+			corridor_lookup[cell] = true
+		for cell: Vector2i in corridor_cells:
+			for offset: Vector2i in [Vector2i.RIGHT, Vector2i.DOWN, Vector2i.LEFT, Vector2i.UP]:
+				var candidate := cell + offset
+				if corridor_lookup.has(candidate) or candidates.has(candidate):
+					continue
+				if astar.is_in_boundsv(candidate) and not astar.is_point_solid(candidate) and not _wall_blocks_step(cell, candidate):
+					candidates.append(candidate)
+	else:
+		for radius: int in range(1, 4):
+			for y: int in range(-radius, radius + 1):
+				for x: int in range(-radius, radius + 1):
+					if absi(x) != radius and absi(y) != radius:
+						continue
+					candidates.append(from_cell + Vector2i(x, y))
+	var best_cell := Vector2i(99999, 99999)
+	var best_score := INF
+	var blocker_cell := world_to_cell(blocker.global_position)
+	for candidate: Vector2i in candidates:
+		if not astar.is_in_boundsv(candidate) or astar.is_point_solid(candidate) or _is_narrow_corridor_cell(candidate):
+			continue
+		if _open_neighbor_count(candidate) < 3:
+			continue
+		var candidate_world := cell_to_world(candidate)
+		if not _agent_point_is_open(candidate_world, agent.agent_radius * 0.9):
+			continue
+		var first_leg := _grid_path(from_cell, candidate)
+		if first_leg.is_empty() or _grid_path(candidate, _nearest_open_cell(world_to_cell(final_destination))).is_empty():
+			continue
+		var blocker_clearance := candidate.distance_to(blocker_cell)
+		if blocker_clearance < 1.5:
+			continue
+		var score := float(first_leg.size()) * 2.4 + candidate.distance_to(world_to_cell(final_destination)) * 0.08 - blocker_clearance * 0.75 - float(_open_neighbor_count(candidate)) * 0.3
+		if score < best_score:
+			best_score = score
+			best_cell = candidate
+	if best_cell.x == 99999:
+		return {}
+	var first_cells := _grid_path(from_cell, best_cell)
+	var first_world := PackedVector3Array()
+	for cell: Vector2i in first_cells:
+		first_world.append(cell_to_world(cell))
+	var actual_start := Vector3(agent.global_position.x, 0.0, agent.global_position.z)
+	if first_world.size() > 1 and can_agent_move(actual_start, first_world[1], agent.agent_radius * 0.9):
+		first_world.remove_at(0)
+	var continuation := find_path(cell_to_world(best_cell), final_destination, agent)
+	if continuation.is_empty():
+		return {}
+	while not continuation.is_empty() and not first_world.is_empty() and continuation[0].distance_to(first_world[first_world.size() - 1]) <= 0.05:
+		continuation.remove_at(0)
+	var release_index := first_world.size()
+	for point: Vector3 in continuation:
+		first_world.append(point)
+	return {"path": first_world, "release_index": release_index, "pullout": cell_to_world(best_cell)}
+
+
+func _nearest_conflicting_agent(agent: AnimatedAgent) -> AnimatedAgent:
+	var own_corridor := _corridor_key(world_to_cell(agent.global_position))
+	if own_corridor.is_empty():
+		own_corridor = _upcoming_corridor_key(agent, agent.path, agent.path_index)
+	var best: AnimatedAgent
+	var best_score := INF
+	var forward := Vector3.ZERO
+	if agent.path_index < agent.path.size():
+		forward = agent.global_position.direction_to(agent.path[agent.path_index])
+	for other: AnimatedAgent in navigation_agents:
+		if other == agent or not is_instance_valid(other) or other.is_queued_for_deletion() or not other.is_collision_enabled():
+			continue
+		var other_corridor := _corridor_key(world_to_cell(other.global_position))
+		if other_corridor.is_empty() and other.navigation_active:
+			other_corridor = _upcoming_corridor_key(other, other.path, other.path_index)
+		var same_corridor := not own_corridor.is_empty() and own_corridor == other_corridor
+		var distance := Vector2(agent.global_position.x, agent.global_position.z).distance_to(Vector2(other.global_position.x, other.global_position.z))
+		if not same_corridor and distance > (agent.agent_radius + other.agent_radius) * 4.2:
+			continue
+		if not same_corridor and forward.length_squared() > 0.001:
+			var toward := agent.global_position.direction_to(other.global_position)
+			if forward.dot(toward) < 0.15:
+				continue
+		var score := distance - (12.0 if same_corridor else 0.0)
+		if score < best_score:
+			best_score = score
+			best = other
+	return best
+
+
+func _decode_corridor_cells(key: String) -> Array[Vector2i]:
+	var result: Array[Vector2i] = []
+	for encoded_cell: String in key.split(";", false):
+		var coordinates := encoded_cell.split(",", false)
+		if coordinates.size() == 2:
+			result.append(Vector2i(int(coordinates[0]), int(coordinates[1])))
+	return result
 
 
 func can_agent_move(from_position: Vector3, to_position: Vector3, radius: float = 0.34) -> bool:
@@ -1420,8 +1601,10 @@ func _agent_point_is_open(point: Vector3, radius: float) -> bool:
 
 func compute_agent_velocity(agent: AnimatedAgent, desired_velocity: Vector3) -> Vector3:
 	if desired_velocity.length_squared() <= 0.0001:
+		agent_motion_intents[agent.get_instance_id()] = {"velocity": Vector3.ZERO, "epoch": _traffic_epoch}
 		return Vector3.ZERO
 	var result := desired_velocity
+	var desired_direction := desired_velocity.normalized()
 	for other: AnimatedAgent in navigation_agents.duplicate():
 		if other == agent or not is_instance_valid(other) or other.is_queued_for_deletion() or not other.is_collision_enabled():
 			continue
@@ -1437,25 +1620,73 @@ func compute_agent_velocity(agent: AnimatedAgent, desired_velocity: Vector3) -> 
 		if distance == INF:
 			continue
 		var separation := agent.agent_radius + other.agent_radius + 0.14
-		if distance > separation * 3.2:
+		if distance > separation * 4.0:
 			continue
 		var away := offset.normalized() if distance > 0.01 else Vector3.RIGHT.rotated(Vector3.UP, float(agent.get_instance_id() % 4) * PI * 0.5)
+		var other_intent: Dictionary = agent_motion_intents.get(other.get_instance_id(), {})
+		var other_velocity := other.velocity
+		if int(other_intent.get("epoch", -99)) >= _traffic_epoch - 2:
+			other_velocity = Vector3(other_intent.get("velocity", other_velocity))
+		other_velocity.y = 0.0
+		var relative_velocity := result - other_velocity
+		var closest_time := 0.0
+		if relative_velocity.length_squared() > 0.0001:
+			closest_time = clampf(-offset.dot(relative_velocity) / relative_velocity.length_squared(), 0.0, 0.82)
+		var predicted_offset := offset + relative_velocity * closest_time
+		var predicted_distance := predicted_offset.length()
+		var toward_other := -away
+		var approaching := desired_direction.dot(toward_other) > 0.12
+		var collision_risk := predicted_distance < separation * 1.22 and (approaching or distance < separation * 1.45)
+		if not collision_risk and distance >= separation * 1.5:
+			continue
+		var shared_corridor := _corridor_key(world_to_cell(agent.global_position))
+		if shared_corridor.is_empty() or not _agent_is_inside_corridor(other, shared_corridor):
+			shared_corridor = ""
+		var agent_yields := _agent_has_right_of_way(other, agent, shared_corridor) or not other.navigation_active
+		# Guests going to/from seats and the exit own the pedestrian lane. A cook
+		# or waiter can take a half-step aside instead of forming a human wall.
 		if agent is EmployeeAgent and other is CustomerPersonAgent:
 			var party := (other as CustomerPersonAgent).party
 			if party != null and String(party.get("state")) in ["admitting", "walking_to_table", "seating", "leaving"]:
-				result += away * agent.movement_speed * 1.8
-		if distance < separation * 1.35:
-			result += away * agent.movement_speed * (separation * 1.35 - distance) / maxf(separation, 0.01) * 2.2
-		var desired_direction := desired_velocity.normalized()
-		var toward_other := -away
-		if desired_direction.dot(toward_other) > 0.45 and distance < separation * 2.8:
-			var side_sign := -1.0 if agent.get_instance_id() < other.get_instance_id() else 1.0
-			var passing_side := Vector3(desired_direction.z, 0.0, -desired_direction.x) * side_sign
-			result += passing_side * agent.movement_speed * 0.82
-			var agent_yields := agent.navigation_priority > other.navigation_priority or (agent.navigation_priority == other.navigation_priority and agent.get_instance_id() > other.get_instance_id())
-			if agent_yields or not other.navigation_active:
-				result *= 0.42
-	return result.limit_length(agent.movement_speed)
+				agent_yields = true
+		var other_direction := other_velocity.normalized() if other_velocity.length_squared() > 0.01 else Vector3.ZERO
+		var head_on := other_direction.length_squared() > 0.0 and desired_direction.dot(other_direction) < -0.38
+		var passing_side := _available_passing_side(agent, desired_direction)
+		if head_on:
+			# Everyone takes their own right-hand side. Opposite headings therefore
+			# produce opposite world-space sidesteps; the former id-based sign sent
+			# both participants toward the same side and caused the visible dance.
+			if agent_yields:
+				result = result * 0.32 + passing_side * agent.movement_speed * 0.92
+			else:
+				result = result * 0.82 + passing_side * agent.movement_speed * 0.42
+		elif approaching:
+			if agent_yields:
+				result = result * 0.28 + passing_side * agent.movement_speed * 0.62
+			else:
+				result += passing_side * agent.movement_speed * 0.22
+		elif desired_direction.dot(other_direction) > 0.55 and distance < separation * 2.0:
+			# Queue/following motion stays in lane: slow down instead of oscillating
+			# around the person ahead.
+			result *= clampf((distance - separation * 0.92) / maxf(separation, 0.01), 0.12, 0.72)
+		if distance < separation * 1.28:
+			result += away * agent.movement_speed * (separation * 1.28 - distance) / maxf(separation, 0.01) * 1.8
+	result = result.limit_length(agent.movement_speed)
+	agent_motion_intents[agent.get_instance_id()] = {"velocity": result, "epoch": _traffic_epoch}
+	return result
+
+
+func _available_passing_side(agent: AnimatedAgent, forward: Vector3) -> Vector3:
+	var right := Vector3(forward.z, 0.0, -forward.x).normalized()
+	if right.length_squared() <= 0.001:
+		return Vector3.RIGHT
+	var probe_distance := maxf(agent.agent_radius * 1.25, 0.42)
+	var start := agent.global_position
+	if can_agent_move(start, start + right * probe_distance, agent.agent_radius * 0.82) and not agent.test_move(agent.global_transform, right * probe_distance):
+		return right
+	if can_agent_move(start, start - right * probe_distance, agent.agent_radius * 0.82) and not agent.test_move(agent.global_transform, -right * probe_distance):
+		return -right
+	return right
 
 
 func find_safe_agent_position(preferred: Vector3, agent: AnimatedAgent = null) -> Vector3:
@@ -1998,17 +2229,21 @@ func adopt_dirty_table(_customer: Node, table_uid: String, source_dishes: Array)
 	if table_uid.is_empty() or not placed_objects.has(table_uid):
 		return
 	var dirty_nodes: Array[Node3D] = []
+	var container_kinds: Array[String] = []
 	for source: Node3D in source_dishes:
 		if source == null or not is_instance_valid(source):
 			continue
-		var source_transform := source.global_transform
+		var source_position := source.global_position
+		var source_rotation := source.global_rotation
+		var kind := String(source.get_meta("consumption_container", "plate"))
 		source.queue_free()
-		var dirty := ModelFactory.instantiate_model("res://assets/equipment/plate_dirty.gltf", 0.55)
-		ModelFactory.align_visual_to_grid_origin(dirty)
+		var dirty := FoodVisualFactory.instantiate_canonical_container(kind, true)
+		dirty.name = "DirtyContainer_%02d" % dirty_nodes.size()
 		cleanup_root.add_child(dirty)
-		dirty.global_transform = source_transform
-		ModelFactory.set_shadow_casting(dirty, GeometryInstance3D.SHADOW_CASTING_SETTING_OFF)
+		dirty.global_position = source_position
+		dirty.global_rotation = source_rotation
 		dirty_nodes.append(dirty)
+		container_kinds.append(String(dirty.get_meta("canonical_container_kind", "plate")))
 	if dirty_nodes.is_empty():
 		return
 	var table_object := placed_objects.get(table_uid) as PlacedObject
@@ -2017,6 +2252,7 @@ func adopt_dirty_table(_customer: Node, table_uid: String, source_dishes: Array)
 	table_dirty_records[table_uid] = {
 		"table_uid": table_uid,
 		"nodes": dirty_nodes,
+		"container_kinds": container_kinds,
 		"state": "dirty",
 		"service_position": service_position
 	}
@@ -2024,7 +2260,8 @@ func adopt_dirty_table(_customer: Node, table_uid: String, source_dishes: Array)
 		"table_uid": table_uid,
 		"reservation_key": "dirty:%s" % table_uid,
 		"secondary_target": sink_position,
-		"carry_model": "res://assets/equipment/plate_dirty.gltf"
+		"carry_model": FoodVisualFactory.canonical_container_path(container_kinds[0], true),
+		"container_kinds": container_kinds
 	})
 	if not task.is_empty():
 		table_dirty_records[table_uid].task_id = String(task.id)

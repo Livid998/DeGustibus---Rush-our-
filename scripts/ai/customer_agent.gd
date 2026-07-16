@@ -716,12 +716,8 @@ func _add_support_container(dish: Node3D, recipe_id: String, make_visible: bool)
 		existing.visible = make_visible
 		return
 	var kind := FoodVisualFactory.consumption_container(recipe_id)
-	var model_path := "res://assets/equipment/bowl.gltf" if kind == "bowl" else "res://assets/equipment/plate.gltf"
-	var scale_factor := 0.58 if kind == "bowl" else 0.55
-	var container := ModelFactory.instantiate_model(model_path, scale_factor)
+	var container := FoodVisualFactory.instantiate_canonical_container(kind, false)
 	container.name = "StableContainer"
-	ModelFactory.align_visual_to_grid_origin(container)
-	ModelFactory.set_shadow_casting(container, GeometryInstance3D.SHADOW_CASTING_SETTING_OFF)
 	container.visible = make_visible
 	dish.add_child(container)
 	dish.move_child(container, 0)
@@ -738,12 +734,8 @@ func _replace_dish_with_dirty(order_id: String) -> void:
 		dish.remove_child(child)
 		child.queue_free()
 	var kind := String(dish.get_meta("consumption_container", "plate"))
-	var dirty_path := "res://assets/equipment/bowl_dirty.gltf" if kind == "bowl" else "res://assets/equipment/plate_dirty.gltf"
-	var scale_factor := 0.58 if kind == "bowl" else 0.55
-	var dirty := ModelFactory.instantiate_model(dirty_path, scale_factor)
+	var dirty := FoodVisualFactory.instantiate_canonical_container(kind, true)
 	dirty.name = "DirtyContainer"
-	ModelFactory.align_visual_to_grid_origin(dirty)
-	ModelFactory.set_shadow_casting(dirty, GeometryInstance3D.SHADOW_CASTING_SETTING_OFF)
 	dish.add_child(dirty)
 	_dish_consumption_stage[order_id] = 3
 

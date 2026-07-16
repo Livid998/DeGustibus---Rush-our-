@@ -442,12 +442,15 @@ func _show_task_prop(working_tool: bool = false) -> void:
 		model_path = String(active_task.get("payload", {}).get("carry_model", ""))
 	if action == "serve" and not working_tool:
 		var recipe_id := _serve_recipe_id()
-		_task_prop = FoodVisualFactory.instantiate_recipe_dish(recipe_id, 0.72)
+		_task_prop = FoodVisualFactory.instantiate_canonical_serving(recipe_id)
 		_task_prop.name = "CarriedDish"
 		_task_prop_anchor.add_child(_task_prop)
 		_task_prop.position = Vector3(0.0, 0.045, 0.0)
 		_task_prop_is_tool = false
 		_update_carried_prop_anchor()
+		return
+	if action == "collect_dishes" and not working_tool:
+		_show_dirty_dish_stack()
 		return
 	if model_path.is_empty():
 		match action:
@@ -455,19 +458,23 @@ func _show_task_prop(working_tool: bool = false) -> void:
 				model_path = "res://assets/cleaning/Tool_Mop.glb"
 			"wash_dishes":
 				model_path = "res://assets/cleaning/Cleaning_Sponge.glb"
-			"collect_dishes":
-				model_path = "res://assets/equipment/plate.gltf"
 	if model_path.is_empty() or not ResourceLoader.exists(model_path):
 		return
 	var scale_factor := 0.30 if working_tool else 1.0
 	if action == "wash_dishes":
 		scale_factor = 0.42
-	elif action == "collect_dishes":
-		scale_factor = 0.5
-	_task_prop = ModelFactory.instantiate_model(model_path, scale_factor)
-	_task_prop.name = "ActiveTaskProp"
-	ModelFactory.align_visual_to_grid_origin(_task_prop)
 	_task_prop_is_tool = working_tool or action in ["clean_spill", "clean_floor", "wash_dishes"]
+	var prop_visual := ModelFactory.instantiate_model(model_path, scale_factor)
+	if _task_prop_is_tool:
+		_task_prop = Node3D.new()
+		_task_prop.name = "ActiveTaskProp"
+		prop_visual.name = "HeldToolVisual"
+		_task_prop.add_child(prop_visual)
+		_align_tool_to_hand(prop_visual)
+	else:
+		_task_prop = prop_visual
+		_task_prop.name = "ActiveTaskProp"
+		ModelFactory.align_visual_to_grid_origin(_task_prop)
 	var anchor := _hand_prop_anchor if _task_prop_is_tool else _task_prop_anchor
 	anchor.add_child(_task_prop)
 	if _task_prop_is_tool:
@@ -487,7 +494,7 @@ func _show_kitchen_carry_prop() -> void:
 	var parts := FoodVisualFactory.parts_for_task(active_task, "input")
 	if parts.is_empty():
 		return
-	var carried: Array[Dictionary] = [{"model":"res://assets/equipment/plate.gltf", "scale":0.46, "role":"container", "offset":[0.0,0.0,0.0]}]
+	var carried: Array[Dictionary] = []
 	for part: Dictionary in parts:
 		var copy := part.duplicate(true)
 		copy.scale = float(copy.get("scale", 0.4)) * 0.68
@@ -498,12 +505,47 @@ func _show_kitchen_carry_prop() -> void:
 		offset.y += 0.10
 		copy.offset = [offset.x, offset.y, offset.z]
 		carried.append(copy)
-	_task_prop = FoodVisualFactory.instantiate_parts(carried, 1.0, 7)
+	_task_prop = Node3D.new()
 	_task_prop.name = "CarriedPreparation"
+	var container := FoodVisualFactory.instantiate_canonical_container("plate", false)
+	container.name = "StableContainer"
+	_task_prop.add_child(container)
+	var carried_food := FoodVisualFactory.instantiate_parts(carried, 1.0, 7)
+	carried_food.name = "FoodContent"
+	_task_prop.add_child(carried_food)
 	_task_prop_anchor.add_child(_task_prop)
 	_task_prop.position = Vector3(0.0, 0.045, 0.0)
 	_task_prop_is_tool = false
 	_update_carried_prop_anchor()
+
+
+func _show_dirty_dish_stack() -> void:
+	_task_prop = Node3D.new()
+	_task_prop.name = "CarriedDirtyDishes"
+	var payload: Dictionary = active_task.get("payload", {})
+	var kinds: Array = payload.get("container_kinds", [])
+	if kinds.is_empty():
+		kinds = [String(payload.get("container_kind", "plate"))]
+	for index: int in mini(kinds.size(), 4):
+		var dirty := FoodVisualFactory.instantiate_canonical_container(String(kinds[index]), true)
+		dirty.name = "DirtyContainer_%02d" % index
+		dirty.position.y = float(index) * 0.035
+		_task_prop.add_child(dirty)
+	_task_prop_anchor.add_child(_task_prop)
+	_task_prop.position = Vector3(0.0, 0.045, 0.0)
+	_task_prop_is_tool = false
+	_update_carried_prop_anchor()
+
+
+func _align_tool_to_hand(tool: Node3D) -> void:
+	# KayKit hand tools are authored flat along local X. Keep their working end
+	# clear of the fist and place the handle end at the bone instead of grounding
+	# the mesh (ground alignment is only meaningful for furniture).
+	var bounds := ModelFactory.calculate_visual_bounds(tool, true)
+	if bounds.size.is_zero_approx():
+		return
+	var centered := bounds.get_center()
+	tool.position += Vector3(-centered.x + bounds.size.x * 0.44, -centered.y, -centered.z)
 
 
 func _serve_recipe_id() -> String:

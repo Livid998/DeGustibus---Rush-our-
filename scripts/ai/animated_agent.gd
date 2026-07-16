@@ -2,6 +2,11 @@ class_name AnimatedAgent
 extends CharacterBody3D
 
 const CHARACTER_FOOT_LIFT := 0.08
+const TRAFFIC_REPATH_INTERVAL := 0.85
+const RECOVERY_PROBE_TIME := 1.65
+const HARD_NAVIGATION_TIMEOUT := 12.0
+
+static var _next_route_ticket := 1
 
 const SKIN_TONES: Array[Color] = [
 	Color("e3b0ad"),
@@ -34,8 +39,15 @@ var stuck_time := 0.0
 var total_stuck_time := 0.0
 var repath_cooldown := 0.0
 var traffic_wait_time := 0.0
+var traffic_denials := 0
+var route_ticket := 0
+var recovery_count := 0
 var _collision_shape: CollisionShape3D
 var _animation_resolution_cache: Dictionary = {}
+var _traffic_repath_clock := 0.0
+var _corridor_bypass_path_index := -1
+var _traffic_pullout_active := false
+var _traffic_pullout_position := Vector3.ZERO
 
 
 func configure_navigation(radius: float = 0.40, priority: int = 1) -> void:
@@ -243,12 +255,18 @@ func resolve_animation(player: AnimationPlayer, requested: String) -> StringName
 
 func move_to(target: Vector3) -> bool:
 	destination = Vector3(target.x, 0.0, target.z)
+	route_ticket = _next_route_ticket
+	_next_route_ticket += 1
 	navigation_failed = false
 	set_collision_enabled(true)
 	stuck_time = 0.0
 	total_stuck_time = 0.0
 	repath_cooldown = 0.0
 	traffic_wait_time = 0.0
+	traffic_denials = 0
+	_traffic_repath_clock = 0.0
+	_corridor_bypass_path_index = -1
+	_traffic_pullout_active = false
 	if _flat_distance(global_position, destination) <= arrival_tolerance:
 		navigation_active = false
 		path.clear()
@@ -296,22 +314,34 @@ func advance_path(delta: float, carry: bool = false) -> bool:
 			return false
 	_skip_reached_waypoints()
 	if path_index >= path.size():
-		_complete_navigation()
-		return true
-	if world != null and not world.can_agent_advance_route(self, path, path_index):
+		return _complete_navigation()
+	var corridor_check_required := _corridor_bypass_path_index < 0 or path_index >= _corridor_bypass_path_index
+	if corridor_check_required and world != null and not world.can_agent_advance_route(self, path, path_index):
 		# Waiting outside a reserved one-person corridor is intentional, not a
 		# navigation failure. After a short pause, however, ask the traffic-aware
 		# planner for a genuine alternate route instead of queueing unnecessarily.
 		velocity = velocity.move_toward(Vector3.ZERO, movement_acceleration * delta)
 		stuck_time = 0.0
 		traffic_wait_time += delta
-		if traffic_wait_time >= 0.45 and repath_cooldown <= 0.0:
-			traffic_wait_time = 0.0
+		traffic_denials += 1
+		_traffic_repath_clock += delta
+		var installed_detour := false
+		var already_holding_clear := _traffic_pullout_active and _flat_distance(global_position, _traffic_pullout_position) <= 0.38
+		if traffic_wait_time >= 0.65 and not already_holding_clear:
+			installed_detour = _try_install_recovery_detour()
+		if not installed_detour and _traffic_repath_clock >= TRAFFIC_REPATH_INTERVAL and repath_cooldown <= 0.0:
+			_traffic_repath_clock = 0.0
 			repath_cooldown = 0.35
 			_repath()
 		play_animation("Idle")
 		return false
 	traffic_wait_time = 0.0
+	traffic_denials = 0
+	_traffic_repath_clock = 0.0
+	if corridor_check_required:
+		_traffic_pullout_active = false
+	if _corridor_bypass_path_index >= 0 and path_index >= _corridor_bypass_path_index:
+		_corridor_bypass_path_index = -1
 	var target := path[path_index]
 	var flat_target := Vector3(target.x, global_position.y, target.z)
 	var distance_to_target := global_position.distance_to(flat_target)
@@ -334,16 +364,23 @@ func advance_path(delta: float, carry: bool = false) -> bool:
 		stuck_time += delta
 		total_stuck_time += delta
 	else:
-		stuck_time = maxf(stuck_time - delta * 1.8, 0.0)
-		total_stuck_time = maxf(total_stuck_time - delta * 0.35, 0.0)
+		stuck_time = maxf(stuck_time - delta * 3.0, 0.0)
+		# Successful forward travel must clear old congestion debt quickly. The
+		# previous slow decay could fail a perfectly healthy long route after a
+		# handful of unrelated, short waits.
+		total_stuck_time = maxf(total_stuck_time - delta * 4.0, 0.0)
 	if stuck_time >= 0.7 and repath_cooldown <= 0.0:
 		stuck_time = 0.0
 		repath_cooldown = 0.35
 		_repath()
-	if total_stuck_time >= 5.0:
+	if total_stuck_time >= RECOVERY_PROBE_TIME:
+		_try_install_recovery_detour()
+	if total_stuck_time >= HARD_NAVIGATION_TIMEOUT:
 		navigation_failed = true
 		navigation_active = false
 		velocity = Vector3.ZERO
+		if world != null:
+			world.finish_agent_navigation(self)
 		play_animation("Idle")
 		return false
 	if direction.length_squared() > 0.001:
@@ -356,16 +393,18 @@ func advance_path(delta: float, carry: bool = false) -> bool:
 		_update_walk_playback(progress / maxf(delta, 0.001))
 	_skip_reached_waypoints()
 	if path_index >= path.size():
-		_complete_navigation()
-		return true
+		return _complete_navigation()
 	return false
 
 
 func _move_with_collisions(motion: Vector3) -> void:
-	var remaining := motion
-	var step_count := maxi(ceili(remaining.length() / 0.24), 1)
-	var step := remaining / float(step_count)
+	var step_count := maxi(ceili(motion.length() / 0.24), 1)
+	var base_step := motion / float(step_count)
 	for _index: int in step_count:
+		# Each sub-step starts from the requested route vector. A successful
+		# diagonal dodge is local to that contact; carrying the rotated vector into
+		# every remaining sub-step made characters drift sideways after passing.
+		var step := base_step
 		if step.length_squared() <= 0.000001:
 			break
 		if world != null and not world.can_agent_step(self, global_position, global_position + step):
@@ -375,7 +414,7 @@ func _move_with_collisions(motion: Vector3) -> void:
 			# walking straight into the other capsule.
 			for angle: float in [-PI * 0.25, PI * 0.25, -PI * 0.5, PI * 0.5]:
 				var detour := step.rotated(Vector3.UP, angle)
-				if world.can_agent_step(self, global_position, global_position + detour):
+				if world.can_agent_step(self, global_position, global_position + detour) and not test_move(global_transform, detour):
 					step = detour
 					detour_found = true
 					break
@@ -389,19 +428,50 @@ func _move_with_collisions(motion: Vector3) -> void:
 				move_and_collide(slide)
 
 
+func _try_install_recovery_detour() -> bool:
+	if world == null or not navigation_active or repath_cooldown > 0.0:
+		return false
+	var recovery: Dictionary = world.find_agent_recovery_detour(self, destination)
+	var recovery_path: PackedVector3Array = recovery.get("path", PackedVector3Array())
+	if recovery_path.is_empty():
+		return false
+	path = recovery_path
+	path_index = 0
+	navigation_revision = world.navigation_revision
+	_corridor_bypass_path_index = int(recovery.get("release_index", -1))
+	_traffic_pullout_position = Vector3(recovery.get("pullout", global_position))
+	_traffic_pullout_active = true
+	_skip_reached_waypoints()
+	stuck_time = 0.0
+	total_stuck_time = 0.0
+	traffic_wait_time = 0.0
+	traffic_denials = 0
+	_traffic_repath_clock = 0.0
+	repath_cooldown = 0.55
+	recovery_count += 1
+	return path_index < path.size()
+
+
 func _skip_reached_waypoints() -> void:
 	while path_index < path.size() and _flat_distance(global_position, path[path_index]) <= arrival_tolerance:
 		path_index += 1
 
 
-func _complete_navigation() -> void:
+func _complete_navigation() -> bool:
 	navigation_active = false
 	navigation_failed = false
 	velocity = Vector3.ZERO
+	_corridor_bypass_path_index = -1
+	_traffic_pullout_active = false
+	traffic_wait_time = 0.0
+	traffic_denials = 0
 	var exact_destination := Vector3(destination.x, 0.0, destination.z)
 	if world == null or world.can_agent_step(self, global_position, exact_destination):
 		global_position = exact_destination
+	if world != null:
+		world.finish_agent_navigation(self)
 	play_animation("Idle")
+	return true
 
 
 func set_collision_enabled(enabled: bool) -> void:
