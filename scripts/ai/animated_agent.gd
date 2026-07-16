@@ -54,7 +54,12 @@ func configure_navigation(radius: float = 0.40, priority: int = 1) -> void:
 	agent_radius = radius
 	navigation_priority = priority
 	collision_layer = 2
-	collision_mask = 3
+	# Furniture/walls remain physical (layer 1). Person-to-person motion is solved
+	# once, deterministically, by RestaurantWorld's reciprocal disc reservation.
+	# Running Godot capsule recovery on top of it made employees stop against a
+	# collider at its previous physics-frame transform and produced the visible
+	# shoving/jitter that moving customers (already mask 1) did not exhibit.
+	collision_mask = 1
 	if _collision_shape == null:
 		_collision_shape = CollisionShape3D.new()
 		_collision_shape.name = "AgentCollider"
@@ -360,9 +365,16 @@ func advance_path(delta: float, carry: bool = false) -> bool:
 	global_position.y = 0.0
 	var progress := _flat_distance(before, global_position)
 	var route_progress := distance_before - _flat_distance(global_position, flat_target)
-	if route_progress < minf(movement_speed * delta * 0.06, 0.02):
+	var minimum_visible_motion := minf(movement_speed * delta * 0.08, 0.016)
+	if route_progress < minf(movement_speed * delta * 0.06, 0.02) and progress < minimum_visible_motion:
 		stuck_time += delta
 		total_stuck_time += delta
+	elif route_progress < minf(movement_speed * delta * 0.06, 0.02):
+		# A reciprocal sidestep/back-off is useful traffic resolution, not a hard
+		# navigation stall. Keep a small debt so a true orbit eventually triggers a
+		# new route, but never time out an agent that is visibly clearing space.
+		stuck_time = maxf(stuck_time - delta * 2.0, 0.0)
+		total_stuck_time = maxf(total_stuck_time + delta * 0.12, 0.0)
 	else:
 		stuck_time = maxf(stuck_time - delta * 3.0, 0.0)
 		# Successful forward travel must clear old congestion debt quickly. The
@@ -409,27 +421,31 @@ func _move_with_collisions(motion: Vector3) -> void:
 			break
 		if world != null and not world.can_agent_step(self, global_position, global_position + step):
 			var detour_found := false
-			# Try the agent's right-hand lane first, then the opposite side. The
-			# diagonal candidates preserve forward progress instead of repeatedly
-			# walking straight into the other capsule.
-			for angle: float in [-PI * 0.25, PI * 0.25, -PI * 0.5, PI * 0.5]:
-				var detour := step.rotated(Vector3.UP, angle)
-				if world.can_agent_step(self, global_position, global_position + detour) and not test_move(global_transform, detour):
-					step = detour
-					detour_found = true
-					break
+			# Dynamic avoidance has already selected a reciprocal velocity. Do not
+			# replace it with a second, contradictory contact dodge. Alternate angles
+			# are only a fallback for a static grid edge discovered during the step.
+			if not world.can_agent_move(global_position, global_position + step, agent_radius):
+				for angle: float in [PI * 0.25, -PI * 0.25, PI * 0.5, -PI * 0.5]:
+					var detour := step.rotated(Vector3.UP, angle)
+					if world.can_agent_step(self, global_position, global_position + detour) and not test_move(global_transform, detour):
+						step = detour
+						detour_found = true
+						break
 			if not detour_found:
 				velocity = velocity.move_toward(Vector3.ZERO, movement_acceleration * 0.08)
 				break
 		var collision := move_and_collide(step)
 		if collision != null:
+			if collision.get_collider() is AnimatedAgent:
+				velocity = velocity.move_toward(Vector3.ZERO, movement_acceleration * 0.08)
+				break
 			var slide := collision.get_remainder().slide(collision.get_normal())
 			if slide.length_squared() > 0.00001 and (world == null or world.can_agent_step(self, global_position, global_position + slide)):
 				move_and_collide(slide)
 
 
 func _try_install_recovery_detour() -> bool:
-	if world == null or not navigation_active or repath_cooldown > 0.0:
+	if world == null or not navigation_active or repath_cooldown > 0.0 or _traffic_pullout_active:
 		return false
 	var recovery: Dictionary = world.find_agent_recovery_detour(self, destination)
 	var recovery_path: PackedVector3Array = recovery.get("path", PackedVector3Array())
@@ -453,8 +469,17 @@ func _try_install_recovery_detour() -> bool:
 
 
 func _skip_reached_waypoints() -> void:
-	while path_index < path.size() and _flat_distance(global_position, path[path_index]) <= arrival_tolerance:
-		path_index += 1
+	while path_index < path.size():
+		if _flat_distance(global_position, path[path_index]) <= arrival_tolerance:
+			path_index += 1
+			continue
+		# In open rooms a grid-centre waypoint is only a guide, not a mandatory
+		# occupancy slot. Skipping a nearby guide when the following segment is
+		# clear prevents agents from orbiting a colleague standing on that centre.
+		if world != null and world.can_agent_skip_open_waypoint(self, path, path_index):
+			path_index += 1
+			continue
+		break
 
 
 func _complete_navigation() -> bool:

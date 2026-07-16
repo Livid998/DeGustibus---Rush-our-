@@ -17,6 +17,8 @@ func _ready() -> void:
 	_test_opposing_corridor_traffic(main.world)
 	main.world.load_layout()
 	_test_crossing_traffic(main.world)
+	_test_funnel_queue(main.world)
+	_test_bidirectional_doorway(main.world)
 	_test_station_contention(main.world)
 	var result := "NAVIGATION ADVERSARIAL: %s | %d checks | %s\n" % ["PASS" if failures.is_empty() else "FAIL", checks, metrics]
 	for failure: String in failures:
@@ -34,6 +36,7 @@ func _stop_existing_agents(world: RestaurantWorld) -> void:
 			agent.shutdown_navigation()
 	world.navigation_agents.clear()
 	world.agent_motion_intents.clear()
+	world.agent_avoidance_memory.clear()
 	world.corridor_reservations.clear()
 	world.agent_corridor_reservations.clear()
 
@@ -49,6 +52,7 @@ func _configure_arena(world: RestaurantWorld, open_cells: Array[Vector2i]) -> vo
 	world.corridor_reservations.clear()
 	world.agent_corridor_reservations.clear()
 	world.agent_motion_intents.clear()
+	world.agent_avoidance_memory.clear()
 	world.navigation_revision += 1
 
 
@@ -157,6 +161,121 @@ func _test_crossing_traffic(world: RestaurantWorld) -> void:
 	_expect(minimum_clearance >= -0.04, "l'incrocio predittivo conserva lo spazio personale")
 	_expect(agents.all(func(agent: AnimatedAgent): return not agent.navigation_failed), "nessun agente fallisce durante una precedenza all'incrocio")
 	metrics.crossing_min_clearance = minimum_clearance
+	for agent: AnimatedAgent in agents:
+		agent.shutdown_navigation()
+		agent.queue_free()
+
+
+func _test_funnel_queue(world: RestaurantWorld) -> void:
+	_stop_existing_agents(world)
+	var open_cells: Array[Vector2i] = []
+	for y: int in range(2, 11):
+		for x: int in range(0, 6):
+			open_cells.append(Vector2i(x, y))
+		for x: int in range(9, 15):
+			open_cells.append(Vector2i(x, y))
+	for x: int in range(6, 9):
+		open_cells.append(Vector2i(x, 6))
+	_configure_arena(world, open_cells)
+	var starts: Array[Vector2i] = [
+		Vector2i(1, 3), Vector2i(1, 5), Vector2i(1, 7), Vector2i(1, 9),
+		Vector2i(3, 3), Vector2i(3, 5), Vector2i(3, 7), Vector2i(3, 9)
+	]
+	var destinations: Array[Vector2i] = [
+		Vector2i(12, 2), Vector2i(12, 4), Vector2i(12, 6), Vector2i(12, 8),
+		Vector2i(12, 10), Vector2i(14, 3), Vector2i(14, 7), Vector2i(14, 9)
+	]
+	var agents: Array[AnimatedAgent] = []
+	for index: int in starts.size():
+		var agent := _make_agent(world, starts[index], 3)
+		agent.name = "Funnel_%d" % index
+		agent.move_to(world.cell_to_world(destinations[index]))
+		agents.append(agent)
+	var outcome := _run_navigation_scenario(world, agents, 1800, 0.04)
+	_expect(int(outcome.arrived) == agents.size(), "otto agenti convergenti attraversano la porta senza bloccare il funnel")
+	_expect(float(outcome.minimum_clearance) >= -0.025, "la coda al funnel conserva la separazione fisica")
+	_expect(agents.all(func(agent: AnimatedAgent): return not agent.navigation_failed), "nessun agente della coda fallisce il percorso")
+	_expect(int(outcome.maximum_stationary_cluster) <= 1, "la coda non forma grappoli sovrapposti davanti alla porta")
+	var total_recoveries: int = agents.reduce(func(total: int, agent: AnimatedAgent): return total + agent.recovery_count, 0)
+	var maximum_recoveries := 0
+	for agent: AnimatedAgent in agents:
+		maximum_recoveries = maxi(maximum_recoveries, agent.recovery_count)
+	_expect(total_recoveries <= agents.size() * 3 and maximum_recoveries <= 6, "le piazzole d'attesa restano stabili senza ricalcoli oscillanti")
+	metrics.funnel_seconds = outcome.elapsed
+	metrics.funnel_min_clearance = outcome.minimum_clearance
+	metrics.funnel_recoveries = total_recoveries
+	metrics.funnel_arrived = outcome.arrived
+	_dispose_agents(agents)
+
+
+func _test_bidirectional_doorway(world: RestaurantWorld) -> void:
+	_stop_existing_agents(world)
+	var open_cells: Array[Vector2i] = []
+	for y: int in range(2, 11):
+		for x: int in range(0, 6):
+			open_cells.append(Vector2i(x, y))
+		for x: int in range(9, 15):
+			open_cells.append(Vector2i(x, y))
+	for x: int in range(6, 9):
+		open_cells.append(Vector2i(x, 6))
+	_configure_arena(world, open_cells)
+	var starts: Array[Vector2i] = [
+		Vector2i(1, 3), Vector2i(1, 6), Vector2i(1, 9),
+		Vector2i(13, 3), Vector2i(13, 6), Vector2i(13, 9)
+	]
+	var destinations: Array[Vector2i] = [
+		Vector2i(13, 3), Vector2i(13, 6), Vector2i(13, 9),
+		Vector2i(1, 3), Vector2i(1, 6), Vector2i(1, 9)
+	]
+	var agents: Array[AnimatedAgent] = []
+	for index: int in starts.size():
+		var agent := _make_agent(world, starts[index], 3)
+		agent.move_to(world.cell_to_world(destinations[index]))
+		agents.append(agent)
+	var outcome := _run_navigation_scenario(world, agents, 1900, 0.04)
+	_expect(int(outcome.arrived) == agents.size(), "sei agenti bidirezionali attraversano una porta senza deadlock")
+	_expect(float(outcome.minimum_clearance) >= -0.025, "il traffico bidirezionale non produce compenetrazioni profonde")
+	_expect(agents.all(func(agent: AnimatedAgent): return not agent.navigation_failed), "la precedenza bidirezionale non degrada in timeout")
+	_expect(world.corridor_reservations.size() <= 1, "la porta mantiene un solo proprietario temporale")
+	metrics.doorway_seconds = outcome.elapsed
+	metrics.doorway_min_clearance = outcome.minimum_clearance
+	metrics.doorway_arrived = outcome.arrived
+	_dispose_agents(agents)
+
+
+func _run_navigation_scenario(world: RestaurantWorld, agents: Array[AnimatedAgent], maximum_ticks: int, delta: float) -> Dictionary:
+	var arrived: Dictionary = {}
+	var minimum_clearance := INF
+	var elapsed := 0.0
+	var maximum_stationary_cluster := 0
+	for tick: int in maximum_ticks:
+		world._traffic_epoch += 1
+		var update_order: Array[AnimatedAgent] = agents.duplicate()
+		if tick % 2 == 1:
+			update_order.reverse()
+		for agent: AnimatedAgent in update_order:
+			if not arrived.has(agent.get_instance_id()) and agent.advance_path(delta):
+				arrived[agent.get_instance_id()] = true
+		var stationary_cluster := 0
+		for first_index: int in agents.size():
+			var first := agents[first_index]
+			for second_index: int in range(first_index + 1, agents.size()):
+				var second := agents[second_index]
+				var distance := Vector2(first.global_position.x, first.global_position.z).distance_to(Vector2(second.global_position.x, second.global_position.z))
+				minimum_clearance = minf(minimum_clearance, distance - first.agent_radius - second.agent_radius)
+				if first.navigation_active and second.navigation_active and first.velocity.length() < 0.08 and second.velocity.length() < 0.08 and distance < first.agent_radius + second.agent_radius + 0.08:
+					stationary_cluster += 1
+		maximum_stationary_cluster = maxi(maximum_stationary_cluster, stationary_cluster)
+		elapsed += delta
+		if arrived.size() == agents.size():
+			break
+	return {
+		"arrived": arrived.size(), "minimum_clearance": minimum_clearance,
+		"elapsed": elapsed, "maximum_stationary_cluster": maximum_stationary_cluster
+	}
+
+
+func _dispose_agents(agents: Array[AnimatedAgent]) -> void:
 	for agent: AnimatedAgent in agents:
 		agent.shutdown_navigation()
 		agent.queue_free()

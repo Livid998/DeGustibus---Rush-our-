@@ -23,6 +23,9 @@ func _ready() -> void:
 func _check_factory_bounds() -> void:
 	for kind: String in ["plate", "bowl"]:
 		var expected := FoodVisualFactory.canonical_container_size(kind)
+		_expect(expected.x >= 0.65 and expected.z >= 0.65, "%s has a readable table-service footprint (%.3fx%.3f)" % [kind, expected.x, expected.z])
+		_expect(expected.x <= 0.72 and expected.z <= 0.72, "%s remains credible on one place setting (%.3fx%.3f)" % [kind, expected.x, expected.z])
+		_expect(FoodVisualFactory.canonical_content_scale(kind) >= 1.25, "%s food layout grows with the readable container" % kind)
 		for dirty: bool in [false, true]:
 			var container := FoodVisualFactory.instantiate_canonical_container(kind, dirty)
 			var size := ModelFactory.calculate_visual_bounds(container, true).size
@@ -37,6 +40,23 @@ func _check_factory_bounds() -> void:
 		var serving_size := ModelFactory.calculate_visual_bounds(serving, true).size
 		_expect(container != null and _same_footprint(size, FoodVisualFactory.canonical_container_size(kind)), "%s full serving has exactly one canonical %s" % [recipe_id, kind])
 		_expect(serving_size.x <= size.x + 0.025 and serving_size.z <= size.z + 0.025, "%s assembled food stays inside the dirty-container footprint (%.3fx%.3f)" % [recipe_id, serving_size.x, serving_size.z])
+		var is_pizza := recipe_id in ["margherita", "mushroom_pizza", "pepperoni_pizza"]
+		if is_pizza:
+			var food_content := serving.get_node_or_null("FoodContent") as Node3D
+			var food_size := ModelFactory.calculate_visual_bounds(food_content, true).size if food_content != null else Vector3.ZERO
+			var coverage := maxf(food_size.x, food_size.z) / maxf(maxf(size.x, size.z), 0.0001)
+			_expect(coverage >= 0.90 and coverage <= 0.99, "%s covers the plate with only a thin rim (%.1f%%)" % [recipe_id, coverage * 100.0])
+		for stage: int in [1, 2]:
+			var stage_parts := FoodVisualFactory.consumption_parts(recipe_id, stage)
+			if stage_parts.is_empty():
+				continue
+			var stage_food := FoodVisualFactory.instantiate_parts(stage_parts)
+			var stage_size := ModelFactory.calculate_visual_bounds(stage_food, true).size
+			_expect(stage_size.x <= size.x + 0.025 and stage_size.z <= size.z + 0.025, "%s stage %d food stays inside the same canonical %s" % [recipe_id, stage, kind])
+			if is_pizza and stage == 1:
+				var stage_coverage := maxf(stage_size.x, stage_size.z) / maxf(maxf(size.x, size.z), 0.0001)
+				_expect(stage_coverage >= 0.90 and stage_coverage <= 0.99, "%s stage %d keeps full-size slices across the plate (%.1f%%)" % [recipe_id, stage, stage_coverage * 100.0])
+			stage_food.free()
 		serving.free()
 
 

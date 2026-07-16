@@ -66,6 +66,23 @@ NAVIGATION_REGIONS = [
     (930, 675, 310, 315),
 ]
 
+# Both supplied status-bubble sheets use the same six-column layout.  The
+# first six rows are complete and contain every runtime state currently used
+# by customers and staff.  Explicit edges keep the generous source padding
+# while avoiding pixels from neighbouring bubbles.
+STATUS_BUBBLE_X_EDGES = [0, 219, 419, 618, 819, 1013, 1254]
+STATUS_BUBBLE_Y_EDGES = [0, 206, 381, 563, 743, 922, 1079]
+STATUS_BUBBLE_REGIONS = [
+    (
+        STATUS_BUBBLE_X_EDGES[column],
+        STATUS_BUBBLE_Y_EDGES[row],
+        STATUS_BUBBLE_X_EDGES[column + 1] - STATUS_BUBBLE_X_EDGES[column],
+        STATUS_BUBBLE_Y_EDGES[row + 1] - STATUS_BUBBLE_Y_EDGES[row],
+    )
+    for row in range(6)
+    for column in range(6)
+]
+
 
 def flood_exterior(passable: np.ndarray) -> np.ndarray:
     """Return background pixels reachable from a crop border."""
@@ -285,6 +302,22 @@ def main() -> None:
         rows=2,
         cell_size=(328, 336),
         clear_holes_indices={7},
+    )
+    build_atlas(
+        "status_bubbles/customer_bubbles_source.png",
+        "status_bubbles/customer_bubbles.png",
+        STATUS_BUBBLE_REGIONS,
+        columns=6,
+        rows=6,
+        cell_size=(192, 192),
+    )
+    build_atlas(
+        "status_bubbles/staff_bubbles_source.png",
+        "status_bubbles/staff_bubbles.png",
+        STATUS_BUBBLE_REGIONS,
+        columns=6,
+        rows=6,
+        cell_size=(192, 192),
     )
     build_lock()
 

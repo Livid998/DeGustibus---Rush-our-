@@ -485,7 +485,7 @@ func _test_agent_navigation_and_appearance(world: RestaurantWorld) -> void:
 	_expect(closing_queue_positions.size() == closing_customer.group_size and closing_queue_positions.all(func(position: Vector3): return world.world_to_cell(position).y == RestaurantWorld.SIDEWALK_Y) and closing_queue_positions[0].distance_to(closing_queue_positions[1]) >= RestaurantWorld.CUSTOMER_QUEUE_SPACING - 0.01, "each visible guest receives a distinct human-spaced single-file queue marker on the sidewalk")
 	GameState.set_restaurant_state("closing")
 	closing_customer._process(0.1)
-	_expect(closing_customer.state == "leaving" and closing_customer.people.all(func(person: CustomerPersonAgent): return person.target_tag == "despawn"), "unseated customers head along the exterior route as soon as restaurant closing begins")
+	_expect(closing_customer.state == "leaving" and closing_customer.people.all(func(person: CustomerPersonAgent): return person.target_tag.begins_with("exit_despawn_")), "unseated customers head toward distinct exterior gates as soon as restaurant closing begins")
 	closing_customer.global_position = world.cell_to_world(world.entrance_cell)
 	closing_customer._process(0.1)
 	_expect(not closing_customer.is_queued_for_deletion(), "a party is not deleted merely because its controller crosses the old entrance cell")
@@ -493,7 +493,7 @@ func _test_agent_navigation_and_appearance(world: RestaurantWorld) -> void:
 		person.global_position = person.destination
 		person.phase = "arrived"
 	closing_customer._process(0.1)
-	_expect(closing_customer.is_queued_for_deletion(), "an unseated party is removed only after every physical guest reaches the exterior despawn point")
+	_expect(closing_customer.is_queued_for_deletion(), "an unseated party ends after every physical guest independently reaches an exterior despawn gate")
 	var exiting_dummy := Node.new()
 	var entering_dummy := Node.new()
 	world.add_child(exiting_dummy)
@@ -619,11 +619,15 @@ func _test_customer_lifecycle(world: RestaurantWorld) -> void:
 	_expect(customer.state == "waiting_exit_door" and world.customer_owns_table(customer, table_uid) and customer.people.all(func(person: CustomerPersonAgent): return person.phase == "seated") and int(SimulationManager.stats.customers_served) == customer.group_size, "payment is idempotent and guests remain seated while reserving exit priority")
 	customer._process(0.0)
 	_expect(customer.state == "leaving" and world.customer_owns_table(customer, table_uid), "starting the physical exit path does not prematurely free the table")
-	_expect(customer._exit_stage == "stand" and customer.people[0].phase == "stand_transition" and customer.people.slice(1).all(func(person: CustomerPersonAgent): return person.phase == "seated"), "the door owner stands one diner at a time while the rest remain seated")
-	_expect(_force_next_guest_outside(customer, world, 0) and world.customer_owns_table(customer, table_uid), "the table remains occupied while even one visible guest is still inside")
-	_expect(_force_next_guest_outside(customer, world, 1) and not world.customer_owns_table(customer, table_uid) and world.table_dirty_records.has(table_uid), "the table is released after the last guest crosses outside and becomes a persistent dirty table")
+	_expect(customer._exit_stage == "parallel" and customer.people[0].phase == "stand_transition" and customer.people[1].phase == "seated", "the first diner starts promptly without forcing the whole party to stand in lockstep")
+	customer._update_exit_sequence(CustomerAgent.EXIT_STAND_STAGGER + 0.01)
+	_expect(customer.people.all(func(person: CustomerPersonAgent): return person.phase == "stand_transition"), "party members begin overlapping stand animations after a short deterministic stagger")
+	var separate_exit_lanes := customer._exit_gate_position(0).distance_to(customer._exit_gate_position(1)) >= CustomerAgent.EXIT_LANE_SPACING - 0.01
+	_expect(separate_exit_lanes, "every departing diner receives a distinct human-width sidewalk lane and despawn gate")
+	_expect(_force_party_to_sidewalk(customer) and not world.customer_owns_table(customer, table_uid) and world.table_dirty_records.has(table_uid), "the table is released after every guest crosses outside while their independent walk-off continues")
 	customer._set_state("waiting_table")
 	_expect(customer.state == "leaving", "departure is terminal and a customer can never return to waiting or seating")
+	_expect(_force_member_to_exit_gate(customer, 0) and customer._departed_members.size() == 1 and not customer.is_queued_for_deletion() and not customer._departed_members.has(1), "the leader disappears at their own gate instead of waiting visibly for the rest of the group")
 	var dirty_replacement := CustomerAgent.new()
 	world.customer_root.add_child(dirty_replacement)
 	dirty_replacement.setup(world, 2)
@@ -634,10 +638,7 @@ func _test_customer_lifecycle(world: RestaurantWorld) -> void:
 	dirty_replacement._registered = false
 	dirty_replacement.queue_free()
 	_cleanup_dirty_table_fixture(world, table_uid)
-	for person: CustomerPersonAgent in customer.people:
-		person.global_position = person.destination
-		person.phase = "arrived"
-	customer._update_exit_sequence()
+	_expect(_force_member_to_exit_gate(customer, 1) and customer.is_queued_for_deletion(), "the party controller terminates only when its final independently departing member disappears")
 	SimulationManager.reset_service_stats()
 	var abandoning := CustomerAgent.new()
 	world.customer_root.add_child(abandoning)
@@ -660,8 +661,7 @@ func _test_customer_lifecycle(world: RestaurantWorld) -> void:
 	_expect(abandoning.state == "waiting_exit_door" and all_cancelled and world.customer_owns_table(abandoning, abandoning_table_uid), "an impatient party atomically cancels its tickets but keeps its chairs while reserving the exit")
 	_expect(String(replacement.table.get("uid", "")) != abandoning_table_uid, "a replacement party cannot reserve a table whose previous guests are still visible")
 	abandoning._process(0.0)
-	_expect(_force_next_guest_outside(abandoning, world, 0) and world.customer_owns_table(abandoning, abandoning_table_uid), "an abandoned table stays reserved until every impatient guest has physically left")
-	_expect(_force_next_guest_outside(abandoning, world, 1) and not world.customer_owns_table(abandoning, abandoning_table_uid), "an abandoned table becomes available after the entire party crosses the exit")
+	_expect(_force_party_to_sidewalk(abandoning) and not world.customer_owns_table(abandoning, abandoning_table_uid), "an abandoned table becomes available after the impatient party crosses the exit in overlapping lanes")
 	var checkpoint_person: CustomerPersonAgent = abandoning.people[0]
 	var blocked_checkpoint := world.cell_to_world(Vector2i(world.entrance_cell.x, RestaurantWorld.ROAD_ROWS[0]))
 	abandoning._force_person_checkpoint(checkpoint_person, blocked_checkpoint, "watchdog_safe")
@@ -675,28 +675,43 @@ func _test_customer_lifecycle(world: RestaurantWorld) -> void:
 	GameState.set_restaurant_state("closed")
 
 
-func _force_next_guest_outside(customer: CustomerAgent, world: RestaurantWorld, expected_index: int) -> bool:
-	if customer._exit_cursor != expected_index or customer._exit_stage != "stand":
-		return false
-	var person: CustomerPersonAgent = customer.people[expected_index]
-	person.tick_motion(person.transition_remaining + 0.05)
+func _force_party_to_sidewalk(customer: CustomerAgent) -> bool:
+	# Advance the deterministic per-member FSM without relying on frame rate or
+	# pathfinding timing. Every phase is advanced for the whole party before the
+	# next one, proving that departure is overlapping rather than cursor-serial.
+	customer._update_exit_sequence(CustomerAgent.EXIT_STAND_STAGGER * float(customer.group_size) + 0.01)
+	for person: CustomerPersonAgent in customer.people:
+		person.tick_motion(person.transition_remaining + 0.05)
 	customer._update_exit_sequence()
-	if customer._exit_stage != "seat":
+	if customer._exit_member_states.values().any(func(member_state: Dictionary): return String(member_state.get("stage", "")) != "seat"):
 		return false
-	person.global_position = person._local_target
+	for person: CustomerPersonAgent in customer.people:
+		person.global_position = person._local_target
+		person.tick_motion(0.0)
+	customer._update_exit_sequence()
+	if customer._exit_member_states.values().any(func(member_state: Dictionary): return String(member_state.get("stage", "")) != "door"):
+		return false
+	for person: CustomerPersonAgent in customer.people:
+		person.global_position = person.destination
+		person.phase = "arrived"
+	customer._update_exit_sequence()
+	if customer._exit_member_states.values().any(func(member_state: Dictionary): return String(member_state.get("stage", "")) != "outside"):
+		return false
+	for person: CustomerPersonAgent in customer.people:
+		person.global_position = person.destination
+		person.phase = "arrived"
+	customer._update_exit_sequence()
+	return customer._exit_crossed_count == customer.group_size and customer._door_released and customer._exit_member_states.values().all(func(member_state: Dictionary): return String(member_state.get("stage", "")) == "despawn")
+
+
+func _force_member_to_exit_gate(customer: CustomerAgent, member_index: int) -> bool:
+	if member_index >= customer.people.size() or customer._departed_members.has(member_index):
+		return false
+	var person := customer.people[member_index]
+	person.global_position = person.destination
 	person.tick_motion(0.0)
 	customer._update_exit_sequence()
-	if customer._exit_stage != "door":
-		return false
-	person.global_position = person.destination
-	person.phase = "arrived"
-	customer._update_exit_sequence()
-	if customer._exit_stage != "outside":
-		return false
-	person.global_position = person.destination
-	person.phase = "arrived"
-	customer._update_exit_sequence()
-	return customer._exit_cursor == expected_index + 1
+	return customer._departed_members.has(member_index)
 
 
 func _cleanup_dirty_table_fixture(world: RestaurantWorld, table_uid: String) -> void:

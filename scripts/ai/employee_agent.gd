@@ -630,3 +630,6 @@ func _create_thought() -> void:
 	_thought.no_depth_test = true
 	_thought.visible = false
 	add_child(_thought)
+	var status_bubble := AgentStatusBubble.new()
+	add_child(status_bubble)
+	status_bubble.setup(_thought, world, "staff")

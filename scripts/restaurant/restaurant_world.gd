@@ -33,6 +33,7 @@ var staff_standby_reservations: Dictionary = {}
 var corridor_reservations: Dictionary = {}
 var agent_corridor_reservations: Dictionary = {}
 var agent_motion_intents: Dictionary = {}
+var agent_avoidance_memory: Dictionary = {}
 var customer_root: Node3D
 var object_root: Node3D
 var preview_root: Node3D
@@ -1149,6 +1150,11 @@ func _traffic_cell_costs(requesting_agent: AnimatedAgent) -> Dictionary:
 			_add_traffic_cost(costs, world_to_cell(other.destination), 4.5)
 			for path_index: int in range(other.path_index, other.path.size()):
 				_add_traffic_cost(costs, world_to_cell(other.path[path_index]), 1.15)
+		if other._traffic_pullout_active:
+			var pullout_cell := world_to_cell(other._traffic_pullout_position)
+			_add_traffic_cost(costs, pullout_cell, 22.0)
+			for offset: Vector2i in [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]:
+				_add_traffic_cost(costs, pullout_cell + offset, 3.2)
 	return costs
 
 
@@ -1257,6 +1263,7 @@ func register_navigation_agent(agent: AnimatedAgent) -> void:
 func unregister_navigation_agent(agent: AnimatedAgent) -> void:
 	navigation_agents.erase(agent)
 	agent_motion_intents.erase(agent.get_instance_id())
+	agent_avoidance_memory.erase(agent.get_instance_id())
 	release_waiting_position(agent)
 	staff_standby_reservations.erase(agent.get_instance_id())
 	_release_agent_corridor(agent)
@@ -1307,6 +1314,20 @@ func can_agent_advance_route(agent: AnimatedAgent, route: PackedVector3Array, ro
 	return true
 
 
+func can_agent_skip_open_waypoint(agent: AnimatedAgent, route: PackedVector3Array, route_index: int) -> bool:
+	if route_index < 0 or route_index + 1 >= route.size():
+		return false
+	var waypoint := route[route_index]
+	# Never skip the cells which define an exclusive doorway/corridor: those
+	# waypoints are the topology used by the FIFO reservation system.
+	if not _corridor_key(world_to_cell(waypoint)).is_empty():
+		return false
+	if Vector2(agent.global_position.x, agent.global_position.z).distance_to(Vector2(waypoint.x, waypoint.z)) > CELL_SIZE * 0.72:
+		return false
+	var next_waypoint := route[route_index + 1]
+	return can_agent_move(agent.global_position, next_waypoint, agent.agent_radius * 0.92)
+
+
 func _agent_has_right_of_way(candidate: AnimatedAgent, incumbent: AnimatedAgent, corridor_key: String = "") -> bool:
 	if candidate == incumbent:
 		return false
@@ -1347,7 +1368,8 @@ func _upcoming_corridor_key(agent: AnimatedAgent, route: PackedVector3Array, rou
 		var current_key := _corridor_key(world_to_cell(point))
 		if not current_key.is_empty():
 			return current_key
-	for index: int in range(route_index, mini(route_index + 4, route.size())):
+	var lookahead_end := route.size() if agent._traffic_pullout_active else mini(route_index + 6, route.size())
+	for index: int in range(route_index, lookahead_end):
 		var key := _corridor_key(world_to_cell(route[index]))
 		if not key.is_empty():
 			return key
@@ -1441,7 +1463,8 @@ func find_agent_recovery_detour(agent: AnimatedAgent, final_destination: Vector3
 		corridor_key = _upcoming_corridor_key(agent, agent.path, agent.path_index)
 	# Only the yielding participant leaves the main route. The winner remains
 	# predictable, so two agents never mirror one another into the same alcove.
-	if not _agent_has_right_of_way(blocker, agent, corridor_key):
+	var forward := agent.global_position.direction_to(agent.path[agent.path_index]) if agent.path_index < agent.path.size() else agent.global_position.direction_to(final_destination)
+	if not _agent_should_yield(agent, blocker, forward, corridor_key):
 		return {}
 	var from_cell := _nearest_open_cell(world_to_cell(agent.global_position))
 	var candidates: Array[Vector2i] = []
@@ -1475,6 +1498,8 @@ func find_agent_recovery_detour(agent: AnimatedAgent, final_destination: Vector3
 		var candidate_world := cell_to_world(candidate)
 		if not _agent_point_is_open(candidate_world, agent.agent_radius * 0.9):
 			continue
+		if not _traffic_holding_position_is_free(agent, candidate_world):
+			continue
 		var first_leg := _grid_path(from_cell, candidate)
 		if first_leg.is_empty() or _grid_path(candidate, _nearest_open_cell(world_to_cell(final_destination))).is_empty():
 			continue
@@ -1505,6 +1530,30 @@ func find_agent_recovery_detour(agent: AnimatedAgent, final_destination: Vector3
 	return {"path": first_world, "release_index": release_index, "pullout": cell_to_world(best_cell)}
 
 
+func _traffic_holding_position_is_free(agent: AnimatedAgent, candidate: Vector3) -> bool:
+	for other: AnimatedAgent in navigation_agents:
+		if other == agent or not is_instance_valid(other) or other.is_queued_for_deletion() or not other.is_collision_enabled():
+			continue
+		var required := agent.agent_radius + other.agent_radius + 0.32
+		for other_point: Vector3 in other.get_avoidance_points():
+			if Vector2(candidate.x, candidate.z).distance_to(Vector2(other_point.x, other_point.z)) < required:
+				return false
+		# Reserve a recovery bay as soon as it is assigned, not only when its owner
+		# physically reaches it. This is what prevents four corridor losers from
+		# independently selecting the same apparently-empty tile in one frame.
+		if other._traffic_pullout_active:
+			var pullout := other._traffic_pullout_position
+			if Vector2(candidate.x, candidate.z).distance_to(Vector2(pullout.x, pullout.z)) < required + 0.24:
+				return false
+		if other.navigation_active and _agent_has_right_of_way(other, agent):
+			var path_clearance := maxf(required + 0.24, 1.18)
+			for path_index: int in range(other.path_index, mini(other.path_index + 6, other.path.size())):
+				var route_point := other.path[path_index]
+				if Vector2(candidate.x, candidate.z).distance_to(Vector2(route_point.x, route_point.z)) < path_clearance:
+					return false
+	return true
+
+
 func _nearest_conflicting_agent(agent: AnimatedAgent) -> AnimatedAgent:
 	var own_corridor := _corridor_key(world_to_cell(agent.global_position))
 	if own_corridor.is_empty():
@@ -1521,6 +1570,12 @@ func _nearest_conflicting_agent(agent: AnimatedAgent) -> AnimatedAgent:
 		if other_corridor.is_empty() and other.navigation_active:
 			other_corridor = _upcoming_corridor_key(other, other.path, other.path_index)
 		var same_corridor := not own_corridor.is_empty() and own_corridor == other_corridor
+		# Recovery is only useful against a participant this agent must yield to.
+		# Previously the nearest body could be another waiter in the same queue;
+		# the actual winner was then ignored and every loser stayed on the merge
+		# point instead of taking a different holding bay.
+		if other.navigation_active and not _agent_should_yield(agent, other, forward, own_corridor if same_corridor else ""):
+			continue
 		var distance := Vector2(agent.global_position.x, agent.global_position.z).distance_to(Vector2(other.global_position.x, other.global_position.z))
 		if not same_corridor and distance > (agent.agent_radius + other.agent_radius) * 4.2:
 			continue
@@ -1574,12 +1629,23 @@ func can_agent_step(agent: AnimatedAgent, from_position: Vector3, to_position: V
 		if other == agent or not is_instance_valid(other) or other.is_queued_for_deletion() or not other.is_collision_enabled():
 			continue
 		var minimum := agent.agent_radius + other.agent_radius + 0.08
+		var other_velocity := other.velocity
+		var other_intent: Dictionary = agent_motion_intents.get(other.get_instance_id(), {})
+		if int(other_intent.get("epoch", -99)) >= _traffic_epoch - 2:
+			other_velocity = Vector3(other_intent.get("velocity", other_velocity))
+		other_velocity.y = 0.0
+		var step_time := clampf(movement_delta.length() / maxf(agent.movement_speed, 0.01), 0.0, 0.18)
+		var predicts_conflict := _agent_should_yield(agent, other, movement_delta.normalized())
 		for own_point: Vector3 in own_points:
 			var candidate_point := own_point + movement_delta
 			for other_point: Vector3 in other.get_avoidance_points():
 				var current_distance := Vector2(own_point.x, own_point.z).distance_to(Vector2(other_point.x, other_point.z))
 				var candidate_distance := Vector2(candidate_point.x, candidate_point.z).distance_to(Vector2(other_point.x, other_point.z))
 				if candidate_distance < minimum and candidate_distance <= current_distance + 0.005:
+					return false
+				var predicted_other := other_point + other_velocity * step_time
+				var predicted_distance := Vector2(candidate_point.x, candidate_point.z).distance_to(Vector2(predicted_other.x, predicted_other.z))
+				if predicts_conflict and predicted_distance < minimum + 0.04 and predicted_distance <= current_distance + 0.01:
 					return false
 	return true
 
@@ -1603,8 +1669,9 @@ func compute_agent_velocity(agent: AnimatedAgent, desired_velocity: Vector3) -> 
 	if desired_velocity.length_squared() <= 0.0001:
 		agent_motion_intents[agent.get_instance_id()] = {"velocity": Vector3.ZERO, "epoch": _traffic_epoch}
 		return Vector3.ZERO
-	var result := desired_velocity
 	var desired_direction := desired_velocity.normalized()
+	var neighbors: Array[Dictionary] = []
+	var imminent_conflict := false
 	for other: AnimatedAgent in navigation_agents.duplicate():
 		if other == agent or not is_instance_valid(other) or other.is_queued_for_deletion() or not other.is_collision_enabled():
 			continue
@@ -1619,16 +1686,15 @@ func compute_agent_velocity(agent: AnimatedAgent, desired_velocity: Vector3) -> 
 					offset = candidate
 		if distance == INF:
 			continue
-		var separation := agent.agent_radius + other.agent_radius + 0.14
+		var separation := agent.agent_radius + other.agent_radius + 0.16
 		if distance > separation * 4.0:
 			continue
-		var away := offset.normalized() if distance > 0.01 else Vector3.RIGHT.rotated(Vector3.UP, float(agent.get_instance_id() % 4) * PI * 0.5)
 		var other_intent: Dictionary = agent_motion_intents.get(other.get_instance_id(), {})
 		var other_velocity := other.velocity
 		if int(other_intent.get("epoch", -99)) >= _traffic_epoch - 2:
 			other_velocity = Vector3(other_intent.get("velocity", other_velocity))
 		other_velocity.y = 0.0
-		var relative_velocity := result - other_velocity
+		var relative_velocity := desired_velocity - other_velocity
 		var closest_time := 0.0
 		if relative_velocity.length_squared() > 0.0001:
 			closest_time = clampf(-offset.dot(relative_velocity) / relative_velocity.length_squared(), 0.0, 0.82)
@@ -1642,51 +1708,131 @@ func compute_agent_velocity(agent: AnimatedAgent, desired_velocity: Vector3) -> 
 		var shared_corridor := _corridor_key(world_to_cell(agent.global_position))
 		if shared_corridor.is_empty() or not _agent_is_inside_corridor(other, shared_corridor):
 			shared_corridor = ""
-		var agent_yields := _agent_has_right_of_way(other, agent, shared_corridor) or not other.navigation_active
-		# Guests going to/from seats and the exit own the pedestrian lane. A cook
-		# or waiter can take a half-step aside instead of forming a human wall.
-		if agent is EmployeeAgent and other is CustomerPersonAgent:
-			var party := (other as CustomerPersonAgent).party
-			if party != null and String(party.get("state")) in ["admitting", "walking_to_table", "seating", "leaving"]:
-				agent_yields = true
+		var agent_yields := _agent_should_yield(agent, other, desired_direction, shared_corridor)
 		var other_direction := other_velocity.normalized() if other_velocity.length_squared() > 0.01 else Vector3.ZERO
-		var head_on := other_direction.length_squared() > 0.0 and desired_direction.dot(other_direction) < -0.38
-		var passing_side := _available_passing_side(agent, desired_direction)
-		if head_on:
-			# Everyone takes their own right-hand side. Opposite headings therefore
-			# produce opposite world-space sidesteps; the former id-based sign sent
-			# both participants toward the same side and caused the visible dance.
-			if agent_yields:
-				result = result * 0.32 + passing_side * agent.movement_speed * 0.92
-			else:
-				result = result * 0.82 + passing_side * agent.movement_speed * 0.42
-		elif approaching:
-			if agent_yields:
-				result = result * 0.28 + passing_side * agent.movement_speed * 0.62
-			else:
-				result += passing_side * agent.movement_speed * 0.22
-		elif desired_direction.dot(other_direction) > 0.55 and distance < separation * 2.0:
-			# Queue/following motion stays in lane: slow down instead of oscillating
-			# around the person ahead.
-			result *= clampf((distance - separation * 0.92) / maxf(separation, 0.01), 0.12, 0.72)
-		if distance < separation * 1.28:
-			result += away * agent.movement_speed * (separation * 1.28 - distance) / maxf(separation, 0.01) * 1.8
-	result = result.limit_length(agent.movement_speed)
-	agent_motion_intents[agent.get_instance_id()] = {"velocity": result, "epoch": _traffic_epoch}
+		neighbors.append({
+			"offset": offset, "distance": distance,
+			"velocity": other_velocity, "separation": separation,
+			"yields": agent_yields, "approaching": approaching,
+			"same_direction": other_direction.length_squared() > 0.0 and desired_direction.dot(other_direction) > 0.55
+		})
+		imminent_conflict = imminent_conflict or collision_risk or distance < separation * 1.55
+	if neighbors.is_empty() or not imminent_conflict:
+		agent_motion_intents[agent.get_instance_id()] = {"velocity": desired_velocity, "epoch": _traffic_epoch}
+		return desired_velocity
+	var candidates := _avoidance_velocity_candidates(agent, desired_velocity)
+	var best_velocity := Vector3.ZERO
+	var best_score := -INF
+	for candidate: Vector3 in candidates:
+		if not _avoidance_candidate_is_static_safe(agent, candidate):
+			continue
+		var score := _score_avoidance_candidate(agent, candidate, desired_velocity, neighbors)
+		if score > best_score:
+			best_score = score
+			best_velocity = candidate
+	if best_score == -INF:
+		best_velocity = Vector3.ZERO
+	best_velocity = best_velocity.limit_length(agent.movement_speed)
+	agent_motion_intents[agent.get_instance_id()] = {"velocity": best_velocity, "epoch": _traffic_epoch}
+	agent_avoidance_memory[agent.get_instance_id()] = {"velocity": best_velocity, "epoch": _traffic_epoch}
+	return best_velocity
+
+
+func _agent_should_yield(agent: AnimatedAgent, other: AnimatedAgent, forward: Vector3, corridor_key: String = "") -> bool:
+	if not other.navigation_active:
+		return true
+	var other_direction := other.velocity.normalized() if other.velocity.length_squared() > 0.01 else Vector3.ZERO
+	var toward_other := agent.global_position.direction_to(other.global_position)
+	# A body already ahead in the same lane always keeps its place. Route-ticket
+	# priority alone could otherwise make the follower try to overtake exactly at
+	# a doorway and generate the visible accordion collision.
+	if forward.length_squared() > 0.001 and other_direction.length_squared() > 0.001:
+		if forward.dot(other_direction) > 0.58 and forward.dot(toward_other) > 0.48:
+			return true
+	if agent is EmployeeAgent and other is CustomerPersonAgent:
+		var party := (other as CustomerPersonAgent).party
+		if party != null and String(party.get("state")) in ["admitting", "walking_to_table", "seating", "leaving"]:
+			return true
+	return _agent_has_right_of_way(other, agent, corridor_key)
+
+
+func _avoidance_velocity_candidates(agent: AnimatedAgent, desired_velocity: Vector3) -> Array[Vector3]:
+	var result: Array[Vector3] = []
+	var forward := desired_velocity.normalized()
+	var desired_speed := minf(desired_velocity.length(), agent.movement_speed)
+	# Deterministic right-first sampling gives reciprocal agents opposite
+	# world-space sides while retaining enough alternatives for walls/furniture.
+	var angles: Array[float] = [
+		0.0, PI / 7.0, -PI / 7.0, PI / 3.5, -PI / 3.5,
+		PI * 0.43, -PI * 0.43, PI * 0.5, -PI * 0.5,
+		PI * 0.62, -PI * 0.62, PI
+	]
+	for speed_factor: float in [1.0, 0.62]:
+		for angle: float in angles:
+			result.append(forward.rotated(Vector3.UP, angle) * desired_speed * speed_factor)
+	result.append(Vector3.ZERO)
 	return result
 
 
-func _available_passing_side(agent: AnimatedAgent, forward: Vector3) -> Vector3:
+func _avoidance_candidate_is_static_safe(agent: AnimatedAgent, candidate: Vector3) -> bool:
+	if candidate.length_squared() <= 0.0001:
+		return true
+	var probe_time := minf(0.48, 1.05 / maxf(candidate.length(), 0.01))
+	var target := agent.global_position + candidate * probe_time
+	return can_agent_move(agent.global_position, target, agent.agent_radius * 0.92)
+
+
+func _score_avoidance_candidate(agent: AnimatedAgent, candidate: Vector3, desired_velocity: Vector3, neighbors: Array[Dictionary]) -> float:
+	var forward := desired_velocity.normalized()
+	var speed_ratio := candidate.length() / maxf(agent.movement_speed, 0.01)
+	var candidate_direction := candidate.normalized() if candidate.length_squared() > 0.0001 else Vector3.ZERO
+	var alignment := forward.dot(candidate_direction)
 	var right := Vector3(forward.z, 0.0, -forward.x).normalized()
-	if right.length_squared() <= 0.001:
-		return Vector3.RIGHT
-	var probe_distance := maxf(agent.agent_radius * 1.25, 0.42)
-	var start := agent.global_position
-	if can_agent_move(start, start + right * probe_distance, agent.agent_radius * 0.82) and not agent.test_move(agent.global_transform, right * probe_distance):
-		return right
-	if can_agent_move(start, start - right * probe_distance, agent.agent_radius * 0.82) and not agent.test_move(agent.global_transform, -right * probe_distance):
-		return -right
-	return right
+	var score := alignment * 4.4 + speed_ratio * 1.35 + right.dot(candidate_direction) * 0.16
+	if candidate.length_squared() <= 0.0001:
+		score = -1.4
+	var memory: Dictionary = agent_avoidance_memory.get(agent.get_instance_id(), {})
+	if int(memory.get("epoch", -99)) >= _traffic_epoch - 18:
+		var previous := Vector3(memory.get("velocity", Vector3.ZERO))
+		if previous.length_squared() > 0.001 and candidate_direction.length_squared() > 0.001:
+			score += previous.normalized().dot(candidate_direction) * 0.48
+	for neighbor: Dictionary in neighbors:
+		var offset := Vector3(neighbor.offset)
+		var other_velocity := Vector3(neighbor.velocity)
+		var relative_velocity := candidate - other_velocity
+		var closest_time := 0.0
+		if relative_velocity.length_squared() > 0.0001:
+			closest_time = clampf(-offset.dot(relative_velocity) / relative_velocity.length_squared(), 0.0, 0.95)
+		var predicted_distance := (offset + relative_velocity * closest_time).length()
+		var current_distance := float(neighbor.distance)
+		var separation := float(neighbor.separation)
+		var yields := bool(neighbor.yields)
+		var physical_limit := separation - 0.08
+		# Priority decides who alters course, never who may overlap. The previous
+		# scorer let the winner select a velocity that the physical step validator
+		# would immediately reject, leaving it to push forever against a stopped
+		# loser. Both sides now choose an actually executable velocity.
+		if current_distance >= physical_limit and predicted_distance < physical_limit:
+			return -INF
+		if current_distance < physical_limit and predicted_distance + 0.01 < current_distance:
+			return -INF
+		# A yielding agent may not reserve a future disc that intersects the
+		# winner. When bodies already touch, only candidates which increase their
+		# separation remain legal, providing deterministic deadlock recovery.
+		if yields:
+			if current_distance >= separation and predicted_distance < separation:
+				return -INF
+			if current_distance < separation and predicted_distance + 0.015 < current_distance:
+				return -INF
+		elif predicted_distance < separation * 0.88 and current_distance >= separation:
+			score -= 5.5
+		var clearance := predicted_distance - separation
+		score += clampf(clearance, -0.8, 1.5) * (1.15 if yields else 0.45)
+		if bool(neighbor.same_direction) and bool(neighbor.approaching) and yields:
+			var safe_follow_speed := Vector3(neighbor.velocity).length()
+			if candidate.length() > safe_follow_speed + 0.12:
+				score -= (candidate.length() - safe_follow_speed) * 1.8
+	return score
 
 
 func find_safe_agent_position(preferred: Vector3, agent: AnimatedAgent = null) -> Vector3:

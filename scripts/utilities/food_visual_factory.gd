@@ -9,12 +9,17 @@ const _CONTAINER_SPECS := {
 	"plate": {
 		"clean": "res://assets/equipment/plate.gltf",
 		"dirty": "res://assets/equipment/plate_dirty.gltf",
-		"reference_scale": 0.55
+		# The food descriptors were authored around the former 0.55 display
+		# scale.  Keep that as the content baseline, but render every lifecycle
+		# state at a larger, legible table-service size.
+		"content_reference_scale": 0.55,
+		"reference_scale": 0.72
 	},
 	"bowl": {
 		"clean": "res://assets/equipment/bowl.gltf",
 		"dirty": "res://assets/equipment/bowl_dirty.gltf",
-		"reference_scale": 0.58
+		"content_reference_scale": 0.58,
+		"reference_scale": 0.74
 	}
 }
 
@@ -139,9 +144,10 @@ static func instantiate_recipe_dish(recipe_id: String, scale_multiplier: float =
 static func instantiate_recipe_serving_food(recipe_id: String) -> Node3D:
 	var visual: Dictionary = DataRegistry.food_visuals_by_id.get(recipe_id, {})
 	var serving_parts := _normalize_parts(visual.get("serving_models", []), 0.40)
+	var multiplier := _recipe_content_scale(recipe_id)
 	if serving_parts.is_empty():
-		return instantiate_recipe_dish(recipe_id, 1.0)
-	return instantiate_parts(serving_parts, 1.0)
+		return instantiate_recipe_dish(recipe_id, multiplier)
+	return instantiate_parts(_scaled_layout_parts(serving_parts, multiplier), 1.0)
 
 
 ## Creates the complete serving used by pass, waiter and table visuals.  The
@@ -203,6 +209,15 @@ static func canonical_container_scale(kind: String) -> float:
 	return float((_CONTAINER_SPECS[kind] as Dictionary).reference_scale)
 
 
+## Food layouts are authored against content_reference_scale. Scaling the
+## models, offsets and spacing together keeps the meal readable without
+## letting full/partial/leftover phases drift to different footprints.
+static func canonical_content_scale(kind: String) -> float:
+	kind = _normalized_container_kind(kind)
+	var spec: Dictionary = _CONTAINER_SPECS[kind]
+	return float(spec.reference_scale) / maxf(float(spec.content_reference_scale), 0.0001)
+
+
 static func canonical_container_path(kind: String, dirty: bool = false) -> String:
 	kind = _normalized_container_kind(kind)
 	var spec: Dictionary = _CONTAINER_SPECS[kind]
@@ -217,7 +232,8 @@ static func consumption_container(recipe_id: String) -> String:
 static func consumption_parts(recipe_id: String, stage: int) -> Array[Dictionary]:
 	var visual: Dictionary = DataRegistry.food_visuals_by_id.get(recipe_id, {})
 	var key := "partial_models" if stage <= 1 else "leftover_models"
-	return _normalize_parts(visual.get(key, []), 0.32)
+	var parts := _normalize_parts(visual.get(key, []), 0.32)
+	return _scaled_layout_parts(parts, _recipe_content_scale(recipe_id))
 
 
 static func support_visible_with_full_dish(recipe_id: String) -> bool:
@@ -329,6 +345,25 @@ static func _normalize_parts(values: Array, default_scale: float) -> Array[Dicti
 		if not part.is_empty():
 			result.append(part)
 	return result
+
+
+static func _scaled_layout_parts(parts: Array[Dictionary], multiplier: float) -> Array[Dictionary]:
+	var result: Array[Dictionary] = []
+	for part: Dictionary in parts:
+		var copy := part.duplicate(true)
+		copy.scale = float(copy.get("scale", 0.40)) * multiplier
+		if copy.has("offset"):
+			var offset := _vector3(copy.offset, Vector3.ZERO) * multiplier
+			copy.offset = [offset.x, offset.y, offset.z]
+		if copy.has("spacing"):
+			copy.spacing = float(copy.spacing) * multiplier
+		result.append(copy)
+	return result
+
+
+static func _recipe_content_scale(recipe_id: String) -> float:
+	var visual: Dictionary = DataRegistry.food_visuals_by_id.get(recipe_id, {})
+	return canonical_content_scale(consumption_container(recipe_id)) * float(visual.get("canonical_scale_multiplier", 1.0))
 
 
 static func _normalized_part(value: Variant, default_scale: float) -> Dictionary:

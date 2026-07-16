@@ -2,6 +2,8 @@ class_name CustomerAgent
 extends AnimatedAgent
 
 const TABLE_WAIT_PATIENCE_MULTIPLIER := 1.75
+const EXIT_STAND_STAGGER := 0.18
+const EXIT_LANE_SPACING := 0.68
 
 ## Party controller.  Every visible guest is a CustomerPersonAgent with its own
 ## body, route and animation timeline; this node owns only the shared table,
@@ -51,6 +53,11 @@ var _entry_leg_failures := 0
 var _entry_leg_elapsed := 0.0
 var _exit_leg_failures := 0
 var _exit_leg_elapsed := 0.0
+var _exit_member_states: Dictionary = {}
+var _departed_members: Dictionary = {}
+var _exit_sequence_elapsed := 0.0
+var _exit_crossed_count := 0
+var _exit_departure_times: Dictionary = {}
 
 const CUSTOMER_APPEARANCES: Array[String] = [
 	"Casual_Male", "Casual_Female", "Casual2_Male", "Casual2_Female", "Casual3_Male", "Casual3_Female",
@@ -158,9 +165,13 @@ func _build_people() -> void:
 
 
 func _update_controller_anchor() -> void:
-	if people.is_empty() or not is_instance_valid(people[0]):
-		return
-	global_position = people[0].global_position
+	for index: int in people.size():
+		if _departed_members.has(index):
+			continue
+		var person := people[index]
+		if is_instance_valid(person) and not person.is_queued_for_deletion():
+			global_position = person.global_position
+			return
 
 
 func _refresh_queue_targets(force: bool = false) -> void:
@@ -458,107 +469,216 @@ func _leave_for_closing() -> void:
 func _begin_leaving(lost: bool) -> void:
 	_lost_departure = _lost_departure or lost
 	world.dequeue_customer(self)
+	_thought.visible = false
 	if not _seated:
 		world.finish_customer_entry(self)
 		world.release_table(self)
 		table = {}
 		_outside_departure = true
 		_set_state("leaving")
+		_exit_member_states.clear()
+		_departed_members.clear()
+		_exit_sequence_elapsed = 0.0
 		for index: int in people.size():
-			people[index].walk_to_position(world.customer_despawn_position(index), "despawn", float(index) * 0.16)
+			_exit_member_states[index] = {"stage": "despawn", "elapsed": 0.0, "failures": 0}
+			people[index].walk_to_position(_exit_gate_position(index), _exit_tag("despawn", index), float(index) * 0.08)
 		return
-	# Reserve exit priority while everybody is still correctly seated. Guests
-	# stand one at a time only after this party owns the doorway.
+	# The party reserves the doorway while everybody is still seated. Once it
+	# owns the exit, members stand with a short *overlapping* stagger rather than
+	# waiting for the previous diner to complete the entire route.
 	world.register_customer_exit(self)
 	_set_state("waiting_exit_door")
 
 
 func _begin_exit_sequence() -> void:
 	_exit_cursor = 0
-	_exit_stage = "stand"
+	_exit_stage = "parallel"
 	_door_released = false
 	_exit_leg_failures = 0
 	_exit_leg_elapsed = 0.0
+	_exit_member_states.clear()
+	_departed_members.clear()
+	_exit_sequence_elapsed = 0.0
+	_exit_crossed_count = 0
+	_exit_departure_times.clear()
+	for index: int in people.size():
+		_exit_member_states[index] = {
+			"stage": "queued",
+			"launch_at": float(index) * EXIT_STAND_STAGGER,
+			"elapsed": 0.0,
+			"failures": 0,
+			"lane": _exit_lane_offset(index),
+		}
 	_set_state("leaving")
-	_start_current_exit_leg()
+	_update_exit_sequence(0.0)
 
 
 func _start_current_exit_leg() -> void:
-	if _exit_cursor >= people.size():
+	# Compatibility shim for diagnostics/tests from older saves. Departure is no
+	# longer cursor-driven; every member advances through its own FSM.
+	if _exit_member_states.is_empty():
+		_begin_exit_sequence()
+	elif _exit_cursor >= people.size():
 		return
-	var person := people[_exit_cursor]
-	var assignment: Dictionary = table.get("seat_assignments", [])[_exit_cursor]
-	match _exit_stage:
-		"stand": person.begin_standing()
-		"seat": person.leave_seat_to_staging(Vector3(assignment.staging_position))
-		"door": person.walk_to_position(world.customer_inside_door_position(_exit_cursor), "exit_door")
-		"outside": person.walk_to_position(world.customer_outside_door_position(_exit_cursor), "exit_outside")
-	_exit_leg_elapsed = 0.0
 
 
 func _update_exit_sequence(delta: float = 0.0) -> void:
+	_exit_sequence_elapsed += maxf(delta, 0.0)
 	if _outside_departure:
-		if people.all(func(person: CustomerPersonAgent): return person.is_at("despawn") or person.phase == "route_failed"):
+		_update_outside_departure(delta)
+		if _departed_members.size() >= group_size:
 			_finish_departure()
 		return
-	if _exit_cursor < people.size():
-		_exit_leg_elapsed += delta
-		var person := people[_exit_cursor]
-		if person.phase == "route_failed":
-			_exit_leg_failures += 1
-			if _exit_leg_failures >= 2 or _exit_leg_elapsed >= 4.5:
-				var recovery := _current_exit_checkpoint()
-				if not recovery.is_empty():
-					_force_person_checkpoint(person, Vector3(recovery.position), String(recovery.tag))
-				_exit_leg_failures = 0
-				_exit_leg_elapsed = 0.0
-			else:
-				_start_current_exit_leg()
-			return
-		if _exit_stage == "stand" and person.phase == "standing_ready":
-			_exit_stage = "seat"
-			_start_current_exit_leg()
-		elif _exit_stage == "seat" and person.is_at("exit_stage"):
-			_exit_stage = "door"
-			_exit_leg_failures = 0
-			_start_current_exit_leg()
-		elif _exit_stage == "door" and person.is_at("exit_door"):
-			_exit_stage = "outside"
-			_exit_leg_failures = 0
-			_start_current_exit_leg()
-		elif _exit_stage == "outside" and person.is_at("exit_outside"):
-			person.walk_to_position(world.customer_despawn_position(_exit_cursor), "despawn", 0.0)
-			_exit_cursor += 1
-			_exit_stage = "stand"
-			_exit_leg_failures = 0
-			_start_current_exit_leg()
-	if _exit_cursor >= people.size():
-		if not _door_released:
-			_transfer_dirty_table()
-			world.release_table(self)
-			world.finish_customer_exit(self)
-			_door_released = true
-			table = {}
-			# Once the whole party has crossed the threshold it no longer
-			# participates in doorway traffic. Keep the staggered walk-off visual,
-			# but let later parties use the exit lane without body pile-ups.
-			for outside_person: CustomerPersonAgent in people:
-				outside_person.set_traffic_collision_enabled(false)
-		if people.all(func(candidate: CustomerPersonAgent): return candidate.is_at("despawn") or candidate.phase == "route_failed"):
-			_finish_departure()
+	for index: int in people.size():
+		if _departed_members.has(index):
+			continue
+		_update_exit_member(index, delta)
+	_exit_cursor = _exit_crossed_count
+	if _exit_crossed_count >= group_size:
+		_release_exit_door_and_table()
+	if _departed_members.size() >= group_size:
+		_finish_departure()
 
 
 func _current_exit_checkpoint() -> Dictionary:
 	if _exit_cursor >= people.size() or table.is_empty():
 		return {}
-	var assignments: Array = table.get("seat_assignments", [])
-	if _exit_cursor >= assignments.size():
+	var member_state: Dictionary = _exit_member_states.get(_exit_cursor, {})
+	if member_state.is_empty():
 		return {}
-	match _exit_stage:
-		"seat": return {"position": Vector3(assignments[_exit_cursor].staging_position), "tag": "exit_stage"}
-		"door": return {"position": world.customer_inside_door_position(_exit_cursor), "tag": "exit_door"}
-		"outside": return {"position": world.customer_outside_door_position(_exit_cursor), "tag": "exit_outside"}
+	return _exit_checkpoint(_exit_cursor, String(member_state.get("stage", "")))
+
+
+func _update_exit_member(index: int, delta: float) -> void:
+	if index >= people.size() or not is_instance_valid(people[index]):
+		_mark_member_departed(index)
+		return
+	var person := people[index]
+	var member_state: Dictionary = _exit_member_states.get(index, {})
+	if member_state.is_empty():
+		return
+	member_state.elapsed = float(member_state.get("elapsed", 0.0)) + maxf(delta, 0.0)
+	var stage := String(member_state.get("stage", "queued"))
+	match stage:
+		"queued":
+			if _exit_sequence_elapsed + 0.0001 >= float(member_state.get("launch_at", 0.0)):
+				person.begin_standing()
+				_set_exit_member_stage(member_state, "stand")
+		"stand":
+			if person.phase == "standing_ready":
+				var assignments: Array = table.get("seat_assignments", [])
+				if index < assignments.size():
+					person.leave_seat_to_staging(Vector3(assignments[index].staging_position))
+					_set_exit_member_stage(member_state, "seat")
+		"seat":
+			if person.is_at("exit_stage"):
+				person.walk_to_position(_exit_inside_position(index), _exit_tag("door", index))
+				_set_exit_member_stage(member_state, "door")
+		"door":
+			if person.is_at(_exit_tag("door", index)):
+				person.walk_to_position(_exit_outside_position(index), _exit_tag("outside", index), float(index) * 0.04)
+				_set_exit_member_stage(member_state, "outside")
+			elif person.phase == "route_failed":
+				_recover_exit_member(index, person, member_state)
+		"outside":
+			if person.is_at(_exit_tag("outside", index)):
+				member_state.crossed = true
+				_exit_crossed_count += 1
+				person.begin_linear_departure(_exit_gate_position(index), _exit_tag("despawn", index))
+				_set_exit_member_stage(member_state, "despawn")
+			elif person.phase == "route_failed":
+				_recover_exit_member(index, person, member_state)
+		"despawn":
+			if person.is_at(_exit_tag("despawn", index)):
+				_mark_member_departed(index)
+	_exit_member_states[index] = member_state
+
+
+func _update_outside_departure(delta: float) -> void:
+	for index: int in people.size():
+		if _departed_members.has(index):
+			continue
+		var person := people[index]
+		var member_state: Dictionary = _exit_member_states.get(index, {"stage": "despawn", "elapsed": 0.0, "failures": 0})
+		member_state.elapsed = float(member_state.get("elapsed", 0.0)) + maxf(delta, 0.0)
+		var tag := _exit_tag("despawn", index)
+		if person.is_at(tag):
+			_mark_member_departed(index)
+		elif person.phase == "route_failed":
+			_recover_exit_member(index, person, member_state)
+		_exit_member_states[index] = member_state
+
+
+func _recover_exit_member(index: int, person: CustomerPersonAgent, member_state: Dictionary) -> void:
+	var stage := String(member_state.get("stage", ""))
+	var checkpoint := _exit_checkpoint(index, stage)
+	if checkpoint.is_empty():
+		return
+	member_state.failures = int(member_state.get("failures", 0)) + 1
+	if int(member_state.failures) >= 2 or float(member_state.get("elapsed", 0.0)) >= 4.5:
+		_force_person_checkpoint(person, Vector3(checkpoint.position), String(checkpoint.tag))
+		member_state.failures = 0
+	else:
+		person.walk_to_position(Vector3(checkpoint.position), String(checkpoint.tag))
+
+
+func _set_exit_member_stage(member_state: Dictionary, stage: String) -> void:
+	member_state.stage = stage
+	member_state.elapsed = 0.0
+	member_state.failures = 0
+
+
+func _exit_checkpoint(index: int, stage: String) -> Dictionary:
+	match stage:
+		"door": return {"position": _exit_inside_position(index), "tag": _exit_tag("door", index)}
+		"outside": return {"position": _exit_outside_position(index), "tag": _exit_tag("outside", index)}
+		"despawn": return {"position": _exit_gate_position(index), "tag": _exit_tag("despawn", index)}
 	return {}
+
+
+func _exit_tag(stage: String, index: int) -> String:
+	return "exit_%s_%d" % [stage, index]
+
+
+func _exit_lane_offset(index: int) -> float:
+	# EXIT_ROW is the sidewalk cell nearest the restaurant. Four lanes fan out
+	# over both sidewalk rows, each wider than two guest radii, and never share a
+	# final marker. This removes the single convergence point visible at the lot
+	# boundary.
+	return 0.52 - float(index) * EXIT_LANE_SPACING
+
+
+func _exit_inside_position(index: int) -> Vector3:
+	return world.customer_inside_door_position(index % 2)
+
+
+func _exit_outside_position(index: int) -> Vector3:
+	var base := world.customer_outside_door_position(0)
+	return Vector3(base.x, 0.0, base.z + _exit_lane_offset(index))
+
+
+func _exit_gate_position(index: int) -> Vector3:
+	var base := world.customer_despawn_position(0)
+	return Vector3(base.x, 0.0, base.z + _exit_lane_offset(index))
+
+
+func _release_exit_door_and_table() -> void:
+	if _door_released:
+		return
+	_transfer_dirty_table()
+	world.release_table(self)
+	world.finish_customer_exit(self)
+	_door_released = true
+	table = {}
+
+
+func _mark_member_departed(index: int) -> void:
+	if _departed_members.has(index):
+		return
+	_departed_members[index] = true
+	_exit_departure_times[index] = _exit_sequence_elapsed
+	if index < people.size() and is_instance_valid(people[index]):
+		people[index].complete_individual_departure()
 
 
 func _force_person_checkpoint(person: CustomerPersonAgent, position: Vector3, tag: String) -> void:
@@ -793,3 +913,6 @@ func _create_thought() -> void:
 	_thought.no_depth_test = true
 	_thought.visible = false
 	add_child(_thought)
+	var status_bubble := AgentStatusBubble.new()
+	add_child(status_bubble)
+	status_bubble.setup(_thought, world, "customer")

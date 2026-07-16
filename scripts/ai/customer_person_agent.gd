@@ -99,6 +99,8 @@ func tick_motion(delta: float) -> void:
 			_tick_local_seat(delta)
 		"moving_from_seat":
 			_tick_local_leave(delta)
+		"linear_departure":
+			_tick_linear_departure(delta)
 		"sit_transition":
 			transition_remaining -= delta
 			if transition_remaining <= 0.0:
@@ -196,6 +198,46 @@ func _tick_local_leave(delta: float) -> void:
 	phase = "arrived"
 	collision_mask = 3
 	play_animation("Idle")
+
+
+func begin_linear_departure(target: Vector3, tag: String) -> void:
+	# Beyond the exterior threshold there is no reason to feed a diner back into
+	# the indoor A* graph. A dedicated straight sidewalk lane produces a stable,
+	# readable walk-off and prevents departed groups from trying to re-form at a
+	# shared navigation point.
+	_hide_utensil()
+	shutdown_navigation()
+	_local_target = Vector3(target.x, 0.0, target.z)
+	destination = _local_target
+	target_tag = tag
+	phase = "linear_departure"
+	seated = false
+	collision_mask = 0
+	set_traffic_collision_enabled(false)
+	play_animation("Walk")
+
+
+func _tick_linear_departure(delta: float) -> void:
+	var distance := _flat_distance(global_position, _local_target)
+	if distance > arrival_tolerance:
+		var direction := global_position.direction_to(_local_target)
+		global_position = global_position.move_toward(_local_target, minf(distance, movement_speed * delta))
+		rotation.y = lerp_angle(rotation.y, atan2(direction.x, direction.z), 1.0 - exp(-delta * 12.0))
+		return
+	global_position = _local_target
+	velocity = Vector3.ZERO
+	phase = "arrived"
+	play_animation("Idle")
+
+
+func complete_individual_departure() -> void:
+	# Hide and unregister this physical guest immediately. The party controller
+	# intentionally remains alive until the final member reaches their own gate.
+	shutdown_navigation()
+	set_collision_enabled(false)
+	phase = "departed"
+	visible = false
+	queue_free()
 
 
 func _maintain_seated_pose(delta: float = 0.0) -> void:

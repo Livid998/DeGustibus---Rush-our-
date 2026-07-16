@@ -12,6 +12,12 @@ func _ready() -> void:
 	GameState.reset_to_defaults(false)
 	main.world.load_layout()
 	main.world.spawn_staff()
+	# This test advances the simulation manually inside _ready(), so the normal
+	# end-of-frame queue_free pass never runs. Remove the previous spawn now;
+	# otherwise invisible, unregistered employee capsules remain as fake walls.
+	for pending_staff: Node in get_tree().get_nodes_in_group("staff_agent"):
+		if pending_staff.is_queued_for_deletion():
+			pending_staff.free()
 	SimulationManager.reset_service_stats()
 	SimulationManager.set_speed(4.0)
 	SimulationManager.open_restaurant()
