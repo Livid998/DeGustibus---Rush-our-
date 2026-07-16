@@ -39,23 +39,30 @@ func _check_factory_bounds() -> void:
 		var size := ModelFactory.calculate_visual_bounds(container, true).size if container != null else Vector3.ZERO
 		var serving_size := ModelFactory.calculate_visual_bounds(serving, true).size
 		_expect(container != null and _same_footprint(size, FoodVisualFactory.canonical_container_size(kind)), "%s full serving has exactly one canonical %s" % [recipe_id, kind])
-		_expect(serving_size.x <= size.x + 0.025 and serving_size.z <= size.z + 0.025, "%s assembled food stays inside the dirty-container footprint (%.3fx%.3f)" % [recipe_id, serving_size.x, serving_size.z])
 		var is_pizza := recipe_id in ["margherita", "mushroom_pizza", "pepperoni_pizza"]
 		if is_pizza:
 			var food_content := serving.get_node_or_null("FoodContent") as Node3D
 			var food_size := ModelFactory.calculate_visual_bounds(food_content, true).size if food_content != null else Vector3.ZERO
 			var coverage := maxf(food_size.x, food_size.z) / maxf(maxf(size.x, size.z), 0.0001)
-			_expect(coverage >= 0.90 and coverage <= 0.99, "%s covers the plate with only a thin rim (%.1f%%)" % [recipe_id, coverage * 100.0])
+			var authored_scale := float(DataRegistry.food_visuals_by_id.get(recipe_id, {}).get("canonical_scale_multiplier", 1.0))
+			# Pizza slice meshes contain generous non-crust bounds, so an AABB
+			# around 115% is intentional: the visible crust, verified by the
+			# capture, reaches the plate rim without visibly crossing it.
+			_expect(authored_scale >= 1.05, "%s uses the perceptual pizza scale rather than the padded mesh default" % recipe_id)
+			_expect(coverage >= 1.10 and coverage <= 1.20, "%s padded mesh footprint produces a visually thin plate rim (%.1f%%)" % [recipe_id, coverage * 100.0])
+		else:
+			_expect(serving_size.x <= size.x + 0.025 and serving_size.z <= size.z + 0.025, "%s assembled food stays inside the dirty-container footprint (%.3fx%.3f)" % [recipe_id, serving_size.x, serving_size.z])
 		for stage: int in [1, 2]:
 			var stage_parts := FoodVisualFactory.consumption_parts(recipe_id, stage)
 			if stage_parts.is_empty():
 				continue
 			var stage_food := FoodVisualFactory.instantiate_parts(stage_parts)
 			var stage_size := ModelFactory.calculate_visual_bounds(stage_food, true).size
-			_expect(stage_size.x <= size.x + 0.025 and stage_size.z <= size.z + 0.025, "%s stage %d food stays inside the same canonical %s" % [recipe_id, stage, kind])
-			if is_pizza and stage == 1:
+			if is_pizza:
 				var stage_coverage := maxf(stage_size.x, stage_size.z) / maxf(maxf(size.x, size.z), 0.0001)
-				_expect(stage_coverage >= 0.90 and stage_coverage <= 0.99, "%s stage %d keeps full-size slices across the plate (%.1f%%)" % [recipe_id, stage, stage_coverage * 100.0])
+				_expect(stage_coverage >= 1.10 and stage_coverage <= 1.20, "%s stage %d keeps the perceptual pizza diameter (%.1f%% padded footprint)" % [recipe_id, stage, stage_coverage * 100.0])
+			else:
+				_expect(stage_size.x <= size.x + 0.025 and stage_size.z <= size.z + 0.025, "%s stage %d food stays inside the same canonical %s" % [recipe_id, stage, kind])
 			stage_food.free()
 		serving.free()
 
@@ -71,13 +78,18 @@ func _check_waiter_carry(world: RestaurantWorld) -> void:
 		_expect(false, "waiter fixture exists")
 		return
 	waiter.set_process(false)
-	waiter.active_task = {"action":"serve", "payload":{"recipe_id":"classic_burger"}}
+	waiter.active_task = {"action":"serve", "payload":{"recipe_id":"margherita"}}
 	waiter._show_task_prop(false)
 	waiter._update_carried_prop_anchor()
 	var carried_container := waiter._task_prop.get_node_or_null("StableContainer") as Node3D
+	var carried_food := waiter._task_prop.get_node_or_null("FoodContent") as Node3D
 	var midpoint := (waiter._hand_prop_anchor.global_position + waiter._left_hand_prop_anchor.global_position) * 0.5
 	var center_distance := Vector2(carried_container.global_position.x, carried_container.global_position.z).distance_to(Vector2(midpoint.x, midpoint.z)) if carried_container != null else INF
 	_expect(carried_container != null and _same_footprint(ModelFactory.calculate_visual_bounds(carried_container, true).size, FoodVisualFactory.canonical_container_size("plate")), "served dish keeps canonical dirty-plate footprint while carried")
+	var carried_plate_size := ModelFactory.calculate_visual_bounds(carried_container, true).size if carried_container != null else Vector3.ZERO
+	var carried_food_size := ModelFactory.calculate_visual_bounds(carried_food, true).size if carried_food != null else Vector3.ZERO
+	var carried_coverage := maxf(carried_food_size.x, carried_food_size.z) / maxf(maxf(carried_plate_size.x, carried_plate_size.z), 0.0001)
+	_expect(carried_food != null and carried_coverage >= 1.10 and carried_coverage <= 1.20, "carried pizza keeps its perceptual table-service diameter (%.1f%% padded footprint)" % (carried_coverage * 100.0))
 	_expect(center_distance <= 0.10, "served dish is driven by the midpoint between both animated hands")
 	waiter.active_task = {"action":"collect_dishes", "payload":{"container_kinds":["plate", "bowl"]}}
 	waiter._show_task_prop(false)

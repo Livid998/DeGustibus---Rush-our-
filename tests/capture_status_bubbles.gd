@@ -6,15 +6,13 @@ func _ready() -> void:
 	SaveManager.writes_enabled = false
 	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path("res://artifacts"))
 	get_window().size = Vector2i(1440, 900)
+	GameState.reset_to_defaults(false)
+	GameState.tutorial.skipped = true
 	var main_scene: PackedScene = load("res://scenes/main/main.tscn")
 	var main := main_scene.instantiate()
 	add_child(main)
-	GameState.reset_to_defaults(false)
-	GameState.tutorial.skipped = true
-	for _frame: int in 30:
+	for _frame: int in 2:
 		await get_tree().process_frame
-	main.world.load_layout()
-	main.world.spawn_staff()
 	main.ui._update_tutorial()
 	main.ui.close_screen()
 	main.world.set_process_unhandled_input(false)
@@ -44,7 +42,7 @@ func _ready() -> void:
 		employee._thought.visible = true
 		staff_index += 1
 
-	for _frame: int in 20:
+	for _frame: int in 2:
 		await get_tree().process_frame
 	await _save_frame("res://artifacts/status_bubbles_close_zoom.png")
 	get_tree().quit()
@@ -52,7 +50,10 @@ func _ready() -> void:
 
 func _save_frame(path: String) -> void:
 	RenderingServer.force_draw()
-	await RenderingServer.frame_post_draw
+	# Some display backends do not emit `frame_post_draw` reliably after an
+	# explicit force. The scene already rendered two frames; one more process
+	# frame flushes the close-zoom bubble sprites deterministically.
+	await get_tree().process_frame
 	var image := get_viewport().get_texture().get_image()
 	image.save_png(path)
 	print("CAPTURED ", path, " ", image.get_size())

@@ -80,6 +80,11 @@ func _ready() -> void:
 		await get_tree().process_frame
 	await _save_frame("res://artifacts/customer_consumption_stages.png")
 	print("FOOD_CAPTURE consumption saved")
+	customer._update_dish_consumption("CAPTURE_0", 0.20)
+	for _frame: int in 4:
+		await get_tree().process_frame
+	await _save_frame("res://artifacts/pizza_leftover_readability.png")
+	print("FOOD_CAPTURE pizza leftovers saved")
 	customer.visible = false
 	var waiter := _first_waiter(main.world)
 	if waiter != null:
@@ -98,6 +103,15 @@ func _ready() -> void:
 			waiter._update_carried_prop_anchor()
 		await _save_frame("res://artifacts/waiter_carry_alignment.png")
 		print("FOOD_CAPTURE carry saved")
+		waiter._clear_task_prop()
+		waiter.active_task = {"action":"serve", "payload":{"recipe_id":"margherita"}}
+		waiter._show_task_prop(false)
+		waiter._update_carried_prop_anchor()
+		for _frame: int in 6:
+			await get_tree().process_frame
+			waiter._update_carried_prop_anchor()
+		await _save_frame("res://artifacts/waiter_pizza_carry_alignment.png")
+		print("FOOD_CAPTURE pizza carry saved")
 	get_tree().quit()
 
 

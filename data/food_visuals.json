@@ -83,7 +83,7 @@
   {"id":"veggie_burger_unplated","models":[
     {"model":"res://assets/food/food_vegetableburger.gltf","scale":0.50,"offset":[0.0,0.0,0.0]}
   ]},
-  {"id":"margherita","consumption_container":"plate","canonical_scale_multiplier":0.905,"models":[
+  {"id":"margherita","consumption_container":"plate","canonical_scale_multiplier":1.08,"models":[
     {"model":"res://assets/food/food_pizza_cheese_plated.gltf","scale":0.32,"offset":[0.0,0.0,0.0]}
   ],"serving_models":[
     {"model":"res://assets/food/food_pizza_cheese_slice.gltf","scale":0.42,"offset":[0.0,0.07,0.0],"rotation":[0.0,0.0,0.0]},
@@ -98,10 +98,10 @@
     {"model":"res://assets/food/food_pizza_cheese_slice.gltf","scale":0.42,"offset":[0.0,0.07,0.0],"rotation":[0.0,3.1416,0.0]},
     {"model":"res://assets/food/food_pizza_cheese_slice.gltf","scale":0.42,"offset":[0.0,0.07,0.0],"rotation":[0.0,4.1888,0.0]}
   ],"leftover_models":[
-    {"model":"res://assets/food/food_pizza_cheese_slice.gltf","scale":0.42,"offset":[0.0,0.07,0.0],"rotation":[0.0,0.0,0.0]},
-    {"model":"res://assets/food/food_pizza_cheese_slice.gltf","scale":0.42,"offset":[0.0,0.07,0.0],"rotation":[0.0,3.1416,0.0]}
+    {"model":"res://assets/food/food_pizza_cheese_slice.gltf","scale":0.42,"offset":[0.0,0.07,0.0],"rotation":[0.0,-0.55,0.0]},
+    {"model":"res://assets/food/food_pizza_cheese_slice.gltf","scale":0.42,"offset":[0.0,0.07,0.0],"rotation":[0.0,2.5916,0.0]}
   ]},
-  {"id":"mushroom_pizza","consumption_container":"plate","canonical_scale_multiplier":0.905,"models":[
+  {"id":"mushroom_pizza","consumption_container":"plate","canonical_scale_multiplier":1.08,"models":[
     {"model":"res://assets/food/food_pizza_mushroom_plated.gltf","scale":0.32,"offset":[0.0,0.0,0.0]}
   ],"serving_models":[
     {"model":"res://assets/food/food_pizza_mushroom_slice.gltf","scale":0.42,"offset":[0.0,0.07,0.0],"rotation":[0.0,0.0,0.0]},
@@ -116,10 +116,10 @@
     {"model":"res://assets/food/food_pizza_mushroom_slice.gltf","scale":0.42,"offset":[0.0,0.07,0.0],"rotation":[0.0,3.1416,0.0]},
     {"model":"res://assets/food/food_pizza_mushroom_slice.gltf","scale":0.42,"offset":[0.0,0.07,0.0],"rotation":[0.0,4.1888,0.0]}
   ],"leftover_models":[
-    {"model":"res://assets/food/food_pizza_mushroom_slice.gltf","scale":0.42,"offset":[0.0,0.07,0.0],"rotation":[0.0,0.0,0.0]},
-    {"model":"res://assets/food/food_pizza_mushroom_slice.gltf","scale":0.42,"offset":[0.0,0.07,0.0],"rotation":[0.0,3.1416,0.0]}
+    {"model":"res://assets/food/food_pizza_mushroom_slice.gltf","scale":0.42,"offset":[0.0,0.07,0.0],"rotation":[0.0,-0.55,0.0]},
+    {"model":"res://assets/food/food_pizza_mushroom_slice.gltf","scale":0.42,"offset":[0.0,0.07,0.0],"rotation":[0.0,2.5916,0.0]}
   ]},
-  {"id":"pepperoni_pizza","consumption_container":"plate","canonical_scale_multiplier":0.905,"models":[
+  {"id":"pepperoni_pizza","consumption_container":"plate","canonical_scale_multiplier":1.08,"models":[
     {"model":"res://assets/food/food_pizza_pepperoni_plated.gltf","scale":0.32,"offset":[0.0,0.0,0.0]}
   ],"serving_models":[
     {"model":"res://assets/food/food_pizza_pepperoni_slice.gltf","scale":0.42,"offset":[0.0,0.07,0.0],"rotation":[0.0,0.0,0.0]},
@@ -134,8 +134,8 @@
     {"model":"res://assets/food/food_pizza_pepperoni_slice.gltf","scale":0.42,"offset":[0.0,0.07,0.0],"rotation":[0.0,3.1416,0.0]},
     {"model":"res://assets/food/food_pizza_pepperoni_slice.gltf","scale":0.42,"offset":[0.0,0.07,0.0],"rotation":[0.0,4.1888,0.0]}
   ],"leftover_models":[
-    {"model":"res://assets/food/food_pizza_pepperoni_slice.gltf","scale":0.42,"offset":[0.0,0.07,0.0],"rotation":[0.0,0.0,0.0]},
-    {"model":"res://assets/food/food_pizza_pepperoni_slice.gltf","scale":0.42,"offset":[0.0,0.07,0.0],"rotation":[0.0,3.1416,0.0]}
+    {"model":"res://assets/food/food_pizza_pepperoni_slice.gltf","scale":0.42,"offset":[0.0,0.07,0.0],"rotation":[0.0,-0.55,0.0]},
+    {"model":"res://assets/food/food_pizza_pepperoni_slice.gltf","scale":0.42,"offset":[0.0,0.07,0.0],"rotation":[0.0,2.5916,0.0]}
   ]},
   {"id":"classic_burger","consumption_container":"plate","support_visible_full":true,"models":[
     {"model":"res://assets/food/food_burger.gltf","scale":0.52,"offset":[0.0,0.0,0.0]}

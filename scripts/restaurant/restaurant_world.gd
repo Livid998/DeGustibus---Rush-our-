@@ -1700,6 +1700,7 @@ func compute_agent_velocity(agent: AnimatedAgent, desired_velocity: Vector3) -> 
 			closest_time = clampf(-offset.dot(relative_velocity) / relative_velocity.length_squared(), 0.0, 0.82)
 		var predicted_offset := offset + relative_velocity * closest_time
 		var predicted_distance := predicted_offset.length()
+		var away := offset.normalized() if distance > 0.01 else Vector3.RIGHT.rotated(Vector3.UP, float(agent.get_instance_id() % 4) * PI * 0.5)
 		var toward_other := -away
 		var approaching := desired_direction.dot(toward_other) > 0.12
 		var collision_risk := predicted_distance < separation * 1.22 and (approaching or distance < separation * 1.45)
