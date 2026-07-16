@@ -25,6 +25,8 @@ var nav_buttons: Dictionary = {}
 var screen_title_label: Label
 var world_action_panel: PanelContainer
 var world_build_button: Button
+var camera_controls: PanelContainer
+var wall_visibility_button: Button
 var current_screen := "Ristorante"
 var market_provider := MockMarketProvider.new()
 var _refresh_clock := 0.0
@@ -60,7 +62,9 @@ func setup(value_world: RestaurantWorld) -> void:
 	world = value_world
 	world.build_system.selection_changed.connect(_on_selection_changed)
 	world.build_system.preview_changed.connect(_on_preview_changed)
+	world.camera_rig.view_changed.connect(func(_quadrant: int): _refresh_camera_controls())
 	build_hud.setup(self, world)
+	_refresh_camera_controls()
 	show_screen("Ristorante")
 
 
@@ -226,6 +230,7 @@ func _build_shell() -> void:
 	_build_tutorial()
 	build_hud = BuildHUD.new()
 	root.add_child(build_hud)
+	_build_camera_controls()
 	root.resized.connect(_apply_responsive_layout)
 	_apply_responsive_layout()
 
@@ -374,6 +379,55 @@ func _build_world_actions() -> void:
 	world_build_button = make_button("Costruisci e modifica", open_builder, "yellow")
 	world_build_button.custom_minimum_size = Vector2(180, 44)
 	world_action_panel.add_child(world_build_button)
+
+
+func _build_camera_controls() -> void:
+	camera_controls = PanelContainer.new()
+	camera_controls.offset_left = 14
+	camera_controls.offset_right = 326
+	camera_controls.offset_top = 80
+	camera_controls.offset_bottom = 142
+	camera_controls.mouse_filter = Control.MOUSE_FILTER_STOP
+	camera_controls.add_theme_stylebox_override("panel", _panel_style(Color("173f45e8"), 12))
+	root.add_child(camera_controls)
+	var row := HBoxContainer.new()
+	row.alignment = BoxContainer.ALIGNMENT_CENTER
+	row.add_theme_constant_override("separation", 7)
+	camera_controls.add_child(row)
+	var rotate_left_button := make_button("↶", func(): if world: world.camera_rig.rotate_left(), "blue")
+	rotate_left_button.custom_minimum_size = Vector2(54, 48)
+	rotate_left_button.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	rotate_left_button.tooltip_text = "Ruota la mappa a sinistra"
+	rotate_left_button.add_theme_font_size_override("font_size", 25)
+	row.add_child(rotate_left_button)
+	wall_visibility_button = make_button("Muri ridotti", _toggle_reduced_walls, "ghost")
+	wall_visibility_button.custom_minimum_size = Vector2(148, 48)
+	wall_visibility_button.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	wall_visibility_button.tooltip_text = "Alterna muri interi e muretti bassi sui lati non nascosti"
+	wall_visibility_button.add_theme_font_size_override("font_size", 14)
+	row.add_child(wall_visibility_button)
+	var rotate_right_button := make_button("↷", func(): if world: world.camera_rig.rotate_right(), "blue")
+	rotate_right_button.custom_minimum_size = Vector2(54, 48)
+	rotate_right_button.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	rotate_right_button.tooltip_text = "Ruota la mappa a destra"
+	rotate_right_button.add_theme_font_size_override("font_size", 25)
+	row.add_child(rotate_right_button)
+
+
+func _toggle_reduced_walls() -> void:
+	if world == null:
+		return
+	world.toggle_reduced_walls()
+	_refresh_camera_controls()
+	AudioManager.play_feedback()
+
+
+func _refresh_camera_controls() -> void:
+	if camera_controls == null:
+		return
+	camera_controls.visible = current_screen == "Ristorante" and not screen_panel.visible
+	if wall_visibility_button and world:
+		wall_visibility_button.text = "Muri ridotti" if world.reduced_walls else "Muri normali"
 
 
 func _build_pass_panel() -> void:
@@ -686,6 +740,7 @@ func _update_world_actions() -> void:
 		return
 	world_action_panel.visible = current_screen == "Ristorante" and not screen_panel.visible and GameState.restaurant_state in ["closed", "open"] and (build_hud == null or not build_hud.is_open)
 	world_build_button.text = "Costruisci e modifica" if GameState.restaurant_state == "closed" else "Modifica decorazioni"
+	_refresh_camera_controls()
 
 
 func _panel_style(color: Color, radius: int) -> StyleBoxFlat:

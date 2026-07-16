@@ -9,7 +9,7 @@ signal employees_changed
 signal layout_changed
 signal toast_requested(message: String, tone: String)
 
-const SAVE_VERSION := 8
+const SAVE_VERSION := 9
 
 var money: int = 10000
 var reputation: float = 1.0
@@ -23,7 +23,7 @@ var layout: Array = []
 var deliveries: Array = []
 var purchased_preparations: Dictionary = {}
 var progress: Dictionary = {"customers_served": 0, "desserts_served": 0, "services_started": 0}
-var settings: Dictionary = {"music": true, "sound": true, "camera_zoom": 24.0, "graphics_quality": "auto"}
+var settings: Dictionary = {"music": true, "sound": true, "camera_zoom": 24.0, "camera_quadrant": 0, "graphics_quality": "auto"}
 var tutorial: Dictionary = {"step": 0, "skipped": false, "complete": false}
 
 
@@ -63,7 +63,7 @@ func reset_to_defaults(emit_signals: bool = true) -> void:
 	deliveries.clear()
 	purchased_preparations.clear()
 	progress = {"customers_served": 0, "desserts_served": 0, "services_started": 0}
-	settings = {"music": true, "sound": true, "camera_zoom": 24.0, "graphics_quality": "auto"}
+	settings = {"music": true, "sound": true, "camera_zoom": 24.0, "camera_quadrant": 0, "graphics_quality": "auto"}
 	tutorial = {"step": 0, "skipped": false, "complete": false}
 	if emit_signals:
 		_emit_all()
@@ -276,6 +276,8 @@ func deserialize(data: Dictionary) -> void:
 		_migrate_attachment_integrity_v7()
 	if loaded_version < 8:
 		_migrate_exterior_v8()
+	if loaded_version < 9:
+		_migrate_complete_shell_v9()
 	settings.merge(data.get("settings", {}), true)
 	tutorial.merge(data.get("tutorial", {}), true)
 	purchased_preparations.merge(data.get("purchased_preparations", {}), true)
@@ -578,8 +580,40 @@ func _migrate_exterior_v8() -> void:
 		existing_uids[uid] = true
 
 
+func _migrate_complete_shell_v9() -> void:
+	# The old fixed isometric view only needed the north and west walls.  Once
+	# the camera can rotate, every canonical outer edge must have a real layout
+	# object. Preserve doors/windows and player-built replacements already on an
+	# edge, and only fill genuinely missing shell segments.
+	var occupied_edges: Dictionary = {}
+	var used_uids: Dictionary = {}
+	for record: Dictionary in layout:
+		used_uids[String(record.get("uid", ""))] = true
+		if String(record.get("item", "")) in ["wall", "wall_window", "door", "pass_opening"]:
+			occupied_edges[_layout_edge_key(record)] = true
+	for shell_record: Dictionary in _initial_wall_records():
+		var edge_key := _layout_edge_key(shell_record)
+		var uid := String(shell_record.get("uid", ""))
+		if occupied_edges.has(edge_key) or used_uids.has(uid):
+			continue
+		layout.append(shell_record.duplicate(true))
+		occupied_edges[edge_key] = true
+		used_uids[uid] = true
+
+
+func _layout_edge_key(record: Dictionary) -> String:
+	var cell_data: Array = record.get("cell", [0, 0])
+	var x := int(cell_data[0])
+	var y := int(cell_data[1])
+	match posmod(int(record.get("rotation", 0)), 4):
+		0: return "h:%d:%d" % [x, y]
+		1: return "v:%d:%d" % [x, y]
+		2: return "h:%d:%d" % [x, y + 1]
+		_: return "v:%d:%d" % [x + 1, y]
+
+
 func _initial_exterior_records() -> Array:
-	# The sidewalk and road occupy y=-1..-3. Keep the initial clearing work
+	# The sidewalk and road occupy y=-1..-6. Keep the initial clearing work
 	# around the other three sides of the lot so it never blocks the queue.
 	return [
 		{"uid":"exterior_obstacle_tree_1", "item":"exterior_obstacle_tree_a", "cell":[-3, 2], "rotation":0},
@@ -597,8 +631,12 @@ func _initial_wall_records() -> Array:
 		if x == 8:
 			continue
 		records.append({"uid":"wall_top_%d" % x, "item":"wall_window" if x in [3, 4, 13, 14] else "wall", "cell":[x, 0], "rotation":0})
-	for y: int in range(1, 14):
+	for y: int in range(0, 14):
 		records.append({"uid":"wall_left_%d" % y, "item":"wall", "cell":[0, y], "rotation":1})
+	for x: int in 18:
+		records.append({"uid":"wall_bottom_%d" % x, "item":"wall_window" if x in [3, 4, 13, 14] else "wall", "cell":[x, 13], "rotation":2})
+	for y: int in range(0, 14):
+		records.append({"uid":"wall_right_%d" % y, "item":"wall_window" if y in [3, 4, 10, 11] else "wall", "cell":[17, y], "rotation":3})
 	for x: int in range(0, 18):
 		if x in [8, 9, 10, 11]:
 			continue

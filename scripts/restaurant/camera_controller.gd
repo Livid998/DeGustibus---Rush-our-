@@ -1,9 +1,12 @@
 class_name RestaurantCamera
 extends Node3D
 
+signal view_changed(quadrant: int)
+
 var camera: Camera3D
 var target := Vector3.ZERO
 var zoom := 24.0
+var quadrant := 0
 
 var _mouse_pan_button := false
 var _primary_down := false
@@ -18,12 +21,19 @@ var _touch_hold_time := 0.0
 var _long_press_ready := false
 var _long_press_triggered := false
 var _long_press_position := Vector2.ZERO
+var _rotation_tween: Tween
+var _rotation_locked := false
+var _target_yaw := 0.0
 
 const DRAG_THRESHOLD := 7.0
+const ROTATION_DURATION := 0.32
 
 
 func _ready() -> void:
 	zoom = clampf(float(GameState.settings.get("camera_zoom", 24.0)), 13.0, 34.0)
+	quadrant = posmod(int(GameState.settings.get("camera_quadrant", 0)), 4)
+	_target_yaw = float(quadrant) * PI * 0.5
+	rotation.y = _target_yaw
 	camera = Camera3D.new()
 	camera.projection = Camera3D.PROJECTION_ORTHOGONAL
 	camera.size = zoom
@@ -137,6 +147,45 @@ func consume_long_press() -> Variant:
 
 func zoom_at(_screen_position: Vector2, amount: float) -> void:
 	zoom = clampf(zoom + amount, 13.0, 34.0)
+
+
+func rotate_left() -> void:
+	_rotate_by(-1)
+
+
+func rotate_right() -> void:
+	_rotate_by(1)
+
+
+func is_rotating() -> bool:
+	return _rotation_locked
+
+
+func _rotate_by(direction: int) -> void:
+	if _rotation_locked or direction == 0:
+		return
+	quadrant = posmod(quadrant + signi(direction), 4)
+	_target_yaw += float(signi(direction)) * PI * 0.5
+	_rotation_locked = true
+	GameState.settings.camera_quadrant = quadrant
+	view_changed.emit(quadrant)
+	SaveManager.save_game()
+	if _rotation_tween:
+		_rotation_tween.kill()
+	_rotation_tween = create_tween()
+	_rotation_tween.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN_OUT)
+	_rotation_tween.tween_property(self, "rotation:y", _target_yaw, ROTATION_DURATION)
+	_rotation_tween.tween_callback(_finish_rotation)
+
+
+func _finish_rotation() -> void:
+	# Keep the accumulated yaw numerically compact after many rotations while
+	# preserving the shortest 90-degree transition during each tween.
+	rotation.y = wrapf(rotation.y, -PI, PI)
+	_target_yaw = rotation.y
+	_rotation_locked = false
+	_rotation_tween = null
+	view_changed.emit(quadrant)
 
 
 func pan_by(delta: Vector2) -> void:

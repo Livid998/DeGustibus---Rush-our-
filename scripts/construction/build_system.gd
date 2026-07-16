@@ -39,6 +39,13 @@ func setup(value_world: RestaurantWorld, value_camera: Camera3D) -> void:
 func _process(delta: float) -> void:
 	if preview == null or not is_instance_valid(preview) or not _preview_transform_initialized:
 		return
+	# Edge pieces must communicate one exact grid segment. Interpolating a wall
+	# between two sides made the cursor feel imprecise and the selected edge
+	# visually ambiguous, especially on touch screens.
+	if world.is_edge_placement(current_definition) or String(current_definition.get("placement", "cell")) == "wall_mount":
+		preview.position = _preview_target_position
+		preview.rotation.y = _preview_target_rotation
+		return
 	var response := 1.0 - exp(-delta * (26.0 if preview_pinned else 18.0))
 	preview.position = preview.position.lerp(_preview_target_position, response)
 	preview.rotation.y = lerp_angle(preview.rotation.y, _preview_target_rotation, response)
@@ -175,6 +182,19 @@ func rotate_preview() -> void:
 	_sync_preview_transform()
 
 
+func rotate_preview_back() -> void:
+	if not active:
+		return
+	if String(current_definition.get("placement", "cell")) == "seat" and not preview_support_uid.is_empty():
+		preview_attachment_slot = posmod(preview_attachment_slot - 1, 4)
+		var support := world.placed_objects.get(preview_support_uid) as PlacedObject
+		if support != null:
+			rotation_steps = world.seat_rotation_for_slot(preview_attachment_slot, support.rotation_steps)
+	else:
+		rotation_steps = posmod(rotation_steps - 1, 4)
+	_sync_preview_transform()
+
+
 func select_object(object: PlacedObject) -> void:
 	selected_object = object if object != null and is_instance_valid(object) else null
 	_update_selection_marker()
@@ -207,6 +227,9 @@ func pointer_pressed(screen_position: Vector2) -> void:
 	elif GameState.restaurant_state in ["closed", "open"]:
 		var cell := _screen_to_cell(screen_position)
 		var hit_object := _object_from_screen(screen_position)
+		if hit_object == null:
+			var edge_target := _nearest_edge_target(screen_position, null)
+			hit_object = world.structural_edge_at(Vector2i(edge_target.cell), int(edge_target.rotation))
 		select_object(hit_object if hit_object else world.object_at_cell(cell))
 
 
@@ -236,14 +259,9 @@ func _screen_to_placement_target(screen_position: Vector2) -> Dictionary:
 	var cell := world.world_to_cell(world_hit)
 	var target_rotation := rotation_steps
 	if world.is_edge_placement(current_definition) or String(current_definition.get("placement", "cell")) == "wall_mount":
-		var center := world.cell_to_world(cell)
-		var distances := [
-			absf(world_hit.z - (center.z - RestaurantWorld.CELL_SIZE * 0.5)),
-			absf(world_hit.x - (center.x - RestaurantWorld.CELL_SIZE * 0.5)),
-			absf(world_hit.z - (center.z + RestaurantWorld.CELL_SIZE * 0.5)),
-			absf(world_hit.x - (center.x + RestaurantWorld.CELL_SIZE * 0.5))
-		]
-		target_rotation = distances.find(distances.min())
+		var edge_target := _nearest_edge_target(screen_position, world_hit)
+		cell = Vector2i(edge_target.cell)
+		target_rotation = int(edge_target.rotation)
 	var support_uid := ""
 	var attachment_slot := -1
 	if String(current_definition.get("placement", "cell")) == "wall_mount":
@@ -254,6 +272,89 @@ func _screen_to_placement_target(screen_position: Vector2) -> Dictionary:
 			cell = wall.grid_cell
 			target_rotation = wall.rotation_steps
 	return {"cell": cell, "rotation": target_rotation, "support_uid": support_uid, "attachment_slot": attachment_slot}
+
+
+func _nearest_edge_target(screen_position: Vector2, known_world_hit: Variant) -> Dictionary:
+	var world_hit: Variant = known_world_hit
+	if world_hit == null:
+		world_hit = _screen_to_floor(screen_position)
+	if world_hit == null:
+		return {"cell": Vector2i(-1, -1), "rotation": rotation_steps, "key": ""}
+	var center_cell := world.world_to_cell(Vector3(world_hit))
+	var candidates: Dictionary = {}
+	for offset: Vector2i in [Vector2i.ZERO, Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]:
+		var candidate_cell := center_cell + offset
+		if not RestaurantWorld.LOT_REGION.has_point(candidate_cell):
+			continue
+		for candidate_rotation: int in 4:
+			var key := world.edge_key(candidate_cell, candidate_rotation)
+			if candidates.has(key):
+				continue
+			var canonical := _canonical_edge_target(key)
+			if Vector2i(canonical.cell) == Vector2i(-1, -1):
+				continue
+			var segment := _edge_screen_segment(Vector2i(canonical.cell), int(canonical.rotation))
+			var nearest := Geometry2D.get_closest_point_to_segment(screen_position, Vector2(segment[0]), Vector2(segment[1]))
+			canonical.distance = screen_position.distance_to(nearest)
+			candidates[key] = canonical
+	var best: Dictionary = {}
+	for candidate: Dictionary in candidates.values():
+		if best.is_empty() or float(candidate.distance) < float(best.distance):
+			best = candidate
+	# Twelve pixels of hysteresis keeps the chosen side stable around corners;
+	# rotating/cycling still lets the player deliberately choose the neighbour.
+	if preview_cell != Vector2i(-1, -1):
+		var current_key := world.edge_key(preview_cell, rotation_steps)
+		if candidates.has(current_key):
+			var current: Dictionary = candidates[current_key]
+			if best.is_empty() or float(current.distance) <= float(best.distance) + 12.0:
+				best = current
+	return best if not best.is_empty() else {"cell": center_cell, "rotation": rotation_steps, "key": world.edge_key(center_cell, rotation_steps)}
+
+
+func _canonical_edge_target(key: String) -> Dictionary:
+	var parts := key.split(":")
+	if parts.size() != 3:
+		return {"cell": Vector2i(-1, -1), "rotation": 0, "key": key}
+	var axis := String(parts[0])
+	var first := int(parts[1])
+	var second := int(parts[2])
+	if axis == "h":
+		var north_cell := Vector2i(first, second)
+		if RestaurantWorld.LOT_REGION.has_point(north_cell):
+			return {"cell": north_cell, "rotation": 0, "key": key}
+		var south_cell := Vector2i(first, second - 1)
+		if RestaurantWorld.LOT_REGION.has_point(south_cell):
+			return {"cell": south_cell, "rotation": 2, "key": key}
+	else:
+		var west_cell := Vector2i(first, second)
+		if RestaurantWorld.LOT_REGION.has_point(west_cell):
+			return {"cell": west_cell, "rotation": 1, "key": key}
+		var east_cell := Vector2i(first - 1, second)
+		if RestaurantWorld.LOT_REGION.has_point(east_cell):
+			return {"cell": east_cell, "rotation": 3, "key": key}
+	return {"cell": Vector2i(-1, -1), "rotation": 0, "key": key}
+
+
+func _edge_screen_segment(cell: Vector2i, edge_rotation: int) -> Array[Vector2]:
+	var center := world.cell_to_world(cell)
+	var half := RestaurantWorld.CELL_SIZE * 0.5
+	var first: Vector3
+	var second: Vector3
+	match posmod(edge_rotation, 4):
+		0:
+			first = center + Vector3(-half, 0.12, -half)
+			second = center + Vector3(half, 0.12, -half)
+		1:
+			first = center + Vector3(-half, 0.12, -half)
+			second = center + Vector3(-half, 0.12, half)
+		2:
+			first = center + Vector3(-half, 0.12, half)
+			second = center + Vector3(half, 0.12, half)
+		_:
+			first = center + Vector3(half, 0.12, -half)
+			second = center + Vector3(half, 0.12, half)
+	return [camera.unproject_position(first), camera.unproject_position(second)]
 
 
 func _target_changed(target: Dictionary) -> bool:
@@ -392,7 +493,8 @@ func _sync_preview_transform() -> void:
 		return
 	_preview_target_position = world.placement_world_position(current_definition, preview_cell, rotation_steps, preview_support_uid, preview_attachment_slot)
 	_preview_target_rotation = -rotation_steps * PI * 0.5
-	if not _preview_transform_initialized:
+	var exact_edge_snap := world.is_edge_placement(current_definition) or String(current_definition.get("placement", "cell")) == "wall_mount"
+	if not _preview_transform_initialized or exact_edge_snap:
 		preview.position = _preview_target_position
 		preview.rotation.y = _preview_target_rotation
 		_preview_transform_initialized = true
@@ -426,6 +528,7 @@ func _update_validation() -> void:
 func _update_replacement_preview() -> void:
 	if preview_replaced_edge != null and is_instance_valid(preview_replaced_edge) and preview_replaced_edge != move_source:
 		preview_replaced_edge.visible = true
+		world.refresh_shell_cutaway()
 	preview_replaced_edge = null
 	if not world.is_edge_placement(current_definition):
 		return
@@ -452,6 +555,7 @@ func _finish_preview() -> void:
 func _clear_preview_only() -> void:
 	if preview_replaced_edge != null and is_instance_valid(preview_replaced_edge) and not preview_replaced_edge.is_queued_for_deletion() and preview_replaced_edge != move_source:
 		preview_replaced_edge.visible = true
+		world.refresh_shell_cutaway()
 	preview_replaced_edge = null
 	if preview and is_instance_valid(preview):
 		preview.queue_free()

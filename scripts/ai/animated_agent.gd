@@ -414,6 +414,14 @@ func set_collision_enabled(enabled: bool) -> void:
 		path_index = 0
 
 
+func set_traffic_collision_enabled(enabled: bool) -> void:
+	# Used after a guest has crossed the exit threshold: the body stops
+	# obstructing other agents, but its existing walk-off route and animation
+	# continue until it reaches the despawn marker.
+	if _collision_shape != null:
+		_collision_shape.disabled = not enabled
+
+
 func is_collision_enabled() -> bool:
 	return _collision_shape == null or not _collision_shape.disabled
 

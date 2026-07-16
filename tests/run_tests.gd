@@ -246,6 +246,7 @@ func _test_builder_and_seating(world: RestaurantWorld) -> void:
 	var lot_tile_count := RestaurantWorld.LOT_REGION.size.x * RestaurantWorld.LOT_REGION.size.y
 	_expect(world.floor_tiles.size() == lot_tile_count and world.floor_batches.size() == expected_floor_styles.size() and has_every_floor_style and batched_floor_instances == world.floor_tiles.size(), "the complete lot is rendered once across five coherent GPU floor batches")
 	_expect(String(world.floor_tiles[RestaurantWorld.LOT_REGION.position]) == "floor_grass" and String(world.floor_tiles[Vector2i(world.entrance_cell.x, RestaurantWorld.SIDEWALK_Y)]) == "floor_sidewalk" and String(world.floor_tiles[Vector2i(world.entrance_cell.x, RestaurantWorld.ROAD_ROWS[0])]) == "floor_road", "the expanded lot keeps grass, sidewalk and road in their dedicated exterior bands")
+	_expect(RestaurantWorld.SIDEWALK_ROWS.size() == 2 and RestaurantWorld.ROAD_ROWS.size() == 4 and RestaurantWorld.SIDEWALK_ROWS.all(func(row: int): return String(world.floor_tiles[Vector2i(world.entrance_cell.x, row)]) == "floor_sidewalk") and RestaurantWorld.ROAD_ROWS.all(func(row: int): return String(world.floor_tiles[Vector2i(world.entrance_cell.x, row)]) == "floor_road"), "the frontage has a two-cell pavement and one coherent four-cell road")
 	var initial_obstacles := world.placed_objects.values().filter(func(object: PlacedObject): return object.uid.begins_with("exterior_obstacle_"))
 	var removable_obstacles := initial_obstacles.size() == 6 and initial_obstacles.all(func(object: PlacedObject): return bool(object.definition.get("catalog_hidden", false)) and int(object.definition.get("removal_cost", 0)) > 0)
 	_expect(removable_obstacles and ["exterior_tree", "exterior_bush", "exterior_bench", "exterior_streetlight"].all(func(item_id: String): return DataRegistry.build_by_id.has(item_id) and ResourceLoader.exists(String(DataRegistry.build_by_id[item_id].get("model", "")))), "the lot starts with six paid-removal obstacles and exposes valid purchasable exterior decorations")
@@ -259,10 +260,18 @@ func _test_builder_and_seating(world: RestaurantWorld) -> void:
 	_expect(String(world.floor_tiles[floor_test_cell]) == changed_floor_style and changed_batch_instances == world.floor_tiles.size(), "individual floor cells remain editable while GPU batches rebuild coherently")
 	world.set_floor_style(floor_test_cell, original_floor_style)
 	var editable_walls := 0
+	var shell_edges: Dictionary = {}
+	var shell_sides: Dictionary = {"north": 0, "south": 0, "west": 0, "east": 0}
 	for object: PlacedObject in world.placed_objects.values():
 		if object.item_id in ["wall", "wall_window"]:
 			editable_walls += 1
+		if world.is_edge_placement(object.definition):
+			var shell_side := world.shell_side_for_edge(object.grid_cell, object.rotation_steps)
+			if not shell_side.is_empty():
+				shell_edges[world.edge_key(object.grid_cell, object.rotation_steps)] = true
+				shell_sides[shell_side] = int(shell_sides[shell_side]) + 1
 	_expect(editable_walls > 20, "restaurant shell walls are real editable layout objects")
+	_expect(shell_edges.size() == 64 and shell_sides.values().all(func(count: int): return count > 0), "all four sides of the 18x14 restaurant have a complete canonical structural perimeter")
 	var replacement_count := GameState.layout.size()
 	var replaced_segment := world.placed_objects.get("wall_top_2") as PlacedObject
 	build.start_place("door")
@@ -279,6 +288,13 @@ func _test_builder_and_seating(world: RestaurantWorld) -> void:
 	_expect(build.confirm() and GameState.layout.size() == replacement_count and world.structural_edge_at(Vector2i(2, 0), 0).item_id == "door", "confirming a door atomically replaces one wall segment")
 	build.start_place("wall")
 	_expect(build.preview != null and build.preview.scale.is_equal_approx(Vector3.ONE) and is_equal_approx((build.preview_visual.get_node("BaseModel") as Node3D).scale.x, 0.5), "builder footprint and imported visual use independent transforms")
+	build.preview_cell = Vector2i(6, 7)
+	build.rotation_steps = 0
+	build._sync_preview_transform()
+	var exact_edge_position := build._preview_target_position
+	var edge_screen := world.camera_rig.camera.unproject_position(world.cell_to_world(Vector2i(6, 7)) + Vector3(0.0, 0.12, -RestaurantWorld.CELL_SIZE * 0.5))
+	var snapped_edge := build._nearest_edge_target(edge_screen, null)
+	_expect(build.preview.position.is_equal_approx(exact_edge_position) and world.edge_key(Vector2i(snapped_edge.cell), int(snapped_edge.rotation)) == world.edge_key(Vector2i(6, 7), 0), "wall previews snap immediately to one explicit canonical edge without ambiguous interpolation")
 	build.cancel_preview()
 	build.start_place("plant")
 	var pinned_cell := build.preview_cell
@@ -382,7 +398,7 @@ func _test_agent_navigation_and_appearance(world: RestaurantWorld) -> void:
 	closing_customer.global_position = world.cell_to_world(world.entrance_cell)
 	closing_customer.setup(world, 2)
 	var closing_queue_positions := world.customer_queue_positions(closing_customer)
-	_expect(closing_queue_positions.size() == closing_customer.group_size and closing_queue_positions.all(func(position: Vector3): return world.world_to_cell(position).y == RestaurantWorld.SIDEWALK_Y) and closing_queue_positions[0].distance_to(closing_queue_positions[1]) >= RestaurantWorld.CELL_SIZE - 0.01, "each visible guest receives a distinct single-file queue marker on the sidewalk")
+	_expect(closing_queue_positions.size() == closing_customer.group_size and closing_queue_positions.all(func(position: Vector3): return world.world_to_cell(position).y == RestaurantWorld.SIDEWALK_Y) and closing_queue_positions[0].distance_to(closing_queue_positions[1]) >= RestaurantWorld.CUSTOMER_QUEUE_SPACING - 0.01, "each visible guest receives a distinct human-spaced single-file queue marker on the sidewalk")
 	GameState.set_restaurant_state("closing")
 	closing_customer._process(0.1)
 	_expect(closing_customer.state == "leaving" and closing_customer.people.all(func(person: CustomerPersonAgent): return person.target_tag == "despawn"), "unseated customers head along the exterior route as soon as restaurant closing begins")
@@ -429,6 +445,33 @@ func _test_completed_work_pruning() -> void:
 func _test_customer_lifecycle(world: RestaurantWorld) -> void:
 	GameState.reset_to_defaults(false)
 	SimulationManager.reset_service_stats()
+	var large_waiting := CustomerAgent.new()
+	var small_waiting := CustomerAgent.new()
+	var occupied_table_blocker := Node.new()
+	world.customer_root.add_child(large_waiting)
+	world.customer_root.add_child(small_waiting)
+	world.customer_root.add_child(occupied_table_blocker)
+	large_waiting.world = world
+	small_waiting.world = world
+	large_waiting.group_size = 4
+	small_waiting.group_size = 2
+	large_waiting.global_position = world.cell_to_world(world.entrance_cell)
+	small_waiting.global_position = large_waiting.global_position
+	world.customer_queue.assign([large_waiting, small_waiting])
+	world.table_occupants["table_2"] = occupied_table_blocker
+	var table_one := world.placed_objects.get("table_1") as PlacedObject
+	var detached_chairs: Array[PlacedObject] = world.attached_objects(table_one.uid).slice(2)
+	for detached: PlacedObject in detached_chairs:
+		detached.support_uid = ""
+	var first_fit_works := not world.customer_can_request_table(large_waiting, 4) and world.customer_can_request_table(small_waiting, 2)
+	for detached: PlacedObject in detached_chairs:
+		detached.support_uid = table_one.uid
+	world.table_occupants["table_2"] = null
+	world.customer_queue.clear()
+	large_waiting.queue_free()
+	small_waiting.queue_free()
+	occupied_table_blocker.queue_free()
+	_expect(first_fit_works, "an oversized head party cannot keep a clean compatible table idle for the next queued party")
 	GameState.set_restaurant_state("open")
 	var customer := CustomerAgent.new()
 	world.customer_root.add_child(customer)
@@ -561,6 +604,41 @@ func _cleanup_dirty_table_fixture(world: RestaurantWorld, table_uid: String) -> 
 
 func _test_camera_input(world: RestaurantWorld) -> void:
 	var camera := world.camera_rig
+	var original_quadrant := camera.quadrant
+	var original_reduced := world.reduced_walls
+	var starting_shell_visibility: Dictionary = {}
+	world.refresh_shell_cutaway()
+	for object: PlacedObject in world.placed_objects.values():
+		var side := world.shell_side_for_edge(object.grid_cell, object.rotation_steps) if world.is_edge_placement(object.definition) else ""
+		if not side.is_empty() and not starting_shell_visibility.has(side):
+			starting_shell_visibility[side] = object.visible
+	camera.rotate_right()
+	if camera._rotation_tween:
+		camera._rotation_tween.kill()
+	camera.rotation.y = camera._target_yaw
+	camera._finish_rotation()
+	var rotated_shell_visibility: Dictionary = {}
+	for object: PlacedObject in world.placed_objects.values():
+		var side := world.shell_side_for_edge(object.grid_cell, object.rotation_steps) if world.is_edge_placement(object.definition) else ""
+		if not side.is_empty() and not rotated_shell_visibility.has(side):
+			rotated_shell_visibility[side] = object.visible
+	var hidden_before := starting_shell_visibility.values().count(false)
+	var hidden_after := rotated_shell_visibility.values().count(false)
+	_expect(camera.quadrant == posmod(original_quadrant + 1, 4) and int(GameState.settings.camera_quadrant) == camera.quadrant and hidden_before == 2 and hidden_after == 2 and starting_shell_visibility != rotated_shell_visibility, "90-degree camera rotation persists and automatically swaps the two hidden near walls")
+	var visible_structural := world.placed_objects.values().filter(func(object: PlacedObject): return world.is_edge_placement(object.definition) and object.visible)
+	var sample_wall := visible_structural[0] as PlacedObject
+	var normal_height := sample_wall.visual_model.scale.y
+	world.reduced_walls = true
+	world.refresh_shell_cutaway()
+	_expect(sample_wall.visual_model.scale.y < normal_height * 0.4, "the wall visibility control turns visible walls into opaque low stubs instead of transparent panels")
+	world.reduced_walls = original_reduced
+	world.refresh_shell_cutaway()
+	camera.rotate_left()
+	if camera._rotation_tween:
+		camera._rotation_tween.kill()
+	camera.rotation.y = camera._target_yaw
+	camera._finish_rotation()
+	GameState.settings.camera_quadrant = original_quadrant
 	var before := camera.target
 	var press := InputEventMouseButton.new()
 	press.button_index = MOUSE_BUTTON_LEFT
@@ -756,4 +834,10 @@ func _test_save_load() -> void:
 	var legacy_oven_record: Dictionary = GameState.layout.filter(func(record: Dictionary): return String(record.get("uid", "")) == "legacy_oven")[0]
 	var legacy_support_uid := String(legacy_oven_record.get("support_uid", ""))
 	_expect(not legacy_support_uid.is_empty() and GameState.layout.any(func(record: Dictionary): return String(record.get("uid", "")) == legacy_support_uid and String(record.get("item", "")) == "worktable"), "version 7 repairs countertop appliances from intermediate saves by creating a valid support")
+	var migrated_edges: Dictionary = {}
+	for record: Dictionary in GameState.layout:
+		if String(record.get("item", "")) in ["wall", "wall_window", "door", "pass_opening"]:
+			migrated_edges[GameState._layout_edge_key(record)] = true
+	var shell_migrated := GameState._initial_wall_records().all(func(record: Dictionary): return migrated_edges.has(GameState._layout_edge_key(record)))
+	_expect(shell_migrated, "version 9 fills every missing outer shell edge in existing saves without replacing structural openings")
 	GameState.deserialize(original_state)

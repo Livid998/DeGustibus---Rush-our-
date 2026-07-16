@@ -135,7 +135,11 @@ func refresh_actions() -> void:
 		var cost := 0 if build.move_source else int(build.current_definition.get("price", 0))
 		label.text = "%s  ·  %s%s" % [build.current_definition.get("name", "Oggetto"), build.reason, "  ·  %d ●" % cost if cost > 0 else ""]
 		action_row.add_child(label)
-		action_row.add_child(_action_button("Ruota 90°", build.rotate_preview, "yellow"))
+		if world.is_edge_placement(build.current_definition) or String(build.current_definition.get("placement", "cell")) == "wall_mount":
+			action_row.add_child(_action_button("◀ Bordo", build.rotate_preview_back, "ghost"))
+			action_row.add_child(_action_button("Bordo ▶", build.rotate_preview, "yellow"))
+		else:
+			action_row.add_child(_action_button("Ruota 90°", build.rotate_preview, "yellow"))
 		var confirm := _action_button("Conferma", build.confirm, "green")
 		confirm.disabled = not build.placement_valid
 		action_row.add_child(confirm)

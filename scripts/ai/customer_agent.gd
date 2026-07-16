@@ -43,6 +43,10 @@ var _outside_departure := false
 var _dirty_transferred := false
 var _diner_eat_remaining: Dictionary = {}
 var _diner_finished: Dictionary = {}
+var _entry_leg_failures := 0
+var _entry_leg_elapsed := 0.0
+var _exit_leg_failures := 0
+var _exit_leg_elapsed := 0.0
 
 const CUSTOMER_APPEARANCES: Array[String] = [
 	"Casual_Male", "Casual_Female", "Casual2_Male", "Casual2_Female", "Casual3_Male", "Casual3_Female",
@@ -121,7 +125,7 @@ func _process(delta: float) -> void:
 			if world.try_begin_customer_exit(self):
 				_begin_exit_sequence()
 		"leaving":
-			_update_exit_sequence()
+			_update_exit_sequence(scaled)
 
 
 func _build_people() -> void:
@@ -171,10 +175,14 @@ func _update_queue(delta: float) -> void:
 		_refresh_queue_targets()
 	if not _all_people_near(world.customer_queue_positions(self), 0.28):
 		return
-	if not world.customer_is_queue_head(self):
-		_set_state("queueing", false)
-		return
 	if table.is_empty():
+		if not world.customer_can_request_table(self, group_size):
+			_set_state("waiting_table", false)
+			_thought.text = "ATTESA TURNO"
+			_thought.visible = true
+			if state_elapsed > patience * 1.35:
+				_leave_lost("TROPPA ATTESA")
+			return
 		table = world.request_table(self, group_size)
 	if table.is_empty():
 		_set_state("waiting_table", false)
@@ -204,6 +212,8 @@ func _begin_admission() -> void:
 	_seat_cursor = 0
 	_active_seating = -1
 	_door_released = false
+	_entry_leg_failures = 0
+	_entry_leg_elapsed = 0.0
 	_thought.visible = false
 	_set_state("admitting")
 
@@ -217,6 +227,7 @@ func _update_admission_and_seating(delta: float) -> void:
 	# person reaches the inside waypoint may it continue to its own chair and
 	# the next party member receive the doorway.
 	if _launch_cursor < people.size():
+		_entry_leg_elapsed += delta
 		var entering_person := people[_launch_cursor]
 		var outside_tag := "entry_outside_%d" % _launch_cursor
 		var entry_tag := "entry_door_%d" % _launch_cursor
@@ -229,10 +240,18 @@ func _update_admission_and_seating(delta: float) -> void:
 			var target := Vector3(assignment.get("staging_position", assignment.position))
 			entering_person.walk_to_position(target, "seat_stage_%d" % _launch_cursor, randf_range(0.05, 0.14))
 			_launch_cursor += 1
+			_entry_leg_failures = 0
+			_entry_leg_elapsed = 0.0
 			_set_state("walking_to_table", false)
 		elif entering_person.phase == "route_failed":
 			var retry_target := world.customer_inside_door_position(_launch_cursor) if entering_person.target_tag == entry_tag else world.customer_outside_door_position(_launch_cursor)
-			entering_person.walk_to_position(retry_target, entering_person.target_tag, 0.18)
+			_entry_leg_failures += 1
+			if _entry_leg_failures >= 2 or _entry_leg_elapsed >= 4.5:
+				_force_person_checkpoint(entering_person, retry_target, entering_person.target_tag)
+				_entry_leg_failures = 0
+				_entry_leg_elapsed = 0.0
+			else:
+				entering_person.walk_to_position(retry_target, entering_person.target_tag, 0.18)
 	if not _door_released and _launch_cursor == people.size():
 		var everybody_inside := true
 		for person: CustomerPersonAgent in people:
@@ -444,6 +463,8 @@ func _begin_exit_sequence() -> void:
 	_exit_cursor = 0
 	_exit_stage = "stand"
 	_door_released = false
+	_exit_leg_failures = 0
+	_exit_leg_elapsed = 0.0
 	_set_state("leaving")
 	_start_current_exit_leg()
 
@@ -458,31 +479,44 @@ func _start_current_exit_leg() -> void:
 		"seat": person.leave_seat_to_staging(Vector3(assignment.staging_position))
 		"door": person.walk_to_position(world.customer_inside_door_position(_exit_cursor), "exit_door")
 		"outside": person.walk_to_position(world.customer_outside_door_position(_exit_cursor), "exit_outside")
+	_exit_leg_elapsed = 0.0
 
 
-func _update_exit_sequence() -> void:
+func _update_exit_sequence(delta: float = 0.0) -> void:
 	if _outside_departure:
 		if people.all(func(person: CustomerPersonAgent): return person.is_at("despawn") or person.phase == "route_failed"):
 			_finish_departure()
 		return
 	if _exit_cursor < people.size():
+		_exit_leg_elapsed += delta
 		var person := people[_exit_cursor]
 		if person.phase == "route_failed":
-			_start_current_exit_leg()
+			_exit_leg_failures += 1
+			if _exit_leg_failures >= 2 or _exit_leg_elapsed >= 4.5:
+				var recovery := _current_exit_checkpoint()
+				if not recovery.is_empty():
+					_force_person_checkpoint(person, Vector3(recovery.position), String(recovery.tag))
+				_exit_leg_failures = 0
+				_exit_leg_elapsed = 0.0
+			else:
+				_start_current_exit_leg()
 			return
 		if _exit_stage == "stand" and person.phase == "standing_ready":
 			_exit_stage = "seat"
 			_start_current_exit_leg()
 		elif _exit_stage == "seat" and person.is_at("exit_stage"):
 			_exit_stage = "door"
+			_exit_leg_failures = 0
 			_start_current_exit_leg()
 		elif _exit_stage == "door" and person.is_at("exit_door"):
 			_exit_stage = "outside"
+			_exit_leg_failures = 0
 			_start_current_exit_leg()
 		elif _exit_stage == "outside" and person.is_at("exit_outside"):
 			person.walk_to_position(world.customer_despawn_position(_exit_cursor), "despawn", 0.0)
 			_exit_cursor += 1
 			_exit_stage = "stand"
+			_exit_leg_failures = 0
 			_start_current_exit_leg()
 	if _exit_cursor >= people.size():
 		if not _door_released:
@@ -491,8 +525,40 @@ func _update_exit_sequence() -> void:
 			world.finish_customer_exit(self)
 			_door_released = true
 			table = {}
+			# Once the whole party has crossed the threshold it no longer
+			# participates in doorway traffic. Keep the staggered walk-off visual,
+			# but let later parties use the exit lane without body pile-ups.
+			for outside_person: CustomerPersonAgent in people:
+				outside_person.set_traffic_collision_enabled(false)
 		if people.all(func(candidate: CustomerPersonAgent): return candidate.is_at("despawn") or candidate.phase == "route_failed"):
 			_finish_departure()
+
+
+func _current_exit_checkpoint() -> Dictionary:
+	if _exit_cursor >= people.size() or table.is_empty():
+		return {}
+	var assignments: Array = table.get("seat_assignments", [])
+	if _exit_cursor >= assignments.size():
+		return {}
+	match _exit_stage:
+		"seat": return {"position": Vector3(assignments[_exit_cursor].staging_position), "tag": "exit_stage"}
+		"door": return {"position": world.customer_inside_door_position(_exit_cursor), "tag": "exit_door"}
+		"outside": return {"position": world.customer_outside_door_position(_exit_cursor), "tag": "exit_outside"}
+	return {}
+
+
+func _force_person_checkpoint(person: CustomerPersonAgent, position: Vector3, tag: String) -> void:
+	# Last-resort watchdog for a physically clear, reserved doorway. It only
+	# activates after repeated path failures and prevents a stale body from
+	# keeping every table and the entrance locked indefinitely.
+	person.global_position = world.find_safe_agent_position(position, person)
+	person.destination = position
+	person.target_tag = tag
+	person.phase = "arrived"
+	person.navigation_active = false
+	person.navigation_failed = false
+	person.velocity = Vector3.ZERO
+	person.play_animation("Idle")
 
 
 func _transfer_dirty_table() -> void:

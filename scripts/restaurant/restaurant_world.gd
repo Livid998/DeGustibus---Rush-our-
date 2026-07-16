@@ -6,9 +6,12 @@ const CELL_SIZE := 2.0
 ## The legacy dining-room transform deliberately keeps using GRID_SIZE.  The
 ## larger region only extends the build/navigation graph, so old saves keep
 ## exactly the same world coordinates.
-const LOT_REGION := Rect2i(Vector2i(-4, -4), Vector2i(32, 22))
-const SIDEWALK_Y := -1
-const ROAD_ROWS: Array[int] = [-3, -2]
+const LOT_REGION := Rect2i(Vector2i(-4, -7), Vector2i(32, 25))
+const SIDEWALK_Y := -2
+const SIDEWALK_ROWS: Array[int] = [-2, -1]
+const QUEUE_ROW := -2
+const EXIT_ROW := -1
+const ROAD_ROWS: Array[int] = [-6, -5, -4, -3]
 const CUSTOMER_QUEUE_SPACING := 1.12
 
 var entrance_cell := Vector2i(8, 0)
@@ -21,6 +24,7 @@ var table_dirty_records: Dictionary = {}
 var customer_queue: Array[Node] = []
 var door_owner: Node
 var exiting_customers: Dictionary = {}
+var exit_wait_queue: Array[Node] = []
 var staff_agents: Dictionary = {}
 var navigation_agents: Array[AnimatedAgent] = []
 var navigation_revision := 0
@@ -56,10 +60,12 @@ var spill_records: Dictionary = {}
 var wash_batches: Dictionary = {}
 var _spill_serial := 0
 var _spill_clock := 18.0
+var reduced_walls := false
 
 
 func _ready() -> void:
 	name = "RestaurantWorld"
+	reduced_walls = bool(GameState.settings.get("walls_reduced", false))
 	_create_environment()
 	_create_roots()
 	_create_grid()
@@ -67,6 +73,8 @@ func _ready() -> void:
 	load_layout()
 	spawn_staff()
 	SimulationManager.bind_world(self)
+	if not GameState.layout_changed.is_connected(refresh_shell_cutaway):
+		GameState.layout_changed.connect(refresh_shell_cutaway)
 	if not WebPlatformProfile.quality_changed.is_connected(apply_graphics_quality):
 		WebPlatformProfile.quality_changed.connect(apply_graphics_quality)
 
@@ -156,6 +164,8 @@ func _create_roots() -> void:
 	camera_rig = RestaurantCamera.new()
 	camera_rig.name = "IsometricCamera"
 	add_child(camera_rig)
+	if camera_rig.has_signal("view_changed"):
+		camera_rig.connect("view_changed", Callable(self, "_on_camera_view_changed"))
 	configure_build_system()
 
 
@@ -187,6 +197,77 @@ func apply_graphics_quality(_preset: String = "auto") -> void:
 	if sun != null:
 		sun.shadow_enabled = WebPlatformProfile.shadows_enabled()
 		sun.directional_shadow_max_distance = WebPlatformProfile.shadow_distance()
+
+
+func _on_camera_view_changed(_quadrant: int) -> void:
+	refresh_shell_cutaway()
+
+
+func toggle_reduced_walls() -> void:
+	reduced_walls = not reduced_walls
+	GameState.settings.walls_reduced = reduced_walls
+	SaveManager.save_game()
+	refresh_shell_cutaway()
+
+
+func refresh_shell_cutaway() -> void:
+	if camera_rig == null or camera_rig.camera == null or placed_objects.is_empty():
+		return
+	var camera_direction := camera_rig.camera.global_position - camera_rig.global_position
+	camera_direction.y = 0.0
+	if camera_direction.length_squared() <= 0.001:
+		camera_direction = Vector3(1.0, 0.0, 1.0)
+	camera_direction = camera_direction.normalized()
+	for object: PlacedObject in placed_objects.values():
+		if object == null or not is_instance_valid(object) or not is_edge_placement(object.definition):
+			continue
+		var shell_side := shell_side_for_edge(object.grid_cell, object.rotation_steps)
+		var outward := _shell_outward_normal(shell_side)
+		var camera_facing := not shell_side.is_empty() and outward.dot(camera_direction) > 0.2
+		_set_structural_visibility(object, not camera_facing, reduced_walls)
+
+
+func shell_side_for_edge(cell: Vector2i, rotation_steps: int) -> String:
+	var parts := edge_key(cell, rotation_steps).split(":")
+	if parts.size() != 3:
+		return ""
+	var axis := String(parts[0])
+	var first := int(parts[1])
+	var second := int(parts[2])
+	if axis == "h" and first >= 0 and first < GRID_SIZE.x:
+		if second == 0: return "north"
+		if second == GRID_SIZE.y: return "south"
+	if axis == "v" and second >= 0 and second < GRID_SIZE.y:
+		if first == 0: return "west"
+		if first == GRID_SIZE.x: return "east"
+	return ""
+
+
+func _shell_outward_normal(side: String) -> Vector3:
+	match side:
+		"north": return Vector3.FORWARD
+		"south": return Vector3.BACK
+		"west": return Vector3.LEFT
+		"east": return Vector3.RIGHT
+	return Vector3.ZERO
+
+
+func _set_structural_visibility(object: PlacedObject, visible_value: bool, use_stub: bool) -> void:
+	object.visible = visible_value
+	if object.visual_model != null:
+		if not object.has_meta("cutaway_original_visual_scale"):
+			object.set_meta("cutaway_original_visual_scale", object.visual_model.scale)
+		var original_scale := Vector3(object.get_meta("cutaway_original_visual_scale", Vector3.ONE))
+		object.visual_model.scale = original_scale
+		if use_stub:
+			object.visual_model.scale.y = original_scale.y * 0.28
+	for geometry: Node in object.find_children("*", "GeometryInstance3D", true, false):
+		(geometry as GeometryInstance3D).transparency = 0.0
+	for attached: PlacedObject in attached_objects(object.uid):
+		# Wall-mounted shelves would otherwise float above a reduced stub.
+		attached.visible = visible_value and not use_stub
+		for geometry: Node in attached.find_children("*", "GeometryInstance3D", true, false):
+			(geometry as GeometryInstance3D).transparency = 0.0
 
 
 func _create_grid() -> void:
@@ -232,6 +313,7 @@ func load_layout() -> void:
 	customer_queue.clear()
 	door_owner = null
 	exiting_customers.clear()
+	exit_wait_queue.clear()
 	waiting_reservations.clear()
 	staff_standby_reservations.clear()
 	corridor_reservations.clear()
@@ -244,7 +326,7 @@ func load_layout() -> void:
 			var style := "floor_grass"
 			if Rect2i(Vector2i.ZERO, GRID_SIZE).has_point(cell):
 				style = "floor_dining" if y < 8 else "floor_kitchen"
-			elif y == SIDEWALK_Y:
+			elif y in SIDEWALK_ROWS:
 				style = "floor_sidewalk"
 			elif y in ROAD_ROWS:
 				style = "floor_road"
@@ -263,6 +345,7 @@ func load_layout() -> void:
 	_rebuild_floor_batches()
 	_refresh_all_attachments()
 	_rebuild_astar()
+	refresh_shell_cutaway()
 
 
 func instantiate_layout_object(uid: String, item_id: String, cell: Vector2i, rotation_steps: int, support_uid: String = "", attachment_slot: int = -1) -> PlacedObject:
@@ -1611,6 +1694,28 @@ func customer_is_queue_head(customer: Node) -> bool:
 	return not customer_queue.is_empty() and customer_queue[0] == customer
 
 
+func customer_can_request_table(customer: Node, group_size: int) -> bool:
+	# FIFO remains the default, but a party that cannot fit any currently free
+	# table no longer blocks smaller compatible parties behind it. This mirrors
+	# the first-fit host logic used by restaurant management games while keeping
+	# visual queue order stable.
+	_cleanup_customer_flow()
+	for queued: Node in customer_queue:
+		if queued == null or not is_instance_valid(queued):
+			continue
+		if queued == customer:
+			return not _table_candidates(customer, group_size).is_empty()
+		var reserved: Variant = queued.get("table")
+		if reserved is Dictionary and not (reserved as Dictionary).is_empty():
+			var reserved_uid := String((reserved as Dictionary).get("uid", ""))
+			if customer_owns_table(queued, reserved_uid):
+				return false
+		var earlier_size := int(queued.get("group_size"))
+		if not _table_candidates(queued, earlier_size).is_empty():
+			return false
+	return false
+
+
 func customer_queue_positions(customer: Node) -> Array[Vector3]:
 	_cleanup_customer_flow()
 	var result: Array[Vector3] = []
@@ -1623,8 +1728,8 @@ func customer_queue_positions(customer: Node) -> Array[Vector3]:
 	# Keep the pavement directly in front of the door free. Human-scale spacing
 	# lets the maximum eight four-person parties fit on the straight sidewalk
 	# without ever sharing a destination at the far end of the lot.
-	var queue_origin := cell_to_world(Vector2i(entrance_cell.x + 1, SIDEWALK_Y))
-	var queue_end_x := cell_to_world(Vector2i(LOT_REGION.end.x - 1, SIDEWALK_Y)).x
+	var queue_origin := cell_to_world(Vector2i(entrance_cell.x + 1, QUEUE_ROW))
+	var queue_end_x := cell_to_world(Vector2i(LOT_REGION.end.x - 1, QUEUE_ROW)).x
 	for member_index: int in size:
 		var queue_x := minf(queue_origin.x + float(ordinal + member_index) * CUSTOMER_QUEUE_SPACING, queue_end_x)
 		result.append(Vector3(queue_x, 0.0, queue_origin.z))
@@ -1632,7 +1737,7 @@ func customer_queue_positions(customer: Node) -> Array[Vector3]:
 
 
 func customer_spawn_position(_customer: Node = null) -> Vector3:
-	return cell_to_world(Vector2i(LOT_REGION.end.x - 1, SIDEWALK_Y))
+	return cell_to_world(Vector2i(LOT_REGION.end.x - 1, QUEUE_ROW))
 
 
 func customer_inside_door_position(member_index: int = 0) -> Vector3:
@@ -1641,12 +1746,12 @@ func customer_inside_door_position(member_index: int = 0) -> Vector3:
 
 
 func customer_outside_door_position(member_index: int = 0) -> Vector3:
-	var base := cell_to_world(Vector2i(entrance_cell.x, SIDEWALK_Y))
+	var base := cell_to_world(Vector2i(entrance_cell.x, EXIT_ROW))
 	return base + Vector3((float(member_index % 2) - 0.5) * 0.16, 0.0, 0.0)
 
 
 func customer_despawn_position(member_index: int = 0) -> Vector3:
-	return cell_to_world(Vector2i(LOT_REGION.position.x, SIDEWALK_Y)) + Vector3(0.0, 0.0, float(member_index % 2) * 0.16)
+	return cell_to_world(Vector2i(LOT_REGION.position.x, EXIT_ROW)) + Vector3(0.0, 0.0, float(member_index % 2) * 0.16)
 
 
 func position_is_inside_restaurant(position: Vector3) -> bool:
@@ -1655,7 +1760,17 @@ func position_is_inside_restaurant(position: Vector3) -> bool:
 
 func try_begin_customer_entry(customer: Node) -> bool:
 	_cleanup_customer_flow()
-	if customer == null or not is_instance_valid(customer) or not exiting_customers.is_empty():
+	if customer == null or not is_instance_valid(customer) or not exit_wait_queue.is_empty():
+		return false
+	var next_reserved: Node
+	for queued: Node in customer_queue:
+		if queued == null or not is_instance_valid(queued):
+			continue
+		var reservation: Variant = queued.get("table")
+		if reservation is Dictionary and not (reservation as Dictionary).is_empty() and customer_owns_table(queued, String((reservation as Dictionary).get("uid", ""))):
+			next_reserved = queued
+			break
+	if next_reserved != customer:
 		return false
 	if door_owner == null:
 		door_owner = customer
@@ -1670,12 +1785,14 @@ func finish_customer_entry(customer: Node) -> void:
 func register_customer_exit(customer: Node) -> void:
 	if customer != null and is_instance_valid(customer):
 		exiting_customers[customer.get_instance_id()] = customer
+		if not exit_wait_queue.has(customer):
+			exit_wait_queue.append(customer)
 
 
 func try_begin_customer_exit(customer: Node) -> bool:
 	register_customer_exit(customer)
 	_cleanup_customer_flow()
-	if door_owner == null:
+	if door_owner == null and not exit_wait_queue.is_empty() and exit_wait_queue[0] == customer:
 		door_owner = customer
 	return door_owner == customer
 
@@ -1683,6 +1800,7 @@ func try_begin_customer_exit(customer: Node) -> bool:
 func finish_customer_exit(customer: Node) -> void:
 	if customer != null:
 		exiting_customers.erase(customer.get_instance_id())
+		exit_wait_queue.erase(customer)
 	if door_owner == customer:
 		door_owner = null
 
@@ -1695,6 +1813,9 @@ func _cleanup_customer_flow() -> void:
 		var candidate := exiting_customers.get(key) as Node
 		if candidate == null or not is_instance_valid(candidate) or candidate.is_queued_for_deletion():
 			exiting_customers.erase(key)
+	for candidate: Node in exit_wait_queue.duplicate():
+		if candidate == null or not is_instance_valid(candidate) or candidate.is_queued_for_deletion() or not exiting_customers.has(candidate.get_instance_id()):
+			exit_wait_queue.erase(candidate)
 	if door_owner != null and (not is_instance_valid(door_owner) or door_owner.is_queued_for_deletion()):
 		door_owner = null
 
@@ -1713,6 +1834,31 @@ func _random_customer_group_size() -> int:
 
 
 func request_table(customer: Node, group_size: int) -> Dictionary:
+	var candidates := _table_candidates(customer, group_size)
+	if candidates.is_empty():
+		return {}
+	var chosen: Dictionary = candidates[0]
+	table_occupants[String(chosen.uid)] = customer
+	var table_object: PlacedObject = chosen.object
+	var chosen_seats: Array = (chosen.seats as Array).slice(0, group_size)
+	var seat_positions: Array[Vector3] = []
+	for seat: Dictionary in chosen_seats:
+		seat_positions.append(Vector3(seat.position))
+	var table_bounds := ModelFactory.calculate_visual_bounds(table_object.visual_model, true)
+	return {
+		"uid": String(chosen.uid),
+		"seat_position": Vector3(chosen.approach),
+		"approach_position": Vector3(chosen.approach),
+		"seat_positions": seat_positions,
+		"seat_assignments": chosen_seats,
+		"table_center": table_object.global_position,
+		"table_surface_y": table_object.global_position.y + table_bounds.end.y + 0.035,
+		"service_position": Vector3(chosen.approach),
+		"capacity": int(chosen.capacity)
+	}
+
+
+func _table_candidates(customer: Node, group_size: int) -> Array[Dictionary]:
 	var candidates: Array[Dictionary] = []
 	for uid: String in table_occupants:
 		if table_occupants[uid] != null and not is_instance_valid(table_occupants[uid]):
@@ -1752,28 +1898,8 @@ func request_table(customer: Node, group_size: int) -> Dictionary:
 			"approach": approach,
 			"score": float(capacity - group_size) * 4.0 + best_distance
 		})
-	if candidates.is_empty():
-		return {}
 	candidates.sort_custom(func(a: Dictionary, b: Dictionary): return float(a.score) < float(b.score))
-	var chosen: Dictionary = candidates[0]
-	table_occupants[String(chosen.uid)] = customer
-	var table_object: PlacedObject = chosen.object
-	var chosen_seats: Array = (chosen.seats as Array).slice(0, group_size)
-	var seat_positions: Array[Vector3] = []
-	for seat: Dictionary in chosen_seats:
-		seat_positions.append(Vector3(seat.position))
-	var table_bounds := ModelFactory.calculate_visual_bounds(table_object.visual_model, true)
-	return {
-		"uid": String(chosen.uid),
-		"seat_position": Vector3(chosen.approach),
-		"approach_position": Vector3(chosen.approach),
-		"seat_positions": seat_positions,
-		"seat_assignments": chosen_seats,
-		"table_center": table_object.global_position,
-		"table_surface_y": table_object.global_position.y + table_bounds.end.y + 0.035,
-		"service_position": Vector3(chosen.approach),
-		"capacity": int(chosen.capacity)
-	}
+	return candidates
 
 
 func customer_owns_table(customer: Node, table_uid: String) -> bool:
@@ -2077,7 +2203,8 @@ func _rebuild_floor_batches() -> void:
 		var tile_scale := 1.0 if style in ["floor_grass", "floor_road", "floor_sidewalk"] else 0.5
 		for index: int in cells.size():
 			var cell: Vector2i = cells[index]
-			var tile_transform := Transform3D(Basis.IDENTITY.scaled(Vector3.ONE * tile_scale), cell_to_world(cell))
+			var tile_basis := Basis.IDENTITY.scaled(Vector3.ONE * tile_scale)
+			var tile_transform := Transform3D(tile_basis, cell_to_world(cell))
 			multimesh.set_instance_transform(index, tile_transform * mesh_transform)
 		var batch := MultiMeshInstance3D.new()
 		batch.name = "FloorBatch_%s" % style
@@ -2086,16 +2213,20 @@ func _rebuild_floor_batches() -> void:
 		floor_root.add_child(batch)
 		floor_batches[style] = batch
 		source.free()
+	_create_road_markings()
 
 
 func _floor_source(style: String) -> Node3D:
-	if style in ["floor_sidewalk", "floor_grass"]:
+	if style in ["floor_sidewalk", "floor_grass", "floor_road"]:
 		var root := Node3D.new()
 		var mesh_instance := MeshInstance3D.new()
 		var box := BoxMesh.new()
 		box.size = Vector3(CELL_SIZE, 0.10, CELL_SIZE)
 		var material := StandardMaterial3D.new()
-		material.albedo_color = Color("d8c8a7") if style == "floor_sidewalk" else Color("78ad55")
+		match style:
+			"floor_sidewalk": material.albedo_color = Color("d8c8a7")
+			"floor_road": material.albedo_color = Color("41474a")
+			_: material.albedo_color = Color("78ad55")
 		material.roughness = 0.92
 		box.material = material
 		mesh_instance.mesh = box
@@ -2105,8 +2236,53 @@ func _floor_source(style: String) -> Node3D:
 	var path := "res://assets/environment/floor_kitchen_styleB.gltf"
 	match style:
 		"floor_kitchen": path = "res://assets/environment/floor_kitchen.gltf"
-		"floor_road": path = "res://assets/exterior/city/road_straight.gltf"
 	return ModelFactory.instantiate_model(path)
+
+
+func _create_road_markings() -> void:
+	if ROAD_ROWS.is_empty() or floor_root == null:
+		return
+	var left := cell_to_world(Vector2i(LOT_REGION.position.x, ROAD_ROWS[0])).x - CELL_SIZE * 0.5
+	var right := cell_to_world(Vector2i(LOT_REGION.end.x - 1, ROAD_ROWS[0])).x + CELL_SIZE * 0.5
+	var first_z := cell_to_world(Vector2i(entrance_cell.x, ROAD_ROWS[0])).z
+	var last_z := cell_to_world(Vector2i(entrance_cell.x, ROAD_ROWS.back())).z
+	var road_min_z := minf(first_z, last_z) - CELL_SIZE * 0.5
+	var road_max_z := maxf(first_z, last_z) + CELL_SIZE * 0.5
+	var center_z := (road_min_z + road_max_z) * 0.5
+	var mesh := ImmediateMesh.new()
+	var edge_material := StandardMaterial3D.new()
+	edge_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	edge_material.albedo_color = Color("f2eee3")
+	mesh.surface_begin(Mesh.PRIMITIVE_TRIANGLES, edge_material)
+	_add_road_quad(mesh, left, right, road_min_z + 0.24, road_min_z + 0.36)
+	_add_road_quad(mesh, left, right, road_max_z - 0.36, road_max_z - 0.24)
+	mesh.surface_end()
+	var center_material := StandardMaterial3D.new()
+	center_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	center_material.albedo_color = Color("f3bd3b")
+	mesh.surface_begin(Mesh.PRIMITIVE_TRIANGLES, center_material)
+	var dash_x := left + 0.8
+	while dash_x < right - 0.4:
+		var dash_end := minf(dash_x + 2.25, right - 0.4)
+		_add_road_quad(mesh, dash_x, dash_end, center_z - 0.19, center_z - 0.08)
+		_add_road_quad(mesh, dash_x, dash_end, center_z + 0.08, center_z + 0.19)
+		dash_x += 4.0
+	mesh.surface_end()
+	var markings := MeshInstance3D.new()
+	markings.name = "RoadMarkings"
+	markings.mesh = mesh
+	markings.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	floor_root.add_child(markings)
+
+
+func _add_road_quad(mesh: ImmediateMesh, x_min: float, x_max: float, z_min: float, z_max: float) -> void:
+	var height := 0.018
+	mesh.surface_add_vertex(Vector3(x_min, height, z_min))
+	mesh.surface_add_vertex(Vector3(x_max, height, z_min))
+	mesh.surface_add_vertex(Vector3(x_max, height, z_max))
+	mesh.surface_add_vertex(Vector3(x_min, height, z_min))
+	mesh.surface_add_vertex(Vector3(x_max, height, z_max))
+	mesh.surface_add_vertex(Vector3(x_min, height, z_max))
 
 
 func _find_first_floor_mesh(node: Node, parent_transform: Transform3D, result: Dictionary) -> void:

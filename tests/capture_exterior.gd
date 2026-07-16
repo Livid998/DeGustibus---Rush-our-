@@ -19,6 +19,23 @@ func _ready() -> void:
 		await get_tree().process_frame
 	await _save_frame("res://artifacts/exterior_lot.png")
 
+	main.world.reduced_walls = true
+	main.world.refresh_shell_cutaway()
+	main.ui._refresh_camera_controls()
+	for _frame: int in 20:
+		await get_tree().process_frame
+	await _save_frame("res://artifacts/walls_reduced.png")
+	main.world.reduced_walls = false
+	main.world.refresh_shell_cutaway()
+	main.ui._refresh_camera_controls()
+	main.world.camera_rig.rotate_right()
+	for _frame: int in 45:
+		await get_tree().process_frame
+	await _save_frame("res://artifacts/map_rotated.png")
+	main.world.camera_rig.rotate_left()
+	for _frame: int in 45:
+		await get_tree().process_frame
+
 	main.ui.open_builder()
 	main.ui.build_hud.current_category = "Esterni"
 	main.ui.build_hud.refresh_catalog()
