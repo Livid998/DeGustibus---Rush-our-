@@ -551,8 +551,13 @@ func _force_person_checkpoint(person: CustomerPersonAgent, position: Vector3, ta
 	# Last-resort watchdog for a physically clear, reserved doorway. It only
 	# activates after repeated path failures and prevents a stale body from
 	# keeping every table and the entrance locked indefinitely.
-	person.global_position = world.find_safe_agent_position(position, person)
-	person.destination = position
+	# The safe fallback can legitimately be an adjacent cell when another body
+	# occupies the exact checkpoint. Keep the navigation destination coherent
+	# with the actual fallback position so is_at(tag) can advance the FSM instead
+	# of leaving an "arrived" guest permanently short of its destination.
+	var safe_position := world.find_safe_agent_position(position, person)
+	person.global_position = safe_position
+	person.destination = safe_position
 	person.target_tag = tag
 	person.phase = "arrived"
 	person.navigation_active = false

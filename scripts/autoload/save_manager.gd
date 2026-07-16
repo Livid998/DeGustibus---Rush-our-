@@ -3,8 +3,12 @@ extends Node
 const SAVE_PATH := "user://restaurant_city_pro_save.json"
 const BACKUP_PATH := "user://restaurant_city_pro_save.backup.json"
 
+var writes_enabled := true
+
 
 func save_game() -> bool:
+	if not _persistence_allowed():
+		return true
 	if FileAccess.file_exists(SAVE_PATH):
 		var old_file := FileAccess.open(SAVE_PATH, FileAccess.READ)
 		var backup := FileAccess.open(BACKUP_PATH, FileAccess.WRITE)
@@ -19,6 +23,8 @@ func save_game() -> bool:
 
 
 func load_game() -> bool:
+	if not _persistence_allowed():
+		return false
 	if not FileAccess.file_exists(SAVE_PATH):
 		return false
 	var file := FileAccess.open(SAVE_PATH, FileAccess.READ)
@@ -44,6 +50,9 @@ func _load_backup() -> bool:
 
 
 func reset_save() -> void:
+	if not _persistence_allowed():
+		GameState.reset_to_defaults()
+		return
 	if FileAccess.file_exists(SAVE_PATH):
 		DirAccess.remove_absolute(ProjectSettings.globalize_path(SAVE_PATH))
 	if FileAccess.file_exists(BACKUP_PATH):
@@ -51,3 +60,17 @@ func reset_save() -> void:
 	GameState.reset_to_defaults()
 	save_game()
 
+
+func _persistence_allowed() -> bool:
+	# Automated scenes must be completely isolated from the player's user://
+	# data. The explicit switch covers fixtures, while the scene/argument guard
+	# also protects captures and any future smoke test that forgets to set it.
+	if not writes_enabled:
+		return false
+	var current_scene := get_tree().current_scene
+	if current_scene != null and String(current_scene.scene_file_path).begins_with("res://tests/"):
+		return false
+	for argument: String in OS.get_cmdline_args():
+		if argument.begins_with("res://tests/"):
+			return false
+	return true

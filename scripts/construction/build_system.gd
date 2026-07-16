@@ -29,6 +29,8 @@ var _preview_target_rotation := 0.0
 var _preview_transform_initialized := false
 var _moving_dependents: Array[PlacedObject] = []
 
+const EDGE_SELECTION_FALLBACK_RADIUS_PX := 22.0
+
 
 func setup(value_world: RestaurantWorld, value_camera: Camera3D) -> void:
 	world = value_world
@@ -179,6 +181,7 @@ func rotate_preview() -> void:
 			rotation_steps = world.seat_rotation_for_slot(preview_attachment_slot, support.rotation_steps)
 	else:
 		rotation_steps = (rotation_steps + 1) % 4
+		_sync_wall_mount_support_for_edge()
 	_sync_preview_transform()
 
 
@@ -192,7 +195,22 @@ func rotate_preview_back() -> void:
 			rotation_steps = world.seat_rotation_for_slot(preview_attachment_slot, support.rotation_steps)
 	else:
 		rotation_steps = posmod(rotation_steps - 1, 4)
+		_sync_wall_mount_support_for_edge()
 	_sync_preview_transform()
+
+
+func _sync_wall_mount_support_for_edge() -> void:
+	if String(current_definition.get("placement", "cell")) != "wall_mount":
+		return
+	preview_support_uid = ""
+	preview_attachment_slot = -1
+	var wall := world.structural_edge_at(preview_cell, rotation_steps, move_source)
+	if wall == null or not is_instance_valid(wall):
+		return
+	preview_support_uid = wall.uid
+	preview_attachment_slot = 0
+	preview_cell = wall.grid_cell
+	rotation_steps = wall.rotation_steps
 
 
 func select_object(object: PlacedObject) -> void:
@@ -229,7 +247,8 @@ func pointer_pressed(screen_position: Vector2) -> void:
 		var hit_object := _object_from_screen(screen_position)
 		if hit_object == null:
 			var edge_target := _nearest_edge_target(screen_position, null)
-			hit_object = world.structural_edge_at(Vector2i(edge_target.cell), int(edge_target.rotation))
+			if _edge_target_is_within_selection_range(edge_target):
+				hit_object = world.structural_edge_at(Vector2i(edge_target.cell), int(edge_target.rotation))
 		select_object(hit_object if hit_object else world.object_at_cell(cell))
 
 
@@ -303,13 +322,18 @@ func _nearest_edge_target(screen_position: Vector2, known_world_hit: Variant) ->
 			best = candidate
 	# Twelve pixels of hysteresis keeps the chosen side stable around corners;
 	# rotating/cycling still lets the player deliberately choose the neighbour.
-	if preview_cell != Vector2i(-1, -1):
+	if active and preview_cell != Vector2i(-1, -1):
 		var current_key := world.edge_key(preview_cell, rotation_steps)
 		if candidates.has(current_key):
 			var current: Dictionary = candidates[current_key]
 			if best.is_empty() or float(current.distance) <= float(best.distance) + 12.0:
 				best = current
 	return best if not best.is_empty() else {"cell": center_cell, "rotation": rotation_steps, "key": world.edge_key(center_cell, rotation_steps)}
+
+
+func _edge_target_is_within_selection_range(target: Dictionary) -> bool:
+	return not String(target.get("key", "")).is_empty() \
+		and float(target.get("distance", INF)) <= EDGE_SELECTION_FALLBACK_RADIUS_PX
 
 
 func _canonical_edge_target(key: String) -> Dictionary:
@@ -397,6 +421,17 @@ func _object_from_screen(screen_position: Vector2) -> PlacedObject:
 			node = node.get_parent()
 		var object := node as PlacedObject
 		if object == null:
+			continue
+		# Camera-facing shell walls and their mounts are hidden for the cutaway,
+		# but their physics colliders remain active for simulation. They must not
+		# steal builder selection from visible furniture behind them.
+		if not object.is_visible_in_tree():
+			continue
+		# In reduced-wall mode the structural collider intentionally remains full
+		# height for navigation, while only a low stub is drawn. Let clicks pass
+		# through that invisible upper area; the bounded edge fallback below still
+		# selects the stub itself when the pointer is close to its floor edge.
+		if world.reduced_walls and world.is_edge_placement(object.definition):
 			continue
 		if first_object == null:
 			first_object = object

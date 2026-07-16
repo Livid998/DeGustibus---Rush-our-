@@ -2,6 +2,7 @@ class_name RestaurantCamera
 extends Node3D
 
 signal view_changed(quadrant: int)
+signal view_transform_changed
 
 var camera: Camera3D
 var target := Vector3.ZERO
@@ -174,8 +175,16 @@ func _rotate_by(direction: int) -> void:
 		_rotation_tween.kill()
 	_rotation_tween = create_tween()
 	_rotation_tween.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN_OUT)
-	_rotation_tween.tween_property(self, "rotation:y", _target_yaw, ROTATION_DURATION)
+	# Apply the interpolated yaw through a method so wall cutaways can follow the
+	# real camera direction throughout the turn. This signal is deliberately
+	# separate from view_changed: UI state and persistence still update only once.
+	_rotation_tween.tween_method(Callable(self, "_apply_rotation_yaw"), rotation.y, _target_yaw, ROTATION_DURATION)
 	_rotation_tween.tween_callback(_finish_rotation)
+
+
+func _apply_rotation_yaw(value: float) -> void:
+	rotation.y = value
+	view_transform_changed.emit()
 
 
 func _finish_rotation() -> void:

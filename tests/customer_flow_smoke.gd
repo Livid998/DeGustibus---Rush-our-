@@ -2,6 +2,7 @@ extends Node
 
 
 func _ready() -> void:
+	SaveManager.writes_enabled = false
 	seed(20260716)
 	GameState.reset_to_defaults(false)
 	var main_scene: PackedScene = load("res://scenes/main/main.tscn")

@@ -84,6 +84,17 @@ jobs:
         shell: bash
         run: ".godot-bin/Godot_v${GODOT_VERSION}_linux.x86_64 --headless --path . --import"
 
+      - name: Esegui unit e smoke test
+        shell: bash
+        run: |
+          GODOT=".godot-bin/Godot_v${GODOT_VERSION}_linux.x86_64"
+          "$GODOT" --headless --path . res://tests/test_runner.tscn
+          "$GODOT" --headless --path . res://tests/asset_load_check.tscn
+          "$GODOT" --headless --path . res://tests/service_smoke.tscn
+          "$GODOT" --headless --path . res://tests/customer_flow_smoke.tscn
+          "$GODOT" --headless --path . res://tests/maintenance_smoke.tscn
+          "$GODOT" --headless --path . res://tests/agent_stress.tscn
+
       - name: Esporta la PWA
         shell: bash
         run: |

@@ -166,6 +166,8 @@ func _create_roots() -> void:
 	add_child(camera_rig)
 	if camera_rig.has_signal("view_changed"):
 		camera_rig.connect("view_changed", Callable(self, "_on_camera_view_changed"))
+	if camera_rig.has_signal("view_transform_changed"):
+		camera_rig.connect("view_transform_changed", Callable(self, "refresh_shell_cutaway"))
 	configure_build_system()
 
 

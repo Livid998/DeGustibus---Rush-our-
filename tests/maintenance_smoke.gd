@@ -21,6 +21,7 @@ var checks := 0
 
 
 func _ready() -> void:
+	SaveManager.writes_enabled = false
 	var previous_world: Node = SimulationManager.world
 	var previous_stations: Dictionary = SimulationManager.stations
 	SimulationManager.bind_world(null)

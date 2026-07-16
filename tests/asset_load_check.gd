@@ -2,6 +2,7 @@ extends Node
 
 
 func _ready() -> void:
+	SaveManager.writes_enabled = false
 	var paths: Dictionary = {}
 	for ingredient: Dictionary in DataRegistry.ingredients:
 		paths[String(ingredient.model)] = true

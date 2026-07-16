@@ -4,6 +4,7 @@ var failures: Array[String] = []
 
 
 func _ready() -> void:
+	SaveManager.writes_enabled = false
 	seed(20260716)
 	var main_scene: PackedScene = load("res://scenes/main/main.tscn")
 	var main := main_scene.instantiate()

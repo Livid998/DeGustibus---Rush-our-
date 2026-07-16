@@ -9,6 +9,8 @@ func _ready() -> void:
 
 
 func _run() -> void:
+	var previous_writes_enabled := SaveManager.writes_enabled
+	SaveManager.writes_enabled = false
 	await get_tree().process_frame
 	_test_registry()
 	_test_graphics_profiles()
@@ -40,6 +42,7 @@ func _run() -> void:
 		report.store_line("TESTS: %d checks, %d failures" % [checks, failures.size()])
 		for failure: String in failures:
 			report.store_line("FAIL: %s" % failure)
+	SaveManager.writes_enabled = previous_writes_enabled
 	get_tree().quit(1 if not failures.is_empty() else 0)
 
 
@@ -199,6 +202,17 @@ func _test_builder_and_seating(world: RestaurantWorld) -> void:
 	var sample_chair := attached_chairs[0]
 	var chair_screen := world.camera_rig.camera.unproject_position(sample_chair.global_position + Vector3.UP * 0.9)
 	_expect(build._object_from_screen(chair_screen) == sample_chair, "ray selection prioritizes an attached chair over the overlapping table support")
+	sample_chair.visible = false
+	_expect(build._object_from_screen(chair_screen) != sample_chair, "hidden cutaway objects keep their simulation collider without stealing builder ray selection")
+	sample_chair.visible = true
+	var reduced_before := world.reduced_walls
+	world.reduced_walls = true
+	world.refresh_shell_cutaway()
+	var visible_stub := world.placed_objects.values().filter(func(candidate: PlacedObject): return world.is_edge_placement(candidate.definition) and candidate.visible)[0] as PlacedObject
+	var stub_screen := world.camera_rig.camera.unproject_position(visible_stub.global_position + Vector3.UP * 1.4)
+	_expect(build._object_from_screen(stub_screen) != visible_stub, "the invisible upper collider of a reduced wall stub does not steal furniture selection")
+	world.reduced_walls = reduced_before
+	world.refresh_shell_cutaway()
 	var wrong_rotation := posmod(sample_chair.rotation_steps + 1, 4)
 	_expect(not bool(world.validate_placement(sample_chair.definition, table.grid_cell, wrong_rotation, sample_chair, table.uid, sample_chair.attachment_slot).valid), "a chair facing away from its table is never a valid seat")
 	_expect(not bool(world.validate_placement(sample_chair.definition, table.grid_cell, sample_chair.rotation_steps, null, table.uid, sample_chair.attachment_slot).valid), "two chairs cannot share the same table slot")
@@ -217,6 +231,13 @@ func _test_builder_and_seating(world: RestaurantWorld) -> void:
 	var storage := world.placed_objects.get("storage_1") as PlacedObject
 	var storage_wall := world.placed_objects.get(storage.support_uid) as PlacedObject
 	_expect(storage_wall != null and bool(world.validate_placement(storage.definition, storage_wall.grid_cell, storage_wall.rotation_steps, storage, storage_wall.uid, 0).valid) and not world.occupancy.has(storage.grid_cell), "wall storage mounts to a full wall without reserving the floor cell below")
+	build.select_object(storage)
+	build.move_selected()
+	build.rotate_preview()
+	var wall_mount_detached_cleanly := build.preview_support_uid.is_empty() and build.preview_attachment_slot == -1 and not build.placement_valid
+	build.rotate_preview_back()
+	_expect(wall_mount_detached_cleanly and build.preview_support_uid == storage_wall.uid and build.preview_attachment_slot == 0 and build.placement_valid, "wall-mount edge controls clear stale supports and reacquire the wall on the selected edge")
+	build.cancel_preview()
 	build.select_object(table)
 	build.move_selected()
 	var source_position := table.position
@@ -296,6 +317,13 @@ func _test_builder_and_seating(world: RestaurantWorld) -> void:
 	var snapped_edge := build._nearest_edge_target(edge_screen, null)
 	_expect(build.preview.position.is_equal_approx(exact_edge_position) and world.edge_key(Vector2i(snapped_edge.cell), int(snapped_edge.rotation)) == world.edge_key(Vector2i(6, 7), 0), "wall previews snap immediately to one explicit canonical edge without ambiguous interpolation")
 	build.cancel_preview()
+	build.preview_cell = Vector2i(6, 7)
+	build.rotation_steps = 0
+	var west_segment := build._edge_screen_segment(Vector2i(6, 7), 1)
+	var near_west_corner := west_segment[0] + (west_segment[1] - west_segment[0]).normalized() * 6.0
+	var inactive_edge_target := build._nearest_edge_target(near_west_corner, null)
+	_expect(world.edge_key(Vector2i(inactive_edge_target.cell), int(inactive_edge_target.rotation)) == world.edge_key(Vector2i(6, 7), 1), "inactive edge selection ignores stale placement hysteresis and chooses the geometrically closest side")
+	_expect(build._edge_target_is_within_selection_range({"key":"h:6:7", "distance":BuildSystem.EDGE_SELECTION_FALLBACK_RADIUS_PX - 1.0}) and not build._edge_target_is_within_selection_range({"key":"h:6:7", "distance":BuildSystem.EDGE_SELECTION_FALLBACK_RADIUS_PX + 1.0}), "edge fallback only selects structural pieces within a bounded screen-space radius")
 	build.start_place("plant")
 	var pinned_cell := build.preview_cell
 	build.preview_pinned = true
@@ -559,6 +587,10 @@ func _test_customer_lifecycle(world: RestaurantWorld) -> void:
 	abandoning._process(0.0)
 	_expect(_force_next_guest_outside(abandoning, world, 0) and world.customer_owns_table(abandoning, abandoning_table_uid), "an abandoned table stays reserved until every impatient guest has physically left")
 	_expect(_force_next_guest_outside(abandoning, world, 1) and not world.customer_owns_table(abandoning, abandoning_table_uid), "an abandoned table becomes available after the entire party crosses the exit")
+	var checkpoint_person: CustomerPersonAgent = abandoning.people[0]
+	var blocked_checkpoint := world.cell_to_world(Vector2i(world.entrance_cell.x, RestaurantWorld.ROAD_ROWS[0]))
+	abandoning._force_person_checkpoint(checkpoint_person, blocked_checkpoint, "watchdog_safe")
+	_expect(checkpoint_person.global_position.is_equal_approx(checkpoint_person.destination) and checkpoint_person.is_at("watchdog_safe") and checkpoint_person.global_position.distance_to(blocked_checkpoint) > 0.78, "the doorway watchdog uses its safe fallback as the arrived destination instead of deadlocking short of the original checkpoint")
 	world.release_table(replacement)
 	for departing: CustomerAgent in [abandoning, replacement]:
 		SimulationManager.unregister_customer(departing, false)
@@ -606,17 +638,29 @@ func _test_camera_input(world: RestaurantWorld) -> void:
 	var camera := world.camera_rig
 	var original_quadrant := camera.quadrant
 	var original_reduced := world.reduced_walls
+	var starting_yaw := camera.rotation.y
 	var starting_shell_visibility: Dictionary = {}
 	world.refresh_shell_cutaway()
 	for object: PlacedObject in world.placed_objects.values():
 		var side := world.shell_side_for_edge(object.grid_cell, object.rotation_steps) if world.is_edge_placement(object.definition) else ""
 		if not side.is_empty() and not starting_shell_visibility.has(side):
 			starting_shell_visibility[side] = object.visible
+	var transform_updates: Array[int] = [0]
+	var transform_listener := func(): transform_updates[0] += 1
+	camera.view_transform_changed.connect(transform_listener)
 	camera.rotate_right()
+	camera._apply_rotation_yaw(lerpf(starting_yaw, camera._target_yaw, 0.65))
+	var mid_turn_shell_visibility: Dictionary = {}
+	for object: PlacedObject in world.placed_objects.values():
+		var side := world.shell_side_for_edge(object.grid_cell, object.rotation_steps) if world.is_edge_placement(object.definition) else ""
+		if not side.is_empty() and not mid_turn_shell_visibility.has(side):
+			mid_turn_shell_visibility[side] = object.visible
+	_expect(transform_updates[0] == 1 and mid_turn_shell_visibility != starting_shell_visibility, "the wall cutaway follows the interpolated camera direction during a smooth turn")
 	if camera._rotation_tween:
 		camera._rotation_tween.kill()
-	camera.rotation.y = camera._target_yaw
+	camera._apply_rotation_yaw(camera._target_yaw)
 	camera._finish_rotation()
+	camera.view_transform_changed.disconnect(transform_listener)
 	var rotated_shell_visibility: Dictionary = {}
 	for object: PlacedObject in world.placed_objects.values():
 		var side := world.shell_side_for_edge(object.grid_cell, object.rotation_steps) if world.is_edge_placement(object.definition) else ""
@@ -838,6 +882,23 @@ func _test_save_load() -> void:
 	for record: Dictionary in GameState.layout:
 		if String(record.get("item", "")) in ["wall", "wall_window", "door", "pass_opening"]:
 			migrated_edges[GameState._layout_edge_key(record)] = true
-	var shell_migrated := GameState._initial_wall_records().all(func(record: Dictionary): return migrated_edges.has(GameState._layout_edge_key(record)))
+	var shell_migrated := GameState._initial_shell_wall_records().all(func(record: Dictionary): return migrated_edges.has(GameState._layout_edge_key(record)))
 	_expect(shell_migrated, "version 9 fills every missing outer shell edge in existing saves without replacing structural openings")
+	var customized_v8 := serialized_state.duplicate(true)
+	customized_v8.save_version = 8
+	customized_v8.layout = customized_v8.layout.filter(func(record: Dictionary): return String(record.get("uid", "")) not in ["wall_divider_2", "wall_top_6"])
+	customized_v8.layout.append({"uid":"legacy_custom_door", "item":"door", "cell":[6, 0], "rotation":0})
+	for record: Dictionary in customized_v8.layout:
+		if String(record.get("uid", "")) == "wall_top_5":
+			record.cell = [5, 5]
+			record.rotation = 0
+	GameState.deserialize(customized_v8)
+	var moved_original_preserved := GameState.layout.any(func(record: Dictionary): return String(record.get("uid", "")) == "wall_top_5" and GameState._layout_edge_key(record) == "h:5:5")
+	var restored_top_uses_unique_uid := GameState.layout.any(func(record: Dictionary): return String(record.get("uid", "")) != "wall_top_5" and String(record.get("item", "")) in ["wall", "wall_window", "door", "pass_opening"] and GameState._layout_edge_key(record) == "h:5:0")
+	var removed_divider_stays_removed := not GameState.layout.any(func(record: Dictionary): return GameState._layout_edge_key(record) == "h:2:8" and String(record.get("item", "")) in ["wall", "wall_window", "door", "pass_opening"])
+	var custom_opening_edge := GameState.layout.filter(func(record: Dictionary): return GameState._layout_edge_key(record) == "h:6:0")
+	var preserved_custom_opening := custom_opening_edge.size() == 1 and String(custom_opening_edge[0].get("uid", "")) == "legacy_custom_door" and String(custom_opening_edge[0].get("item", "")) == "door"
+	_expect(moved_original_preserved and restored_top_uses_unique_uid, "version 9 restores a missing shell edge with a unique UID when its original wall was moved elsewhere")
+	_expect(removed_divider_stays_removed, "version 9 completes only the outer shell and never recreates a deliberately removed internal divider")
+	_expect(preserved_custom_opening, "version 9 preserves an existing custom door instead of replacing or duplicating its shell edge")
 	GameState.deserialize(original_state)

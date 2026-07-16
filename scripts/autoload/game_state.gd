@@ -591,12 +591,19 @@ func _migrate_complete_shell_v9() -> void:
 		used_uids[String(record.get("uid", ""))] = true
 		if String(record.get("item", "")) in ["wall", "wall_window", "door", "pass_opening"]:
 			occupied_edges[_layout_edge_key(record)] = true
-	for shell_record: Dictionary in _initial_wall_records():
+	for shell_record: Dictionary in _initial_shell_wall_records():
 		var edge_key := _layout_edge_key(shell_record)
-		var uid := String(shell_record.get("uid", ""))
-		if occupied_edges.has(edge_key) or used_uids.has(uid):
+		if occupied_edges.has(edge_key):
 			continue
-		layout.append(shell_record.duplicate(true))
+		var migrated_record := shell_record.duplicate(true)
+		var requested_uid := String(migrated_record.get("uid", "wall_shell"))
+		var uid := requested_uid
+		var suffix := 1
+		while used_uids.has(uid):
+			uid = "%s_v9_%d" % [requested_uid, suffix]
+			suffix += 1
+		migrated_record.uid = uid
+		layout.append(migrated_record)
 		occupied_edges[edge_key] = true
 		used_uids[uid] = true
 
@@ -625,7 +632,7 @@ func _initial_exterior_records() -> Array:
 	]
 
 
-func _initial_wall_records() -> Array:
+func _initial_shell_wall_records() -> Array:
 	var records: Array = []
 	for x: int in 18:
 		if x == 8:
@@ -637,6 +644,11 @@ func _initial_wall_records() -> Array:
 		records.append({"uid":"wall_bottom_%d" % x, "item":"wall_window" if x in [3, 4, 13, 14] else "wall", "cell":[x, 13], "rotation":2})
 	for y: int in range(0, 14):
 		records.append({"uid":"wall_right_%d" % y, "item":"wall_window" if y in [3, 4, 10, 11] else "wall", "cell":[17, y], "rotation":3})
+	return records
+
+
+func _initial_wall_records() -> Array:
+	var records := _initial_shell_wall_records()
 	for x: int in range(0, 18):
 		if x in [8, 9, 10, 11]:
 			continue

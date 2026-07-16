@@ -226,7 +226,7 @@ const engine = new Engine(GODOT_CONFIG);
 		return registration;
 	}
 
-	async function checkForUpdates(manual) {
+	async function performUpdateCheck(manual) {
 		try {
 			const current = await getRegistration();
 			if (!current) {
@@ -245,6 +245,11 @@ const engine = new Engine(GODOT_CONFIG);
 			if (manual) show('Impossibile controllare gli aggiornamenti.', false);
 			return 'Controllo aggiornamenti non riuscito';
 		}
+	}
+
+	function checkForUpdates(manual) {
+		void performUpdateCheck(manual);
+		return 'Controllo aggiornamenti avviato';
 	}
 
 	button.addEventListener('click', async () => {
