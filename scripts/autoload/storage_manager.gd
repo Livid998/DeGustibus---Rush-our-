@@ -184,7 +184,7 @@ func reserve_recipe_for_order(order_id: String, recipe_or_id: Variant) -> bool:
 
 
 func reserve_for_order(order_id: String, requirements: Dictionary) -> bool:
-	if order_id.is_empty():
+	if order_id.is_empty() or not _requirements_are_known(requirements):
 		return false
 	var normalized := _normalize_requirements(requirements)
 	if normalized.is_empty():
@@ -206,6 +206,8 @@ func reserve_for_order(order_id: String, requirements: Dictionary) -> bool:
 
 
 func consume_reserved(order_id: String, requirements: Dictionary) -> bool:
+	if not _requirements_are_known(requirements):
+		return false
 	if not _reservations.has(order_id):
 		return requirements.is_empty()
 	var normalized := _normalize_requirements(requirements)
@@ -235,6 +237,8 @@ func consume_reserved(order_id: String, requirements: Dictionary) -> bool:
 
 
 func release_reserved_items(order_id: String, requirements: Dictionary) -> bool:
+	if not _requirements_are_known(requirements):
+		return false
 	if not _reservations.has(order_id):
 		return requirements.is_empty()
 	var normalized := _normalize_requirements(requirements)
@@ -276,12 +280,17 @@ func replace_order_reservation(order_id: String, recipe_or_requirements: Variant
 			requirements = recipe_or_requirements
 		else:
 			requirements = DataRegistry.recipe_raw_requirements(recipe_or_requirements)
+		if not _requirements_are_known(requirements):
+			return false
 		return reserve_for_order(order_id, requirements)
-	var next_requirements: Dictionary
+	var raw_next_requirements: Dictionary
 	if recipe_or_requirements is Dictionary and not (recipe_or_requirements as Dictionary).has("steps"):
-		next_requirements = _normalize_requirements(recipe_or_requirements)
+		raw_next_requirements = recipe_or_requirements
 	else:
-		next_requirements = _normalize_requirements(DataRegistry.recipe_raw_requirements(recipe_or_requirements))
+		raw_next_requirements = DataRegistry.recipe_raw_requirements(recipe_or_requirements)
+	if not _requirements_are_known(raw_next_requirements):
+		return false
+	var next_requirements := _normalize_requirements(raw_next_requirements)
 	var previous: Dictionary = _reservations[order_id]
 	var previous_remaining: Dictionary = previous.get("remaining", {})
 	for ingredient_id: String in next_requirements:
@@ -451,6 +460,13 @@ func _normalize_requirements(value: Dictionary) -> Dictionary:
 		if amount > 0 and GameState.stock.has(ingredient_id):
 			result[ingredient_id] = amount
 	return result
+
+
+func _requirements_are_known(value: Dictionary) -> bool:
+	for ingredient_id: String in value:
+		if int(value[ingredient_id]) > 0 and not GameState.stock.has(ingredient_id):
+			return false
+	return true
 
 
 func _new_reservation(requirements: Dictionary, consumed: Dictionary) -> Dictionary:

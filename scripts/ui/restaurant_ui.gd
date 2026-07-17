@@ -29,6 +29,7 @@ var nav_buttons: Dictionary = {}
 var screen_title_label: Label
 var world_action_panel: PanelContainer
 var world_build_button: Button
+var profile_summary_button: Button
 var camera_controls: PanelContainer
 var wall_visibility_button: Button
 var current_screen := "Ristorante"
@@ -492,14 +493,34 @@ func _build_world_actions() -> void:
 	world_action_panel.anchor_top = 1
 	world_action_panel.anchor_bottom = 1
 	world_action_panel.offset_left = 14
-	world_action_panel.offset_right = 222
+	world_action_panel.offset_right = 420
 	world_action_panel.offset_top = -132
 	world_action_panel.offset_bottom = -78
 	world_action_panel.add_theme_stylebox_override("panel", _panel_style(Color("173f45e8"), 12))
 	root.add_child(world_action_panel)
+	var action_row := HBoxContainer.new()
+	action_row.add_theme_constant_override("separation", 8)
+	world_action_panel.add_child(action_row)
 	world_build_button = make_button("Costruisci e modifica", open_builder, "yellow")
 	world_build_button.custom_minimum_size = Vector2(180, 44)
-	world_action_panel.add_child(world_build_button)
+	action_row.add_child(world_build_button)
+	profile_summary_button = make_button("", func(): show_screen("Impostazioni"), "ghost")
+	profile_summary_button.custom_minimum_size = Vector2(170, 44)
+	profile_summary_button.icon = GameIcons.casual_system_icon("profile_avatar")
+	profile_summary_button.expand_icon = true
+	profile_summary_button.add_theme_constant_override("icon_max_width", 32)
+	profile_summary_button.tooltip_text = "Apri il profilo del ristorante"
+	action_row.add_child(profile_summary_button)
+	_update_profile_summary()
+
+
+func _update_profile_summary() -> void:
+	if profile_summary_button == null:
+		return
+	var restaurant_name := String(GameState.restaurant_profile.get("restaurant_name", "DeGustibus")).strip_edges()
+	if restaurant_name.is_empty():
+		restaurant_name = "DeGustibus"
+	profile_summary_button.text = GameFonts.web_safe_text(restaurant_name)
 
 
 func _build_camera_controls() -> void:
@@ -826,7 +847,10 @@ func _connect_state() -> void:
 	GameState.album_inventory_changed.connect(func(_id: String, _value: int): if current_screen == "Album": refresh_screen())
 	GameState.album_discovered_changed.connect(func(_id: String, _value: bool): if current_screen == "Album": refresh_screen())
 	GameState.review_reward_progress_changed.connect(func(_value: int): if current_screen == "Album": refresh_screen())
-	GameState.employees_changed.connect(func(): if current_screen == "Personale": refresh_screen())
+	# StaffScreen listens directly and refreshes only its role-filtered rows,
+	# preserving the selected tab, scroll and focus instead of rebuilding the
+	# entire management screen after every hire or dismissal.
+	GameState.restaurant_profile_changed.connect(func(_value: Dictionary): _update_profile_summary())
 	GameState.toast_requested.connect(show_toast)
 	SimulationManager.order_created.connect(func(_order: Dictionary): advance_tutorial_to(5); _update_pass())
 	SimulationManager.dish_ready.connect(func(_order: Dictionary): _update_pass())
@@ -850,6 +874,11 @@ func _apply_responsive_layout() -> void:
 	if root == null:
 		return
 	var portrait := root.size.y > root.size.x
+	var compact_phone := root.size.x < 700.0
+	if profile_summary_button != null:
+		profile_summary_button.visible = not compact_phone
+	if world_action_panel != null:
+		world_action_panel.offset_right = 222 if compact_phone else 420
 	screen_panel.anchor_left = 0
 	screen_panel.anchor_right = 1
 	screen_panel.offset_left = 8 if portrait else 14

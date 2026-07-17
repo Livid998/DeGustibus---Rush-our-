@@ -5,6 +5,7 @@ signal delivery_arrived(delivery: Dictionary)
 signal delivery_rejected(reason: String, details: Dictionary)
 signal delivery_cart_changed(cart: Dictionary)
 signal delivery_batch_changed(batch: Dictionary)
+signal payroll_processed(summary: Dictionary)
 
 var delivery_cart: Dictionary = {}
 var _auto_reorder_clock := 0.0
@@ -251,6 +252,8 @@ func fire(employee_id: String) -> bool:
 
 
 func pay_shift_wages() -> int:
+	# Legacy API retained for old tools. Continuous service pays at midnight via
+	# process_daily_payroll(); closing the restaurant must never charge twice.
 	var due := 0
 	for employee: Dictionary in GameState.employees:
 		due += int(employee.get("salary", 0))
@@ -260,6 +263,49 @@ func pay_shift_wages() -> int:
 	if paid < due:
 		GameState.toast_requested.emit("Stipendi parziali: mancano %d monete" % (due - paid), "warning")
 	return paid
+
+
+func process_daily_payroll(completed_day: int) -> Dictionary:
+	var normalized_day := maxi(completed_day, 1)
+	var last_processed := maxi(int(GameState.progress.get("last_payroll_day", 0)), 0)
+	if normalized_day <= last_processed:
+		return {
+			"processed": false,
+			"day": normalized_day,
+			"wages": 0,
+			"previous_debt": maxi(int(GameState.progress.get("wage_debt", 0)), 0),
+			"paid": 0,
+			"debt": maxi(int(GameState.progress.get("wage_debt", 0)), 0),
+		}
+	var wages := 0
+	for employee: Dictionary in GameState.employees:
+		wages += maxi(int(employee.get("salary", 0)), 0)
+	var previous_debt := maxi(int(GameState.progress.get("wage_debt", 0)), 0)
+	var total_due := wages + previous_debt
+	var paid := mini(total_due, maxi(GameState.money, 0))
+	if paid > 0:
+		GameState.spend(paid, "Stipendi giorno %d" % normalized_day)
+	var debt := maxi(total_due - paid, 0)
+	GameState.progress.last_payroll_day = normalized_day
+	GameState.progress.wage_debt = debt
+	GameState.mark_save_dirty()
+	var summary := {
+		"processed": true,
+		"day": normalized_day,
+		"wages": wages,
+		"previous_debt": previous_debt,
+		"paid": paid,
+		"debt": debt,
+	}
+	if debt > 0:
+		GameState.toast_requested.emit(
+			"Stipendi: pagati %d, debito recuperabile %d" % [paid, debt],
+			"warning"
+		)
+	elif previous_debt > 0:
+		GameState.toast_requested.emit("Debito stipendi saldato", "income")
+	payroll_processed.emit(summary.duplicate(true))
+	return summary
 
 
 func _deliver_batch(batch: Dictionary, batch_kind: String) -> void:

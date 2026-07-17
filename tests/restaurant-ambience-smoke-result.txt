@@ -1,0 +1,1 @@
+RESTAURANT AMBIENCE SMOKE: FAIL | checks=42 failures=1

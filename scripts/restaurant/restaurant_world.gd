@@ -1,6 +1,9 @@
 class_name RestaurantWorld
 extends Node3D
 
+signal ambience_changed(snapshot: Dictionary)
+signal pest_warning_changed(active: bool, context: Dictionary)
+
 const GRID_SIZE := Vector2i(18, 14)
 const CELL_SIZE := 2.0
 ## The legacy dining-room transform deliberately keeps using GRID_SIZE.  The
@@ -49,6 +52,13 @@ var _sun_light: DirectionalLight3D
 var _last_lighting_minute := -1
 var _traffic_recipe_warning := false
 var _debug_force_rush_fallback := false
+## Legacy/debug compatibility for smoke tests and old call sites.  Natural rush
+## scheduling still comes exclusively from DayCycleManager.
+var rush_mode: bool:
+	get:
+		return is_rush_active()
+	set(enabled):
+		set_rush_mode(enabled)
 var floor_root: Node3D
 var floor_tiles: Dictionary = {}
 var floor_batches: Dictionary = {}
@@ -67,8 +77,12 @@ var _path_cache_suspended := false
 var cleanup_root: Node3D
 var spill_records: Dictionary = {}
 var wash_batches: Dictionary = {}
+var ambience_system: RestaurantAmbienceSystem
+var kitchen_dirt := 0.0
+var pest_visuals: Dictionary = {}
 var _spill_serial := 0
 var _spill_clock := 18.0
+var _ambience_tick_accumulator := 0.0
 var reduced_walls := false
 
 
@@ -82,9 +96,12 @@ func _ready() -> void:
 	load_layout()
 	spawn_staff()
 	SimulationManager.bind_world(self)
+	_setup_ambience()
 	_bind_day_cycle()
 	if not GameState.layout_changed.is_connected(refresh_shell_cutaway):
 		GameState.layout_changed.connect(refresh_shell_cutaway)
+	if not GameState.layout_changed.is_connected(_on_ambience_layout_changed):
+		GameState.layout_changed.connect(_on_ambience_layout_changed)
 	if not WebPlatformProfile.quality_changed.is_connected(apply_graphics_quality):
 		WebPlatformProfile.quality_changed.connect(apply_graphics_quality)
 
@@ -103,6 +120,17 @@ func _process(delta: float) -> void:
 		if _debug_refresh_clock <= 0.0:
 			_debug_refresh_clock = 0.25
 			_update_station_queue_labels()
+	if GameState.restaurant_state in ["open", "closing"] and ambience_system != null:
+		var ambience_scaled := delta * SimulationManager.simulation_speed
+		_ambience_tick_accumulator += ambience_scaled
+		var ambience_ticks := 0
+		while _ambience_tick_accumulator >= 0.5 and ambience_ticks < 4:
+			ambience_system.refresh_from_world()
+			ambience_system.advance_pest_risk(0.5)
+			_ambience_tick_accumulator -= 0.5
+			ambience_ticks += 1
+		if ambience_ticks == 4:
+			_ambience_tick_accumulator = minf(_ambience_tick_accumulator, 0.5)
 	if GameState.restaurant_state != "open":
 		return
 	var scaled := delta * SimulationManager.simulation_speed
@@ -118,6 +146,264 @@ func _process(delta: float) -> void:
 		if maximum > 0 and SimulationManager.customers.size() < maximum:
 			spawn_customer_group()
 		_spawn_clock = effective_customer_spawn_interval(has_producible_recipe)
+
+
+func _setup_ambience() -> void:
+	kitchen_dirt = maxf(float(GameState.cleanliness_state.get("kitchen_dirt", 0.0)), 0.0)
+	ambience_system = RestaurantAmbienceSystem.new()
+	ambience_system.name = "RestaurantAmbienceSystem"
+	add_child(ambience_system)
+	ambience_system.ambience_changed.connect(_on_ambience_changed)
+	ambience_system.pest_warning_changed.connect(_on_pest_warning_changed)
+	ambience_system.pest_spawn_requested.connect(_on_pest_spawn_requested)
+	ambience_system.pest_resolved.connect(_on_pest_resolved)
+	ambience_system.configure(self, {}, true)
+	ambience_system.refresh_from_world()
+	_restore_ambience_pest_visuals()
+	_ensure_kitchen_cleaning_task()
+
+
+func ambience_snapshot() -> Dictionary:
+	if ambience_system == null:
+		return {
+			"beauty_score": 0.0,
+			"cleanliness_score": float(GameState.cleanliness_state.get("score", 100.0)),
+			"cleanliness_level": "clean",
+			"pest": {"active": [], "visible_kinds": []},
+		}
+	return ambience_system.current_snapshot()
+
+
+func visible_pest_incidents() -> Array:
+	var snapshot := ambience_snapshot()
+	var pest: Dictionary = snapshot.get("pest", {})
+	var result: Array = []
+	for value: Variant in pest.get("active", []):
+		if value is Dictionary and bool((value as Dictionary).get("visible", true)):
+			result.append((value as Dictionary).duplicate(true))
+	return result
+
+
+func register_kitchen_work_dirt(task: Dictionary = {}) -> void:
+	if task.is_empty():
+		return
+	var station := String(task.get("station", ""))
+	if station.is_empty() or station in ["pass", "sink"]:
+		return
+	var addition := float(DataRegistry.balance_value("cleanliness.kitchen_dirt_per_task", 0.45))
+	kitchen_dirt = clampf(kitchen_dirt + maxf(addition, 0.0), 0.0, 100.0)
+	_refresh_ambience()
+	_ensure_kitchen_cleaning_task()
+
+
+func _refresh_ambience() -> void:
+	if ambience_system == null:
+		return
+	ambience_system.refresh_from_world()
+
+
+func _on_ambience_layout_changed() -> void:
+	_refresh_ambience()
+
+
+func _on_ambience_changed(snapshot: Dictionary) -> void:
+	ambience_changed.emit(snapshot.duplicate(true))
+
+
+func _on_pest_warning_changed(active: bool, context: Dictionary) -> void:
+	pest_warning_changed.emit(active, context.duplicate(true))
+	if not active or GameState.restaurant_state not in ["open", "closing"]:
+		return
+	var message := String(context.get("message", "Rischio infestazione: intervieni sulla pulizia."))
+	GameState.toast_requested.emit(message, "warning")
+
+
+func _on_pest_spawn_requested(kind: String, context: Dictionary) -> void:
+	var incident_id := String(context.get("incident_id", ""))
+	if incident_id.is_empty() or pest_visuals.has(incident_id):
+		return
+	if _spawn_pest_incident(kind, incident_id, false):
+		GameState.toast_requested.emit(
+			"%s visibile: priorità emergenza al tuttofare." % ("Topo" if kind == "mouse" else "Insetti"),
+			"warning"
+		)
+
+
+func _restore_ambience_pest_visuals() -> void:
+	if ambience_system == null:
+		return
+	for record_value: Variant in visible_pest_incidents():
+		if not record_value is Dictionary:
+			continue
+		var record := record_value as Dictionary
+		var incident_id := String(record.get("id", ""))
+		var kind := String(record.get("kind", "insect"))
+		if not incident_id.is_empty() and not pest_visuals.has(incident_id):
+			_spawn_pest_incident(kind, incident_id, true)
+
+
+func _spawn_pest_incident(kind: String, incident_id: String, already_confirmed: bool) -> bool:
+	if cleanup_root == null:
+		return false
+	var spawn_cell := _pest_spawn_cell(kind, incident_id)
+	var visual := _create_pest_visual(kind, incident_id)
+	cleanup_root.add_child(visual)
+	visual.global_position = cell_to_world(spawn_cell) + Vector3.UP * 0.04
+	pest_visuals[incident_id] = {
+		"id": incident_id,
+		"kind": kind,
+		"cell": spawn_cell,
+		"node": visual,
+		"state": "visible",
+	}
+	var task := SimulationManager.request_maintenance_task(self, "remove_pest", visual.global_position, {
+		"incident_id": incident_id,
+		"incident_kind": kind,
+		"pest_type": kind,
+		"reservation_key": "pest:%s" % incident_id,
+		"maintenance_category": "emergency",
+		"animation": "PickUp",
+	}, 5, 2.4 if kind == "insect" else 3.2, "res://assets/cleaning/Tool_Mop.glb")
+	if task.is_empty():
+		visual.queue_free()
+		pest_visuals.erase(incident_id)
+		return false
+	pest_visuals[incident_id].task_id = String(task.get("id", ""))
+	if not already_confirmed:
+		ambience_system.confirm_pest_spawn(kind, incident_id)
+	return true
+
+
+func _pest_spawn_cell(kind: String, incident_id: String) -> Vector2i:
+	var candidates: Array[Vector2i] = []
+	for cell: Vector2i in floor_tiles:
+		var floor_style := String(floor_tiles.get(cell, ""))
+		if floor_style not in ["floor_dining", "floor_kitchen"]:
+			continue
+		if kind == "mouse" and floor_style != "floor_kitchen":
+			continue
+		if not astar.is_in_boundsv(cell) or astar.is_point_solid(cell):
+			continue
+		if cell.distance_to(entrance_cell) < 2.0:
+			continue
+		candidates.append(cell)
+	if candidates.is_empty() and kind == "mouse":
+		return _pest_spawn_cell("insect", incident_id)
+	if candidates.is_empty():
+		return _nearest_open_cell(Vector2i(10, 9))
+	candidates.sort_custom(func(a: Vector2i, b: Vector2i):
+		var a_key := abs(a.x * 31 + a.y * 17 + incident_id.hash())
+		var b_key := abs(b.x * 31 + b.y * 17 + incident_id.hash())
+		return a_key < b_key
+	)
+	return candidates[0]
+
+
+func _create_pest_visual(kind: String, incident_id: String) -> Node3D:
+	var root := Node3D.new()
+	root.name = "Pest_%s" % incident_id
+	var dark := StandardMaterial3D.new()
+	dark.albedo_color = Color("302925")
+	dark.roughness = 0.82
+	var accent := StandardMaterial3D.new()
+	accent.albedo_color = Color("76594a") if kind == "mouse" else Color("8d493d")
+	accent.roughness = 0.78
+	if kind == "mouse":
+		var body := MeshInstance3D.new()
+		var body_mesh := SphereMesh.new()
+		body_mesh.radius = 0.25
+		body_mesh.height = 0.42
+		body_mesh.radial_segments = 8
+		body_mesh.rings = 4
+		body_mesh.material = accent
+		body.mesh = body_mesh
+		body.scale = Vector3(1.0, 0.72, 1.35)
+		body.position = Vector3(0.0, 0.22, 0.0)
+		body.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		root.add_child(body)
+		var head := MeshInstance3D.new()
+		var head_mesh := SphereMesh.new()
+		head_mesh.radius = 0.16
+		head_mesh.height = 0.28
+		head_mesh.radial_segments = 8
+		head_mesh.rings = 4
+		head_mesh.material = dark
+		head.mesh = head_mesh
+		head.position = Vector3(0.0, 0.23, -0.31)
+		head.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		root.add_child(head)
+		for x_offset: float in [-0.11, 0.11]:
+			var ear := MeshInstance3D.new()
+			var ear_mesh := SphereMesh.new()
+			ear_mesh.radius = 0.07
+			ear_mesh.height = 0.06
+			ear_mesh.radial_segments = 7
+			ear_mesh.rings = 3
+			ear_mesh.material = accent
+			ear.mesh = ear_mesh
+			ear.position = Vector3(x_offset, 0.36, -0.28)
+			ear.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+			root.add_child(ear)
+		var tail := MeshInstance3D.new()
+		var tail_mesh := CylinderMesh.new()
+		tail_mesh.top_radius = 0.025
+		tail_mesh.bottom_radius = 0.025
+		tail_mesh.height = 0.42
+		tail_mesh.radial_segments = 6
+		tail_mesh.material = dark
+		tail.mesh = tail_mesh
+		tail.rotation_degrees.x = 76.0
+		tail.position = Vector3(0.0, 0.11, 0.40)
+		tail.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		root.add_child(tail)
+	else:
+		var body := MeshInstance3D.new()
+		var body_mesh := SphereMesh.new()
+		body_mesh.radius = 0.15
+		body_mesh.height = 0.28
+		body_mesh.radial_segments = 8
+		body_mesh.rings = 4
+		body_mesh.material = accent
+		body.mesh = body_mesh
+		body.scale = Vector3(0.78, 0.48, 1.35)
+		body.position.y = 0.10
+		body.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		root.add_child(body)
+		for leg_index: int in 3:
+			var legs := MeshInstance3D.new()
+			var leg_mesh := BoxMesh.new()
+			leg_mesh.size = Vector3(0.54, 0.025, 0.035)
+			leg_mesh.material = dark
+			legs.mesh = leg_mesh
+			legs.position = Vector3(0.0, 0.08, -0.11 + float(leg_index) * 0.11)
+			legs.rotation_degrees.y = -18.0 + float(leg_index) * 18.0
+			legs.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+			root.add_child(legs)
+	root.rotation.y = float(posmod(incident_id.hash(), 360)) * PI / 180.0
+	return root
+
+
+func _on_pest_resolved(_kind: String, context: Dictionary) -> void:
+	var incident_id := String(context.get("id", ""))
+	if not pest_visuals.has(incident_id):
+		return
+	var visual := pest_visuals[incident_id].get("node") as Node3D
+	if visual != null and is_instance_valid(visual):
+		visual.queue_free()
+	pest_visuals.erase(incident_id)
+	_refresh_ambience()
+
+
+func _ensure_kitchen_cleaning_task() -> void:
+	var threshold := float(DataRegistry.balance_value("cleanliness.kitchen_clean_task_threshold", 8.0))
+	if kitchen_dirt < threshold:
+		return
+	var target := _sink_interaction_position()
+	SimulationManager.request_maintenance_task(self, "clean_kitchen", target, {
+		"reservation_key": "clean:kitchen",
+		"maintenance_category": "kitchen",
+		"animation": "PickUp",
+	}, 2 if kitchen_dirt >= threshold * 2.0 else 1, 2.8, "res://assets/cleaning/Cleaning_Sponge.glb")
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -416,6 +702,9 @@ func load_layout() -> void:
 	_refresh_operational_stations()
 	_rebuild_astar()
 	refresh_shell_cutaway()
+	if ambience_system != null:
+		_refresh_ambience()
+		_restore_ambience_pest_visuals()
 
 
 func instantiate_layout_object(uid: String, item_id: String, cell: Vector2i, rotation_steps: int, support_uid: String = "", attachment_slot: int = -1) -> PlacedObject:
@@ -2017,6 +2306,17 @@ func staff_standby_position(agent: AnimatedAgent, role: String, force_refresh: b
 	var service_cells := _staff_service_cells()
 	var best_cell := _nearest_open_cell(world_to_cell(agent.global_position))
 	var best_score := INF
+	var employee_record: Dictionary = {}
+	if agent is EmployeeAgent:
+		employee_record = (agent as EmployeeAgent).employee
+	var employee_id := String(employee_record.get("id", ""))
+	var preference := StaffPreferences.for_employee_id(employee_id, role, employee_record)
+	var waiter_zone := (
+		String(preference.get("standby_zone", "automatic"))
+		if role == "waiter"
+		else "automatic"
+	)
+	var target_cell := _staff_standby_target(agent, role, waiter_zone)
 	# First prefer open room cells. If the player's layout is extremely dense,
 	# allow a two-neighbour cell but never a one-cell doorway/dead end.
 	for minimum_neighbors: int in [3, 2]:
@@ -2025,7 +2325,11 @@ func staff_standby_position(agent: AnimatedAgent, role: String, force_refresh: b
 				var cell := Vector2i(x, y)
 				if astar.is_point_solid(cell) or _open_neighbor_count(cell) < minimum_neighbors:
 					continue
-				if cell.distance_to(entrance_cell) < 3.0 or _grid_path(world_to_cell(agent.global_position), cell).is_empty():
+				var entrance_clearance := 2.5 if waiter_zone == "entrance" else 3.0
+				if (
+					cell.distance_to(entrance_cell) < entrance_clearance
+					or _grid_path(world_to_cell(agent.global_position), cell).is_empty()
+				):
 					continue
 				var too_close_to_work := false
 				for service_cell: Vector2i in service_cells:
@@ -2041,15 +2345,22 @@ func staff_standby_position(agent: AnimatedAgent, role: String, force_refresh: b
 						break
 				if reserved:
 					continue
-				var zone_y := 5.0 if role == "waiter" else 11.0
-				var wrong_zone := (role == "waiter" and y >= 8) or (role != "waiter" and y < 8)
-				var score := absf(float(y) - zone_y) * 2.0 + cell.distance_to(world_to_cell(agent.global_position)) * 0.12
+				var wrong_zone := false
+				if role == "waiter" and waiter_zone != "pass":
+					wrong_zone = y >= 8
+				elif role != "waiter":
+					wrong_zone = y < 8
+				var score := (
+					cell.distance_to(target_cell) * 2.0
+					+ cell.distance_to(world_to_cell(agent.global_position)) * 0.12
+				)
 				if wrong_zone:
 					score += 30.0
 				# Stable per-worker horizontal preference spreads the brigade instead
 				# of selecting the first equally good tile for everyone.
-				var preferred_x := 2 + posmod(String(agent.name).hash(), GRID_SIZE.x - 4)
-				score += absf(float(x - preferred_x)) * 0.18
+				if waiter_zone in ["automatic", "dining"] or role != "waiter":
+					var preferred_x := 2 + posmod(String(agent.name).hash(), GRID_SIZE.x - 4)
+					score += absf(float(x - preferred_x)) * 0.18
 				if score < best_score:
 					best_score = score
 					best_cell = cell
@@ -2057,6 +2368,26 @@ func staff_standby_position(agent: AnimatedAgent, role: String, force_refresh: b
 			break
 	staff_standby_reservations[key] = best_cell
 	return cell_to_world(best_cell)
+
+
+func _staff_standby_target(
+	agent: AnimatedAgent,
+	role: String,
+	waiter_zone: String = "automatic"
+) -> Vector2i:
+	var stable_x := 2 + posmod(String(agent.name).hash(), GRID_SIZE.x - 4)
+	if role != "waiter":
+		return Vector2i(stable_x, 11)
+	match waiter_zone:
+		"entrance":
+			return Vector2i(entrance_cell.x, mini(entrance_cell.y + 3, GRID_SIZE.y - 2))
+		"pass":
+			for object: PlacedObject in placed_objects.values():
+				if is_instance_valid(object) and object.station_id == "pass":
+					return object.grid_cell
+			return Vector2i(stable_x, 7)
+		_:
+			return Vector2i(stable_x, 5)
 
 
 func _staff_service_cells() -> Array[Vector2i]:
@@ -2609,6 +2940,7 @@ func adopt_dirty_table(_customer: Node, table_uid: String, source_dishes: Array)
 	})
 	if not task.is_empty():
 		table_dirty_records[table_uid].task_id = String(task.id)
+	_refresh_ambience()
 
 
 func accepts_service_action(action: String, payload: Dictionary = {}) -> bool:
@@ -2644,7 +2976,11 @@ func service_completed(action: String, payload: Dictionary) -> void:
 		if is_instance_valid(node):
 			node.queue_free()
 	table_dirty_records.erase(table_uid)
-	wash_batches[table_uid] = true
+	wash_batches[table_uid] = {
+		"table_uid": table_uid,
+		"dish_count": maxi((record.get("container_kinds", []) as Array).size(), 1),
+		"state": "waiting",
+	}
 	var station_available := SimulationManager.stations.has("sink") and not (SimulationManager.stations.get("sink", []) as Array).is_empty()
 	SimulationManager.request_maintenance_task(self, "wash_dishes", _sink_interaction_position(), {
 		"table_uid": table_uid,
@@ -2652,6 +2988,7 @@ func service_completed(action: String, payload: Dictionary) -> void:
 		"station_id": "sink" if station_available else "",
 		"animation": "PickUp"
 	}, 2, 2.4, "res://assets/cleaning/Cleaning_Sponge.glb")
+	_refresh_ambience()
 
 
 func _sink_interaction_position() -> Vector3:
@@ -2695,6 +3032,7 @@ func _spawn_service_spill() -> void:
 	}, 2, 1.8, "res://assets/cleaning/Tool_Mop.glb")
 	if not task.is_empty():
 		spill_records[spill_id].task_id = String(task.id)
+	_refresh_ambience()
 
 
 func _create_spill_visual(spill_id: String) -> Node3D:
@@ -2727,6 +3065,11 @@ func accepts_maintenance_action(action: String, payload: Dictionary = {}) -> boo
 			return spill_records.has(spill_id) and String(spill_records[spill_id].get("state", "")) != "clean"
 		"wash_dishes":
 			return wash_batches.has(String(payload.get("table_uid", "")))
+		"clean_kitchen":
+			return kitchen_dirt > 0.01
+		"remove_pest":
+			var incident_id := String(payload.get("incident_id", ""))
+			return pest_visuals.has(incident_id) and String(pest_visuals[incident_id].get("state", "visible")) != "resolved"
 	return false
 
 
@@ -2735,6 +3078,10 @@ func maintenance_started(action: String, payload: Dictionary, _employee_id: Stri
 		var spill_id := String(payload.get("spill_id", ""))
 		if spill_records.has(spill_id):
 			spill_records[spill_id].state = "cleaning"
+	elif action == "remove_pest":
+		var incident_id := String(payload.get("incident_id", ""))
+		if pest_visuals.has(incident_id):
+			pest_visuals[incident_id].state = "cleaning"
 
 
 func maintenance_completed(action: String, payload: Dictionary) -> void:
@@ -2748,6 +3095,20 @@ func maintenance_completed(action: String, payload: Dictionary) -> void:
 				spill_records.erase(spill_id)
 		"wash_dishes":
 			wash_batches.erase(String(payload.get("table_uid", "")))
+		"clean_kitchen":
+			var cleaning_amount := float(DataRegistry.balance_value("cleanliness.kitchen_clean_amount", 18.0))
+			kitchen_dirt = maxf(kitchen_dirt - maxf(cleaning_amount, 0.0), 0.0)
+			_ensure_kitchen_cleaning_task()
+		"remove_pest":
+			var incident_id := String(payload.get("incident_id", ""))
+			if pest_visuals.has(incident_id):
+				var pest_node := pest_visuals[incident_id].get("node") as Node3D
+				if pest_node != null and is_instance_valid(pest_node):
+					pest_node.queue_free()
+				pest_visuals.erase(incident_id)
+			if ambience_system != null:
+				ambience_system.resolve_pest(incident_id, "removed_by_handyman")
+	_refresh_ambience()
 
 
 func set_floor_style(cell: Vector2i, item_id: String) -> void:

@@ -35,6 +35,7 @@ func _ready() -> void:
 	_test_force_rush_debug()
 	_test_traffic_formula_and_cap()
 	_test_lighting_profile()
+	_test_daily_payroll_and_reward()
 
 	manager.set_paused(false, false)
 	GameState.deserialize(original_state)
@@ -154,6 +155,36 @@ func _test_lighting_profile() -> void:
 	_expect(float(midnight.lamp_energy) > float(midday.lamp_energy), "i lampioni sono attivi soprattutto di notte")
 	_expect(float(morning.daylight) > float(midnight.daylight) and float(morning.daylight) < float(midday.daylight), "la transizione mattutina e graduale")
 	_expect(midday.background_color is Color and midnight.ambient_color is Color, "il profilo espone colori compatibili con mobile e GL")
+
+
+func _test_daily_payroll_and_reward() -> void:
+	GameState.employees = [
+		{"id": "payroll_a", "salary": 70},
+		{"id": "payroll_b", "salary": 50},
+	]
+	GameState.money = 80
+	GameState.progress.erase("last_payroll_day")
+	GameState.progress.erase("last_album_reward_day")
+	GameState.progress.erase("wage_debt")
+	var album_before := 0
+	for amount: Variant in GameState.album_inventory.values():
+		album_before += int(amount)
+	manager.reset_event_history()
+	manager.set_clock(20, 1439.0)
+	manager.advance_seconds(_seconds_for_game_minutes(2.0), 1.0, "open")
+	var album_after := 0
+	for amount: Variant in GameState.album_inventory.values():
+		album_after += int(amount)
+	_expect(int(GameState.progress.get("last_payroll_day", 0)) == 20, "il payroll viene registrato per il giorno concluso")
+	_expect(GameState.money == 0 and int(GameState.progress.get("wage_debt", 0)) == 40, "fondi insufficienti producono debito salariale recuperabile senza denaro negativo")
+	_expect(int(GameState.progress.get("last_album_reward_day", 0)) == 20 and album_after == album_before + 1, "il completamento giorno assegna una sola ricompensa album")
+	var duplicate: Dictionary = EconomyManager.process_daily_payroll(20)
+	_expect(not bool(duplicate.processed) and int(GameState.progress.wage_debt) == 40, "lo stesso giorno non puo addebitare due volte gli stipendi")
+	GameState.money = 200
+	manager.reset_event_history()
+	manager.set_clock(21, 1439.0)
+	manager.advance_seconds(_seconds_for_game_minutes(2.0), 1.0, "open")
+	_expect(GameState.money == 40 and int(GameState.progress.get("wage_debt", -1)) == 0, "il giorno successivo paga stipendio e debito precedente, poi azzera il debito")
 
 
 func _seconds_for_game_minutes(game_minutes: float) -> float:

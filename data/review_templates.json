@@ -1,0 +1,146 @@
+{
+  "schema_version": 1,
+  "locale": "it",
+  "observations": {
+    "wait": {
+      "positive": [
+        "Il servizio è stato davvero rapido.",
+        "Non abbiamo quasi dovuto aspettare."
+      ],
+      "negative": [
+        "L'attesa è stata un po' troppo lunga.",
+        "Abbiamo aspettato più del previsto."
+      ]
+    },
+    "food_quality": {
+      "positive": [
+        "I piatti erano preparati molto bene.",
+        "La cucina ci ha davvero convinti."
+      ],
+      "negative": [
+        "La qualità dei piatti poteva essere migliore.",
+        "La cucina oggi non ci ha convinti."
+      ]
+    },
+    "service": {
+      "positive": [
+        "Il personale è stato attento e cortese.",
+        "Siamo stati seguiti con grande cura."
+      ],
+      "negative": [
+        "Il servizio è sembrato poco attento.",
+        "Avremmo gradito più attenzione dal personale."
+      ]
+    },
+    "ambience": {
+      "positive": [
+        "Il locale è bello e accogliente.",
+        "L'atmosfera ci è piaciuta molto."
+      ],
+      "negative": [
+        "L'ambiente potrebbe essere più curato.",
+        "Il locale ci è sembrato poco accogliente."
+      ]
+    },
+    "cleanliness": {
+      "positive": [
+        "Sala e tavolo erano impeccabili.",
+        "Abbiamo trovato tutto molto pulito."
+      ],
+      "negative": [
+        "La pulizia della sala va migliorata.",
+        "Tavolo e dintorni non erano abbastanza puliti."
+      ]
+    },
+    "sold_out": {
+      "positive": [
+        "Il cambio di piatto è stato gestito senza problemi."
+      ],
+      "negative": [
+        "Il piatto che volevamo non era disponibile.",
+        "Abbiamo dovuto cambiare ordine per un piatto esaurito."
+      ]
+    },
+    "small_portion": {
+      "negative": [
+        "La porzione era davvero troppo piccola.",
+        "Ci aspettavamo una porzione più generosa."
+      ]
+    },
+    "undercooked": {
+      "negative": [
+        "Il piatto era poco cotto.",
+        "La cottura era ancora indietro."
+      ]
+    },
+    "overcooked": {
+      "negative": [
+        "Il piatto era troppo cotto.",
+        "La cottura è andata un po' oltre."
+      ]
+    },
+    "burned": {
+      "negative": [
+        "Il piatto è arrivato bruciato.",
+        "Il sapore di bruciato era evidente."
+      ]
+    },
+    "poor_presentation": {
+      "negative": [
+        "La presentazione del piatto era poco curata.",
+        "Il piatto poteva essere impiattato meglio."
+      ]
+    },
+    "mouse": {
+      "negative": [
+        "Abbiamo visto un topo in sala.",
+        "La presenza di un topo ci ha rovinato la visita."
+      ]
+    },
+    "insect": {
+      "negative": [
+        "Abbiamo notato degli insetti nel locale.",
+        "Gli insetti in sala sono stati molto sgradevoli."
+      ]
+    },
+    "resolved_incident": {
+      "positive": [
+        "Un imprevisto è stato risolto con grande professionalità.",
+        "Il personale ha rimediato subito al problema."
+      ]
+    }
+  },
+  "fallback": {
+    "positive": [
+      "È stata proprio una bella esperienza.",
+      "Torneremo volentieri."
+    ],
+    "neutral": [
+      "Nel complesso è andata bene.",
+      "Una visita piacevole, con qualche dettaglio da migliorare."
+    ],
+    "negative": [
+      "Questa volta l'esperienza non ci ha convinti.",
+      "Speriamo vada meglio la prossima volta."
+    ]
+  },
+  "tag_aliases": {
+    "order_wait": "wait",
+    "food_wait": "wait",
+    "bill_wait": "wait",
+    "food_quality": "food_quality",
+    "waiter_service": "service",
+    "ambience": "ambience",
+    "beauty": "ambience",
+    "cleanliness": "cleanliness",
+    "sold_out_after_order": "sold_out",
+    "small_portion": "small_portion",
+    "undercooked": "undercooked",
+    "overcooked": "overcooked",
+    "burned": "burned",
+    "poor_presentation": "poor_presentation",
+    "mouse_visible": "mouse",
+    "insect_visible": "insect",
+    "incident_resolved": "resolved_incident"
+  }
+}

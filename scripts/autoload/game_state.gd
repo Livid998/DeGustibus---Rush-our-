@@ -244,6 +244,15 @@ func earn(amount: int, reason: String = "") -> void:
 		toast_requested.emit("+%d · %s" % [amount, reason], "income")
 
 
+func set_reputation_value(value: float) -> void:
+	var normalized := clampf(value, 1.0, 5.0)
+	if is_equal_approx(reputation, normalized):
+		return
+	reputation = normalized
+	reputation_changed.emit(reputation)
+	mark_save_dirty()
+
+
 func consume_stock(requirements: Dictionary) -> bool:
 	for ingredient_id: String in requirements:
 		if int(stock.get(ingredient_id, {}).get("amount", 0)) < int(requirements[ingredient_id]):
@@ -478,11 +487,13 @@ func unlock_ingredient(ingredient_id: String, reason: String = "", persist: bool
 	return true
 
 
-func record_completed_order(recipe_id: String, satisfaction: float) -> void:
+func record_completed_order(recipe_id: String, _satisfaction: float) -> void:
 	progress.customers_served = int(progress.get("customers_served", 0)) + 1
 	if recipe_id in ["icecream_cone", "mixed_sundae"]:
 		progress.desserts_served = int(progress.get("desserts_served", 0)) + 1
-	add_reputation(0.04 * clampf(satisfaction, 0.45, 1.0))
+	# Reputation is exclusively driven by completed group reviews.  Keep this
+	# method focused on counters/unlocks so an order cannot reward reputation a
+	# second time.
 	check_progression()
 	mark_save_dirty()
 

@@ -284,7 +284,9 @@ func lighting_profile_for_minute(minute_value: float) -> Dictionary:
 		"night_factor": night_factor,
 		"background_color": night_background.lerp(day_background, daylight),
 		"ambient_color": night_ambient.lerp(day_ambient, daylight),
-		"ambient_energy": lerpf(0.22, 0.48, daylight),
+		# Keep ambient contribution under the established palette-preservation
+		# ceiling; the day/night contrast comes from color, sun and background.
+		"ambient_energy": lerpf(0.20, 0.40, daylight),
 		"sun_color": neutral_sun.lerp(warm_sun, horizon_factor * 0.42),
 		"sun_energy": lerpf(0.08, 0.84, daylight),
 		"lamp_energy": smoothstep(0.42, 0.78, night_factor),
@@ -370,8 +372,24 @@ func _emit_pending_schedule_events() -> void:
 				if not _forced_rush:
 					rush_ended.emit(String(event.id))
 			"day":
-				day_completed.emit(int(event.day_index) + 1)
+				var completed_day := int(event.day_index) + 1
+				_process_day_completion(completed_day)
+				day_completed.emit(completed_day)
 	_pending_schedule_events.clear()
+
+
+func _process_day_completion(completed_day: int) -> void:
+	var economy := get_node_or_null("/root/EconomyManager")
+	if economy != null and economy.has_method("process_daily_payroll"):
+		economy.call("process_daily_payroll", completed_day)
+	var last_reward_day := maxi(int(GameState.progress.get("last_album_reward_day", 0)), 0)
+	if completed_day <= last_reward_day:
+		return
+	var collection := get_node_or_null("/root/CollectionManager")
+	if collection != null and collection.has_method("handle_day_completed"):
+		collection.call("handle_day_completed", completed_day)
+	GameState.progress.last_album_reward_day = completed_day
+	GameState.mark_save_dirty()
 
 
 func _event_priority(kind: String) -> int:

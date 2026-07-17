@@ -8,6 +8,8 @@ signal service_task_created(task: Dictionary)
 signal maintenance_task_created(task: Dictionary)
 signal customer_count_changed(count: int)
 signal statistics_changed
+signal group_review_completed(review: Dictionary)
+signal dish_quality_resolved(order: Dictionary)
 
 var simulation_speed: float = 1.0
 var world: Node = null
@@ -24,13 +26,19 @@ var _service_serial := 0
 var _maintenance_serial := 0
 var _simulation_tick_accumulator := 0.0
 var _maintenance_clock := 0.0
+var review_system: ReviewSystem
+var dish_quality_resolver: DishQualityResolver
 
 const SIMULATION_TICK := 0.1
 const COMPLETED_WORK_RETENTION := 6.0
 
 
 func _ready() -> void:
+	review_system = ReviewSystem.new()
+	dish_quality_resolver = DishQualityResolver.new()
 	reset_service_stats()
+	if not EconomyManager.payroll_processed.is_connected(_on_payroll_processed):
+		EconomyManager.payroll_processed.connect(_on_payroll_processed)
 
 
 func _process(delta: float) -> void:
@@ -54,9 +62,13 @@ func _process(delta: float) -> void:
 			_maintenance_clock = 0.0
 			_prune_completed_work()
 	if GameState.restaurant_state == "closing" and customers.is_empty():
-		stats.labor_cost += EconomyManager.pay_shift_wages()
 		GameState.set_restaurant_state("closed")
 		SaveManager.save_game()
+
+
+func _on_payroll_processed(summary: Dictionary) -> void:
+	stats.labor_cost = int(stats.get("labor_cost", 0)) + int(summary.get("paid", 0))
+	statistics_changed.emit()
 
 
 func bind_world(value: Node) -> void:
@@ -192,6 +204,133 @@ func unregister_customer(customer: Node, lost: bool = false) -> void:
 	customer_count_changed.emit(customers.size())
 
 
+func begin_group_experience(group_id: String, context: Dictionary = {}) -> Dictionary:
+	_ensure_casual_systems()
+	return review_system.begin_experience(group_id, context)
+
+
+func set_group_experience_stage(experience: Dictionary, stage: String) -> void:
+	_ensure_casual_systems()
+	review_system.set_stage(experience, stage)
+
+
+func add_group_recipe(experience: Dictionary, recipe_id: String) -> void:
+	_ensure_casual_systems()
+	review_system.add_recipe(experience, recipe_id)
+
+
+func record_group_wait(experience: Dictionary, phase: String, seconds: float) -> void:
+	_ensure_casual_systems()
+	review_system.record_wait(experience, phase, seconds)
+
+
+func record_group_food_quality(experience: Dictionary, quality_score: float) -> void:
+	_ensure_casual_systems()
+	review_system.record_food_quality(experience, quality_score)
+
+
+func record_group_service(experience: Dictionary, service_score: float) -> void:
+	_ensure_casual_systems()
+	review_system.record_service(experience, service_score)
+
+
+func record_group_ambience(experience: Dictionary) -> void:
+	_ensure_casual_systems()
+	var beauty := 60.0
+	var cleanliness := float(GameState.cleanliness_state.get("score", 100.0))
+	if world != null and world.has_method("ambience_snapshot"):
+		var snapshot: Dictionary = world.call("ambience_snapshot")
+		beauty = float(snapshot.get("beauty_score", snapshot.get("effective_beauty", snapshot.get("beauty", beauty))))
+		cleanliness = float(snapshot.get("cleanliness_score", cleanliness))
+	review_system.record_ambience(experience, beauty, cleanliness)
+
+
+func record_group_visible_pest(experience: Dictionary, pest_type: String) -> void:
+	_ensure_casual_systems()
+	review_system.record_visible_pest(experience, pest_type)
+
+
+func record_group_change_order(experience: Dictionary, response_seconds: float, resolved: bool) -> void:
+	_ensure_casual_systems()
+	review_system.record_change_order(experience, response_seconds, resolved)
+
+
+func record_group_incident_resolution(experience: Dictionary, incident_id: String, response_seconds: float) -> void:
+	_ensure_casual_systems()
+	review_system.record_incident_resolution(experience, incident_id, response_seconds)
+
+
+func record_group_quality_event(experience: Dictionary, event: Dictionary) -> void:
+	_ensure_casual_systems()
+	if event.is_empty():
+		return
+	var tag := String(event.get("review_tag", event.get("id", "food_quality")))
+	var penalty := -float(event.get("quality_penalty", 0.0))
+	review_system.record_cause(
+		experience,
+		"quality_%s" % String(event.get("id", tag)),
+		"food_quality",
+		penalty,
+		[tag],
+		tag,
+		event
+	)
+
+
+func complete_group_payment(
+	customer: Node,
+	experience: Dictionary,
+	order_ids: Array,
+	context: Dictionary = {}
+) -> Dictionary:
+	_ensure_casual_systems()
+	var payable_orders: Array[Dictionary] = []
+	var group_total := 0
+	for order_value: Variant in order_ids:
+		var order_id := String(order_value)
+		var order: Dictionary = orders.get(order_id, {})
+		if order.is_empty() or order.get("customer") != customer:
+			return {"accepted": false, "reason": "invalid_group_order", "review": {}}
+		if String(order.get("state", "")) == "paid":
+			continue
+		if String(order.get("state", "")) in ["cancelled", "change_order"]:
+			return {"accepted": false, "reason": "unpayable_group_order", "review": {}}
+		payable_orders.append(order)
+		group_total += _order_price(order)
+	if payable_orders.is_empty():
+		return {"accepted": false, "reason": "already_paid", "review": {}}
+	var review_context := context.duplicate(true)
+	review_context["day"] = int(GameState.world_clock.get("day", 1))
+	review_context["minute"] = float(GameState.world_clock.get("minute", 0.0))
+	var completion := review_system.complete_group(experience, group_total, "paid", review_context)
+	if not bool(completion.get("accepted", false)):
+		return completion
+	var review: Dictionary = completion.get("review", {})
+	var tip := maxi(int(review.get("tip", 0)), 0)
+	for order: Dictionary in payable_orders:
+		_mark_order_paid(order, float(review.get("satisfaction", 70.0)) / 100.0)
+	GameState.earn(group_total + tip, "Conto gruppo")
+	stats.revenue = int(stats.get("revenue", 0)) + group_total + tip
+	statistics_changed.emit()
+	group_review_completed.emit(review.duplicate(true))
+	return completion
+
+
+func complete_group_abandonment(
+	experience: Dictionary,
+	outcome: String,
+	context: Dictionary = {}
+) -> Dictionary:
+	_ensure_casual_systems()
+	var review_context := context.duplicate(true)
+	review_context["day"] = int(GameState.world_clock.get("day", 1))
+	review_context["minute"] = float(GameState.world_clock.get("minute", 0.0))
+	var completion := review_system.complete_group(experience, 0.0, outcome, review_context)
+	if bool(completion.get("accepted", false)):
+		group_review_completed.emit((completion.get("review", {}) as Dictionary).duplicate(true))
+	return completion
+
+
 func create_order(recipe_id: String, table_id: String, customer: Node) -> Dictionary:
 	var recipe: Dictionary = DataRegistry.recipes_by_id.get(recipe_id, {})
 	if recipe.is_empty():
@@ -209,6 +348,7 @@ func create_order(recipe_id: String, table_id: String, customer: Node) -> Dictio
 		"table_id": table_id,
 		"recipe_id": recipe_id,
 		"recipe_name": recipe.name,
+		"price": int(menu_state.get("price", recipe.get("price", 0))),
 		"customer": customer,
 		"created_at": GameState.service_seconds,
 		"priority": 1,
@@ -220,7 +360,13 @@ func create_order(recipe_id: String, table_id: String, customer: Node) -> Dictio
 		"reservation": StorageManager.reservation_for_order(order_id),
 		"change_count": 0,
 		"satisfaction_penalty": 0.0,
-		"review_tags": []
+		"review_tags": [],
+		"quality_score": 70,
+		"quality_tier": "normal",
+		"quality_events": [],
+		"quality_event_history": [],
+		"defect": "",
+		"remake_attempts": 0,
 	}
 	orders[order_id] = order
 	_populate_order_tasks(order, recipe)
@@ -373,9 +519,9 @@ func claim_kitchen_task(employee: Dictionary, from_position: Variant = null) -> 
 
 
 func _effective_preferred_station(employee: Dictionary) -> String:
-	var explicit := String(employee.get("preferred_station", ""))
-	if not explicit.is_empty():
-		return explicit
+	var configured := StaffPreferences.cook_station(employee)
+	if not configured.is_empty():
+		return configured
 	var best_station := ""
 	var best_skill := -INF
 	for station_id: String in employee.get("skills", {}):
@@ -461,12 +607,22 @@ func _complete_kitchen_task(task: Dictionary) -> void:
 				successor.handoff_employee_id = employee_id
 				successor.handoff_grace = 0.75
 	var order: Dictionary = orders.get(task.order_id, {})
+	if not order.is_empty():
+		_accumulate_task_quality(order, task, employee_id)
+	if world != null and world.has_method("register_kitchen_work_dirt"):
+		world.call("register_kitchen_work_dirt", task)
 	var all_done := not order.is_empty()
 	for task_id: String in order.get("task_ids", []):
 		if not tasks.has(task_id) or String(tasks.get(task_id, {}).get("state", "missing")) != "completed":
 			all_done = false
 			break
 	if all_done:
+		var quality_action := _finalize_order_quality(order)
+		if quality_action != "serve":
+			order_updated.emit(order)
+			_update_waiting_tasks(0.0)
+			task_board_changed.emit()
+			return
 		order.ready = true
 		order.state = "at_pass"
 		dish_ready.emit(order)
@@ -483,6 +639,173 @@ func _complete_kitchen_task(task: Dictionary) -> void:
 	order_updated.emit(order)
 	_update_waiting_tasks(0.0)
 	task_board_changed.emit()
+
+
+func _accumulate_task_quality(order: Dictionary, task: Dictionary, employee_id: String) -> void:
+	_ensure_casual_systems()
+	var context := _quality_context_for_task(order, task, employee_id)
+	context["allow_defect_roll"] = false
+	var sample := dish_quality_resolver.resolve(context)
+	dish_quality_resolver.accumulate_order_quality(order, sample, maxf(float(task.get("duration", 1.0)), 0.25))
+	var samples: Array = order.get("_quality_samples", [])
+	samples.append({
+		"station": String(task.get("station", "")),
+		"employee_id": employee_id,
+		"task_id": String(task.get("id", "")),
+		"score": int(sample.get("quality_score", 70)),
+	})
+	order["_quality_samples"] = samples
+
+
+func _finalize_order_quality(order: Dictionary) -> String:
+	_ensure_casual_systems()
+	var defect_task: Dictionary = {}
+	var defect_priority := -1
+	for task_id: String in order.get("task_ids", []):
+		var candidate: Dictionary = tasks.get(task_id, {})
+		var priority := _quality_station_priority(String(candidate.get("station", "")))
+		if priority > defect_priority:
+			defect_priority = priority
+			defect_task = candidate
+	if defect_task.is_empty():
+		return "serve"
+	var context := _quality_context_for_task(
+		order,
+		defect_task,
+		String(defect_task.get("employee_id", ""))
+	)
+	var recipe: Dictionary = DataRegistry.recipes_by_id.get(String(order.get("recipe_id", "")), {})
+	context["allow_defect_roll"] = true
+	context["remake_stock_available"] = _recipe_stock_available(recipe)
+	context["remake_attempts"] = int(order.get("remake_attempts", 0))
+	var result := dish_quality_resolver.resolve(context)
+	dish_quality_resolver.accumulate_order_quality(order, result, 1.0)
+	order["quality_recovery"] = (result.get("recovery", {}) as Dictionary).duplicate(true)
+	order["defect_probability"] = float(result.get("defect_probability", 0.0))
+	var review_tags: Array = order.get("review_tags", [])
+	for event_value: Variant in result.get("quality_events", []):
+		if not event_value is Dictionary:
+			continue
+		var event := event_value as Dictionary
+		var tag := String(event.get("review_tag", event.get("id", "")))
+		if not tag.is_empty() and not review_tags.has(tag):
+			review_tags.append(tag)
+	order.review_tags = review_tags
+	var history_appended := false
+	if bool(result.get("requires_remake", false)):
+		_append_quality_history(order, result.get("quality_events", []))
+		history_appended = true
+		if _restart_order_for_remake(order, recipe):
+			GameState.toast_requested.emit(
+				"Piatto rifatto automaticamente: %s" % String(result.get("defect", "difetto")),
+				"warning"
+			)
+			dish_quality_resolved.emit(order)
+			return "remake"
+	if bool(result.get("requires_change_order", false)) or bool(result.get("requires_remake", false)):
+		if not history_appended:
+			_append_quality_history(order, result.get("quality_events", []))
+		mark_order_unproducible(
+			String(order.get("id", "")),
+			"quality_%s" % String(result.get("defect", "defect"))
+		)
+		dish_quality_resolved.emit(order)
+		return "change_order"
+	dish_quality_resolved.emit(order)
+	return "serve"
+
+
+func _quality_context_for_task(order: Dictionary, task: Dictionary, employee_id: String) -> Dictionary:
+	var employee: Dictionary = {}
+	for candidate: Dictionary in GameState.employees:
+		if String(candidate.get("id", "")) == employee_id:
+			employee = candidate
+			break
+	var station := String(task.get("station", "pass"))
+	var ingredient_qualities: Dictionary = {}
+	var recipe: Dictionary = DataRegistry.recipes_by_id.get(String(order.get("recipe_id", "")), {})
+	var raw_requirements := DataRegistry.recipe_raw_requirements(recipe)
+	for ingredient_id: String in raw_requirements:
+		var stock_entry: Dictionary = GameState.stock.get(ingredient_id, {})
+		var definition: Dictionary = DataRegistry.ingredients_by_id.get(ingredient_id, {})
+		ingredient_qualities[ingredient_id] = {
+			"quality": float(stock_entry.get("quality", definition.get("quality", 2.0))),
+			"quantity": int(raw_requirements.get(ingredient_id, 1)),
+		}
+	var condition := 100.0
+	var runtime: Variant = task.get("station_runtime")
+	if runtime is Dictionary:
+		var station_node := (runtime as Dictionary).get("node") as Node
+		if station_node != null and is_instance_valid(station_node):
+			if station_node.has_method("condition_score"):
+				condition = float(station_node.call("condition_score"))
+	return {
+		"station": station,
+		"ingredient_qualities": ingredient_qualities,
+		"employee_id": employee_id,
+		"employee_skill": float(employee.get("skills", {}).get(station, 0.65)),
+		"employee_precision": float(employee.get("precision", 0.80)),
+		"stress": float(employee.get("stress", 0.10)),
+		"cleanliness": float(GameState.cleanliness_state.get("score", 100.0)),
+		"station_condition": condition,
+		"task_style": String(task.get("animation", "")),
+	}
+
+
+func _recipe_stock_available(recipe: Dictionary) -> bool:
+	if recipe.is_empty():
+		return false
+	var raw_requirements := DataRegistry.recipe_raw_requirements(recipe)
+	for ingredient_id: String in raw_requirements:
+		if StorageManager.available_amount(ingredient_id) < int(raw_requirements.get(ingredient_id, 0)):
+			return false
+	return true
+
+
+func _restart_order_for_remake(order: Dictionary, recipe: Dictionary) -> bool:
+	if recipe.is_empty():
+		return false
+	StorageManager.release_order(String(order.get("id", "")))
+	if not StorageManager.reserve_recipe_for_order(String(order.get("id", "")), recipe):
+		return false
+	_cancel_order_tasks(order, true)
+	order.task_ids = []
+	order.ready = false
+	order.state = "cooking"
+	order.remake_attempts = int(order.get("remake_attempts", 0)) + 1
+	order.remake_reason = String(order.get("defect", ""))
+	order.quality_score = 70
+	order.quality_tier = "normal"
+	order.quality_events = []
+	order.defect = ""
+	order.defect_severity = ""
+	order.erase("_quality_weight")
+	order.erase("_quality_samples")
+	order.reservation = StorageManager.reservation_for_order(String(order.get("id", "")))
+	_populate_order_tasks(order, recipe)
+	_update_waiting_tasks(0.0)
+	return true
+
+
+func _append_quality_history(order: Dictionary, events: Variant) -> void:
+	var history: Array = order.get("quality_event_history", [])
+	if events is Array:
+		for event: Variant in events:
+			if event is Dictionary:
+				history.append((event as Dictionary).duplicate(true))
+	order.quality_event_history = history
+
+
+func _quality_station_priority(station: String) -> int:
+	if station in ["stove", "multi_stove", "oven", "pizza_oven"]:
+		return 4
+	if station in ["dessert", "ice_cream_machine"]:
+		return 3
+	if station in ["prep", "prep_counter", "cutting_board", "dough"]:
+		return 2
+	if station == "pass":
+		return 1
+	return 0
 
 
 func cancel_employee_task(employee_id: String) -> void:
@@ -572,6 +895,12 @@ func claim_service_task(employee: Dictionary, from_position: Variant = null) -> 
 		if from_position is Vector3 and world != null and world.has_method("find_path") and world.find_path(Vector3(from_position), Vector3(task.target)).is_empty():
 			continue
 		var candidate := float(task.priority) * 100.0 + GameState.service_seconds - float(task.created_at)
+		candidate += StaffPreferences.waiter_task_bonus(
+			employee,
+			String(task.get("action", "")),
+			Vector3(task.get("target", Vector3.ZERO)),
+			world
+		)
 		if from_position is Vector3:
 			candidate -= Vector3(from_position).distance_to(Vector3(task.target))
 		if candidate > score:
@@ -616,7 +945,13 @@ func complete_service_task(task_id: String) -> void:
 	if not employee_id.is_empty():
 		stats.employee_tasks[employee_id] = int(stats.employee_tasks.get(employee_id, 0)) + 1
 	if is_instance_valid(task.customer) and task.customer.has_method("service_completed"):
-		task.customer.service_completed(task.action, task.payload)
+		var completed_payload: Dictionary = (task.get("payload", {}) as Dictionary).duplicate(true)
+		completed_payload["employee_id"] = employee_id
+		completed_payload["response_seconds"] = maxf(
+			GameState.service_seconds - float(task.get("created_at", GameState.service_seconds)),
+			0.0
+		)
+		task.customer.service_completed(task.action, completed_payload)
 	task_board_changed.emit()
 
 
@@ -699,6 +1034,13 @@ func claim_maintenance_task(employee: Dictionary, from_position: Variant = null)
 			if from_position is Vector3 and world != null and world.has_method("find_path") and world.find_path(Vector3(from_position), target).is_empty():
 				continue
 			var candidate := float(task.get("priority", 1)) * 100.0 + GameState.service_seconds - float(task.get("created_at", 0.0))
+			candidate += StaffPreferences.handyman_task_bonus(
+				employee,
+				String(task.get("action", "")),
+				target,
+				world,
+				task.get("payload", {}) as Dictionary
+			)
 			if from_position is Vector3:
 				candidate -= Vector3(from_position).distance_to(target)
 			if candidate > best_score:
@@ -721,6 +1063,13 @@ func claim_maintenance_task(employee: Dictionary, from_position: Variant = null)
 			if from_position is Vector3 and world != null and world.has_method("find_path") and world.find_path(Vector3(from_position), interaction_position).is_empty():
 				continue
 			var candidate := float(task.get("priority", 1)) * 100.0 + GameState.service_seconds - float(task.get("created_at", 0.0))
+			candidate += StaffPreferences.handyman_task_bonus(
+				employee,
+				String(task.get("action", "")),
+				interaction_position,
+				world,
+				task.get("payload", {}) as Dictionary
+			)
 			if from_position is Vector3:
 				candidate -= Vector3(from_position).distance_to(interaction_position)
 			if candidate > best_score:
@@ -933,7 +1282,8 @@ func complete_order_change(order_id: String, recipe_id: String, response_delay: 
 	if String(order.get("state", "")) != "change_order":
 		return {}
 	var recipe: Dictionary = DataRegistry.recipes_by_id.get(recipe_id, {})
-	if recipe.is_empty() or not order_change_alternatives(order_id, 999999).any(func(candidate: Dictionary): return String(candidate.id) == recipe_id):
+	var customer_budget := int(order.get("customer_budget", 999999))
+	if recipe.is_empty() or not order_change_alternatives(order_id, customer_budget).any(func(candidate: Dictionary): return String(candidate.id) == recipe_id):
 		return {}
 	if not StorageManager.replace_order_reservation(order_id, recipe):
 		StorageManager.refresh_auto_sold_out()
@@ -942,6 +1292,7 @@ func complete_order_change(order_id: String, recipe_id: String, response_delay: 
 	order.previous_recipe_id = String(order.get("recipe_id", ""))
 	order.recipe_id = recipe_id
 	order.recipe_name = String(recipe.name)
+	order.price = int(GameState.menu.get(recipe_id, {}).get("price", recipe.get("price", 0)))
 	order.state = "cooking"
 	order.suspended = false
 	order.ready = false
@@ -949,9 +1300,17 @@ func complete_order_change(order_id: String, recipe_id: String, response_delay: 
 	order.missing = []
 	order.change_count = int(order.get("change_count", 0)) + 1
 	var penalty := 0.03 + minf(maxf(response_delay, 0.0) * 0.003, 0.10) + float(maxi(int(order.change_count) - 1, 0)) * 0.02
+	order.last_change_penalty = penalty
 	order.satisfaction_penalty = minf(float(order.get("satisfaction_penalty", 0.0)) + penalty, 0.30)
 	order.reservation = StorageManager.reservation_for_order(order_id)
 	order.changed_at = GameState.service_seconds
+	order.quality_score = 70
+	order.quality_tier = "normal"
+	order.quality_events = []
+	order.defect = ""
+	order.defect_severity = ""
+	order.erase("_quality_weight")
+	order.erase("_quality_samples")
 	_populate_order_tasks(order, recipe)
 	_update_waiting_tasks(0.0)
 	order_updated.emit(order)
@@ -1013,21 +1372,58 @@ func complete_order_payment(order_id: String, satisfaction: float) -> void:
 	var order: Dictionary = orders[order_id]
 	if order.state == "paid":
 		return
+	# Compatibility for tooling that completes a single order directly. Normal
+	# gameplay uses complete_group_payment(), which aggregates the tip and review.
+	var experience := begin_group_experience("legacy_%s" % order_id, {
+		"stage": "paying",
+		"recipe_ids": [String(order.get("recipe_id", ""))],
+	})
+	review_system.record_cause(
+		experience,
+		"legacy_satisfaction",
+		"service",
+		clampf(satisfaction, 0.0, 1.0) * 100.0 - 72.0,
+		["waiter_service"],
+		"service"
+	)
+	var completion := review_system.complete_group(experience, _order_price(order), "paid", {
+		"review_id": "review_legacy_%s" % order_id,
+	})
+	var tip := int((completion.get("review", {}) as Dictionary).get("tip", 0)) if bool(completion.get("accepted", false)) else 0
+	var price := _order_price(order)
+	_mark_order_paid(order, satisfaction)
+	GameState.earn(price + tip, "%s servito" % order.recipe_name)
+	stats.revenue = int(stats.get("revenue", 0)) + price + tip
+	statistics_changed.emit()
+
+
+func _mark_order_paid(order: Dictionary, satisfaction: float) -> void:
 	order.state = "paid"
 	order.finished_at = GameState.service_seconds
-	StorageManager.release_order(order_id)
+	StorageManager.release_order(String(order.get("id", "")))
 	order.reservation = {}
-	var price := int(GameState.menu.get(order.recipe_id, {}).get("price", DataRegistry.recipes_by_id[order.recipe_id].price))
-	var tip := int(round(max(satisfaction - 0.7, 0.0) * price * 0.3))
-	GameState.earn(price + tip, "%s servito" % order.recipe_name)
-	stats.revenue += price + tip
-	stats.ingredient_cost += DataRegistry.estimate_recipe_cost(DataRegistry.recipes_by_id[order.recipe_id])
-	stats.customers_served += 1
-	stats.satisfaction_sum += satisfaction
-	stats.recipe_sales[order.recipe_id] = int(stats.recipe_sales.get(order.recipe_id, 0)) + 1
-	stats.service_time_total += GameState.service_seconds - float(order.created_at)
-	GameState.record_completed_order(String(order.recipe_id), satisfaction)
-	statistics_changed.emit()
+	var recipe_id := String(order.get("recipe_id", ""))
+	var recipe: Dictionary = DataRegistry.recipes_by_id.get(recipe_id, {})
+	stats.ingredient_cost = float(stats.get("ingredient_cost", 0.0)) + DataRegistry.estimate_recipe_cost(recipe)
+	stats.customers_served = int(stats.get("customers_served", 0)) + 1
+	stats.satisfaction_sum = float(stats.get("satisfaction_sum", 0.0)) + clampf(satisfaction, 0.0, 1.0)
+	stats.recipe_sales[recipe_id] = int(stats.recipe_sales.get(recipe_id, 0)) + 1
+	stats.service_time_total = float(stats.get("service_time_total", 0.0)) + GameState.service_seconds - float(order.get("created_at", GameState.service_seconds))
+	GameState.record_completed_order(recipe_id, satisfaction)
+	order_updated.emit(order)
+
+
+func _order_price(order: Dictionary) -> int:
+	var recipe_id := String(order.get("recipe_id", ""))
+	var recipe: Dictionary = DataRegistry.recipes_by_id.get(recipe_id, {})
+	return maxi(int(order.get("price", GameState.menu.get(recipe_id, {}).get("price", recipe.get("price", 0)))), 0)
+
+
+func _ensure_casual_systems() -> void:
+	if review_system == null:
+		review_system = ReviewSystem.new()
+	if dish_quality_resolver == null:
+		dish_quality_resolver = DishQualityResolver.new()
 
 
 func get_station_position(runtime: Dictionary) -> Vector3:

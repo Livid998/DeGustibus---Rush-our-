@@ -879,57 +879,7 @@ static func _market(content: VBoxContainer, ui: RestaurantUI) -> void:
 
 
 static func _staff(content: VBoxContainer, ui: RestaurantUI) -> void:
-	content.add_child(ui.make_section("Brigata", "%d dipendenti assunti · ruoli e preferenze modificabili anche durante il servizio." % GameState.employees.size()))
-	for employee: Dictionary in GameState.employees:
-		var card := ui.make_card()
-		var box := VBoxContainer.new()
-		card.add_child(box)
-		var title := Label.new()
-		title.text = "%s · %s · %d monete/turno" % [employee.name, _role_name(String(employee.role)), int(employee.salary)]
-		box.add_child(title)
-		var stats := Label.new()
-		stats.text = "Velocità %.0f%% · Precisione %.0f%% · Ordine %.0f%% · Resistenza %.0f%%" % [float(employee.speed)*100, float(employee.precision)*100, float(employee.order)*100, float(employee.stamina)*100]
-		stats.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-		stats.add_theme_color_override("font_color", Color("52686b"))
-		box.add_child(stats)
-		var row := HBoxContainer.new()
-		var role := OptionButton.new()
-		for role_name: String in ["cook", "waiter", "handyman"]:
-			role.add_item({"cook":"Cuoco", "waiter":"Cameriere", "handyman":"Tuttofare"}[role_name])
-			role.set_item_metadata(role.item_count - 1, role_name)
-			if role_name == employee.role:
-				role.select(role.item_count - 1)
-		var employee_ref := employee
-		role.item_selected.connect(func(index: int): employee_ref.role = role.get_item_metadata(index); ui.world.spawn_staff())
-		role.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		row.add_child(role)
-		var employee_id := String(employee.id)
-		row.add_child(ui.make_button("Licenzia", func(): _confirm_fire(ui, employee_id, employee.name), "red"))
-		box.add_child(row)
-		var preference := OptionButton.new()
-		preference.add_item("Postazione preferita: automatica")
-		preference.set_item_metadata(0, "")
-		var preferred := String(employee.get("preferred_station", ""))
-		for station: Dictionary in DataRegistry.stations:
-			preference.add_item("Preferenza: %s" % station.name)
-			preference.set_item_metadata(preference.item_count - 1, station.id)
-			if String(station.id) == preferred:
-				preference.select(preference.item_count - 1)
-		preference.item_selected.connect(func(index: int): employee_ref.preferred_station = preference.get_item_metadata(index))
-		box.add_child(preference)
-		content.add_child(card)
-	content.add_child(ui.make_section("Candidati", "Assumi senza sistemi punitivi: il costo è immediato, il salario è informativo nella demo."))
-	for candidate: Dictionary in GameState.candidates:
-		var card := ui.make_card()
-		var row := HBoxContainer.new()
-		card.add_child(row)
-		var label := Label.new()
-		label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		label.text = "%s · %s\nIngaggio %d monete · salario %d · velocità %.0f%%" % [candidate.name, String(candidate.role).capitalize(), int(candidate.hire_cost), int(candidate.salary), float(candidate.speed)*100]
-		row.add_child(label)
-		var candidate_id := String(candidate.id)
-		row.add_child(ui.make_button("Assumi", func(): EconomyManager.hire(candidate_id); ui.refresh_screen(), "green"))
-		content.add_child(card)
+	content.add_child(StaffScreen.create(ui))
 
 
 static func _statistics(content: VBoxContainer, ui: RestaurantUI) -> void:
@@ -980,6 +930,7 @@ static func _statistics(content: VBoxContainer, ui: RestaurantUI) -> void:
 
 static func _settings(content: VBoxContainer, ui: RestaurantUI) -> void:
 	content.add_child(ui.make_section("Impostazioni", "Preferenze salvate insieme al ristorante e applicate immediatamente."))
+	content.add_child(ProfileScreen.create())
 
 	if PwaUpdateManager.is_available():
 		var update_card := ui.make_card()

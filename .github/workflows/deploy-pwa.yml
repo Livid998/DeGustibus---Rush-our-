@@ -93,6 +93,11 @@ jobs:
           "$GODOT" --headless --path . res://tests/album_unlock_smoke.tscn
           "$GODOT" --headless --path . res://tests/storage_delivery_reservation_smoke.tscn
           "$GODOT" --headless --path . res://tests/day_cycle_smoke.tscn
+          "$GODOT" --headless --path . res://tests/review_quality_smoke.tscn
+          "$GODOT" --headless --path . res://tests/review_runtime_integration_smoke.tscn
+          "$GODOT" --headless --path . res://tests/technical_builder_smoke.tscn
+          "$GODOT" --headless --path . res://tests/technical_layout_migration.tscn
+          "$GODOT" --headless --path . res://tests/profile_screen_smoke.tscn
           "$GODOT" --headless --path . res://tests/asset_load_check.tscn
           "$GODOT" --headless --path . res://tests/service_smoke.tscn
           "$GODOT" --headless --path . res://tests/customer_flow_smoke.tscn

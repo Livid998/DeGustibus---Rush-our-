@@ -10,7 +10,7 @@ func _ready() -> void:
 	SimulationManager.reset_service_stats()
 	SimulationManager.set_speed(4.0)
 	SimulationManager.open_restaurant()
-	main.world.rush_mode = false
+	main.world.set_rush_mode(false)
 	main.world._spawn_clock = 99999.0
 	main.ui.close_screen()
 	var customer := CustomerAgent.new()
