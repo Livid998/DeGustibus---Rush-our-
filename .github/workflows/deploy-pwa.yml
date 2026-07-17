@@ -89,6 +89,8 @@ jobs:
         run: |
           GODOT=".godot-bin/Godot_v${GODOT_VERSION}_linux.x86_64"
           "$GODOT" --headless --path . res://tests/test_runner.tscn
+          "$GODOT" --headless --path . res://tests/casual_state_migration.tscn
+          "$GODOT" --headless --path . res://tests/album_unlock_smoke.tscn
           "$GODOT" --headless --path . res://tests/asset_load_check.tscn
           "$GODOT" --headless --path . res://tests/service_smoke.tscn
           "$GODOT" --headless --path . res://tests/customer_flow_smoke.tscn

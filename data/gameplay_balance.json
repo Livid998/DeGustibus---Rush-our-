@@ -1,0 +1,89 @@
+{
+  "schema_version": 1,
+  "save": {
+    "autosave_debounce_seconds": 1.5
+  },
+  "day_cycle": {
+    "real_seconds_at_1x": 720,
+    "start_minute": 540,
+    "rush_warning_seconds": 30,
+    "rush_windows": [
+      {
+        "id": "lunch",
+        "start": 720,
+        "end": 840,
+        "traffic_multiplier": 1.75
+      },
+      {
+        "id": "dinner",
+        "start": 1140,
+        "end": 1260,
+        "traffic_multiplier": 1.9
+      }
+    ]
+  },
+  "traffic": {
+    "base_spawn_interval": 5.5,
+    "reputation_multiplier_min": 0.75,
+    "reputation_multiplier_max": 1.35,
+    "night_multiplier": 0.6,
+    "queue_buffer_groups": 2,
+    "absolute_group_cap": 12
+  },
+  "delivery": {
+    "batch_interval_seconds": 300,
+    "urgent_delivery_seconds": 30,
+    "urgent_surcharge_multiplier": 1.35
+  },
+  "reviews": {
+    "history_limit": 100,
+    "reputation_ema_alpha": 0.06,
+    "positive_reviews_for_album_reward": 5
+  },
+  "cleanliness": {
+    "clean_score": 100,
+    "dirty_threshold": 60,
+    "very_dirty_threshold": 30,
+    "pest_threshold": 18,
+    "pest_delay_seconds": 60
+  },
+  "album": {
+    "starter_inventory": {
+      "tomato": 1,
+      "cheese": 1,
+      "dough": 1
+    },
+    "reward_quantity_min": 1,
+    "reward_quantity_max": 1,
+    "pity_interval": 4,
+    "positive_reviews_per_reward": 5,
+    "five_star_gift_chance": 0.08,
+    "reputation_threshold_reward": 1,
+    "day_completion_reward": 1,
+    "rewards": {
+      "day_completed_amount": 1,
+      "reputation_threshold_amount": 1,
+      "positive_review_amount": 1,
+      "five_star_gift_chance": 0.08
+    },
+    "pity": {
+      "useful_ingredient_every_rewards": 4,
+      "rare_ingredient_after_rewards": 8,
+      "base_recipe_rarity_ceiling": 2
+    }
+  },
+  "storage": {
+    "allowed_types": [
+      "ambient",
+      "refrigerated"
+    ],
+    "default_type": "ambient",
+    "default_units": 1
+  },
+  "restaurant_profile": {
+    "default_restaurant_name": "DeGustibus",
+    "default_avatar_appearance": "Chef_Female",
+    "default_badge_id": "starter",
+    "default_uniform_variant": 0
+  }
+}

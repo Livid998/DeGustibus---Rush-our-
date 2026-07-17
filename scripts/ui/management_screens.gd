@@ -46,7 +46,7 @@ static func _restaurant(content: VBoxContainer, ui: RestaurantUI) -> void:
 
 
 static func _menu(content: VBoxContainer, ui: RestaurantUI) -> void:
-	content.add_child(ui.make_section("Menu personalizzabile", "Attiva fino a 8 piatti. Il carico previsto deriva realmente dalle fasi e dalla capacità installata."))
+	content.add_child(ui.make_section("Menu personalizzabile", "Impara le ricette con la collezione Album, poi usa le scorte fisiche per cucinarle. Puoi attivare fino a 8 piatti."))
 	var active_count := DataRegistry.active_recipes(GameState.menu).size()
 	var balance := Label.new()
 	balance.text = "%d/8 piatti attivi · %s" % [active_count, _menu_balance_text()]
@@ -83,8 +83,7 @@ static func _menu(content: VBoxContainer, ui: RestaurantUI) -> void:
 				ui.show_toast("Massimo 8 piatti attivi", "warning")
 				ui.refresh_screen()
 				return
-			GameState.menu[recipe_id].active = enabled
-			GameState.menu_changed.emit()
+			GameState.set_recipe_active(recipe_id, enabled)
 			ui.advance_tutorial_to(2)
 		)
 		if not bool(state.unlocked):
@@ -98,9 +97,14 @@ static func _menu(content: VBoxContainer, ui: RestaurantUI) -> void:
 		price.value = float(state.price)
 		price.suffix = " monete"
 		price.custom_minimum_size.x = 105
-		price.value_changed.connect(func(value: float): GameState.menu[recipe_id].price = int(value))
+		price.disabled = not bool(state.unlocked)
+		price.value_changed.connect(func(value: float): GameState.set_recipe_price(recipe_id, int(value)))
 		top.add_child(price)
 		box.add_child(top)
+		if not bool(state.unlocked):
+			_add_recipe_unlock_panel(box, ui, recipe)
+			grid.add_child(card)
+			continue
 		var cost := DataRegistry.estimate_recipe_cost(recipe)
 		var margin := float(state.price) - cost
 		var stations := DataRegistry.required_station_ids(recipe)
@@ -110,17 +114,89 @@ static func _menu(content: VBoxContainer, ui: RestaurantUI) -> void:
 		var missing := _missing_ingredients(recipe)
 		var hottest := _recipe_hottest_station(recipe)
 		var detail := Label.new()
-		detail.text = "Costo %.1f · Margine %.1f · Popolarità %.0f%% · Tempo %.1fs\nPostazioni: %s\n%s" % [cost, margin, float(recipe.popularity) * 100.0, total_time, ", ".join(_station_names(stations)), "Mancano: %s" % ", ".join(missing) if not missing.is_empty() else "Carico più alto: %s %.0f%%" % [hottest.name, hottest.load]]
+		detail.text = "Costo %.1f · Margine %.1f · Popolarità %.0f%% · Tempo %.1fs\nPostazioni: %s\n%s" % [cost, margin, float(recipe.popularity) * 100.0, total_time, ", ".join(_station_names(stations)), "SCORTE FISICHE · Mancano: %s" % ", ".join(missing) if not missing.is_empty() else "SCORTE FISICHE · Disponibile · carico più alto: %s %.0f%%" % [hottest.name, hottest.load]]
 		detail.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 		detail.add_theme_color_override("font_color", Color("52686b"))
 		box.add_child(detail)
 		var sold_out := CheckBox.new()
-		sold_out.text = "Temporaneamente esaurito"
-		sold_out.button_pressed = bool(state.sold_out)
-		sold_out.disabled = not bool(state.unlocked)
-		sold_out.toggled.connect(func(value: bool): GameState.menu[recipe_id].sold_out = value)
+		sold_out.text = "Pausa manuale"
+		sold_out.button_pressed = bool(state.get("manual_paused", state.get("sold_out", false)))
+		sold_out.toggled.connect(func(value: bool): GameState.set_recipe_manual_paused(recipe_id, value))
 		box.add_child(sold_out)
+		if bool(state.get("auto_sold_out", false)):
+			var automatic := Label.new()
+			automatic.text = "ESAURITA AUTOMATICAMENTE · tornerà disponibile all'arrivo delle scorte"
+			automatic.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+			automatic.add_theme_color_override("font_color", Color("b94e48"))
+			box.add_child(automatic)
 		grid.add_child(card)
+
+
+static func _add_recipe_unlock_panel(box: VBoxContainer, ui: RestaurantUI, recipe: Dictionary) -> void:
+	var heading := Label.new()
+	heading.text = "COSTO ALBUM"
+	heading.add_theme_font_override("font", GameFonts.bold())
+	heading.add_theme_color_override("font_color", Color("8f6423"))
+	box.add_child(heading)
+	var costs := HFlowContainer.new()
+	costs.add_theme_constant_override("h_separation", 8)
+	costs.add_theme_constant_override("v_separation", 5)
+	box.add_child(costs)
+	for ingredient_id: String in recipe.get("unlock_cost", {}):
+		var ingredient: Dictionary = DataRegistry.ingredients_by_id.get(ingredient_id, {})
+		var required := int(recipe.unlock_cost[ingredient_id])
+		var owned := int(GameState.album_inventory.get(ingredient_id, 0))
+		var chip := PanelContainer.new()
+		var chip_style := StyleBoxFlat.new()
+		chip_style.bg_color = Color("edf7f2") if owned >= required else Color("fff0e8")
+		chip_style.border_color = Color("8bc8ae") if owned >= required else Color("df8f78")
+		chip_style.set_border_width_all(1)
+		chip_style.set_corner_radius_all(7)
+		chip_style.content_margin_left = 5
+		chip_style.content_margin_right = 7
+		chip_style.content_margin_top = 3
+		chip_style.content_margin_bottom = 3
+		chip.add_theme_stylebox_override("panel", chip_style)
+		var row := HBoxContainer.new()
+		row.add_theme_constant_override("separation", 4)
+		chip.add_child(row)
+		var ingredient_icon := _new_icon(GameIcons.ingredient_icon(ingredient), Vector2(30, 30), not bool(GameState.album_discovered.get(ingredient_id, false)))
+		ingredient_icon.tooltip_text = String(ingredient.get("name", ingredient_id))
+		row.add_child(ingredient_icon)
+		var count := Label.new()
+		count.text = "%s  %d/%d" % [String(ingredient.get("name", ingredient_id)), owned, required]
+		count.add_theme_font_override("font", GameFonts.semibold())
+		count.add_theme_color_override("font_color", Color("30705a") if owned >= required else Color("a84f43"))
+		row.add_child(count)
+		costs.add_child(chip)
+	var recipe_id := String(recipe.id)
+	var learn := ui.make_button("Impara ricetta", func():
+		if not CollectionManager.unlock_recipe(recipe_id):
+			ui.show_toast(_recipe_unlock_missing_text(recipe), "warning")
+	, "green" if _can_unlock_recipe(recipe) else "yellow")
+	learn.icon = GameIcons.lock_icon()
+	learn.expand_icon = true
+	learn.add_theme_constant_override("icon_max_width", 24)
+	learn.custom_minimum_size.y = 42
+	box.add_child(learn)
+
+
+static func _can_unlock_recipe(recipe: Dictionary) -> bool:
+	for ingredient_id: String in recipe.get("unlock_cost", {}):
+		if int(GameState.album_inventory.get(ingredient_id, 0)) < int(recipe.unlock_cost[ingredient_id]):
+			return false
+	return not recipe.get("unlock_cost", {}).is_empty()
+
+
+static func _recipe_unlock_missing_text(recipe: Dictionary) -> String:
+	var missing: Array[String] = []
+	for ingredient_id: String in recipe.get("unlock_cost", {}):
+		var required := int(recipe.unlock_cost[ingredient_id])
+		var owned := int(GameState.album_inventory.get(ingredient_id, 0))
+		if owned < required:
+			var ingredient_name := String(DataRegistry.ingredients_by_id.get(ingredient_id, {"name": ingredient_id}).name)
+			missing.append("%s %d/%d" % [ingredient_name, owned, required])
+	return "Mancano: %s" % ", ".join(missing) if not missing.is_empty() else "La ricetta non può essere imparata"
 
 
 static func _stock(content: VBoxContainer, ui: RestaurantUI) -> void:
@@ -226,10 +302,11 @@ static func _stock(content: VBoxContainer, ui: RestaurantUI) -> void:
 
 
 static func _album(content: VBoxContainer, ui: RestaurantUI) -> void:
-	var unlocked := 0
-	for entry: Dictionary in GameState.stock.values():
-		if bool(entry.unlocked):
-			unlocked += 1
+	var discovered_count := 0
+	for ingredient: Dictionary in DataRegistry.ingredients:
+		var ingredient_id := String(ingredient.id)
+		if bool(GameState.album_discovered.get(ingredient_id, false)) or int(GameState.album_inventory.get(ingredient_id, 0)) > 0:
+			discovered_count += 1
 	var banner := PanelContainer.new()
 	var banner_style := StyleBoxFlat.new()
 	banner_style.bg_color = Color("d98224")
@@ -250,17 +327,32 @@ static func _album(content: VBoxContainer, ui: RestaurantUI) -> void:
 	title.add_theme_color_override("font_color", Color.WHITE)
 	banner_row.add_child(title)
 	var progress := Label.new()
-	progress.text = "%d / %d" % [unlocked, DataRegistry.ingredients.size()]
+	progress.text = "%d / %d" % [discovered_count, DataRegistry.ingredients.size()]
 	progress.add_theme_font_override("font", GameFonts.bold())
 	progress.add_theme_font_size_override("font_size", 20)
 	progress.add_theme_color_override("font_color", Color.WHITE)
 	banner_row.add_child(progress)
 	content.add_child(banner)
 	var hint := Label.new()
-	hint.text = "Collezione permanente · le stelle indicano la rarità · le scorte possono finire, gli ingredienti sbloccati restano nell'album."
+	hint.text = "Collezione permanente separata dal magazzino · le stelle indicano la rarità · spendi questi ingredienti soltanto per imparare ricette."
 	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	hint.add_theme_color_override("font_color", Color("52686b"))
 	content.add_child(hint)
+	var reward_card := ui.make_card()
+	var reward_box := VBoxContainer.new()
+	reward_card.add_child(reward_box)
+	var review_target := maxi(int(DataRegistry.balance_value("album.positive_reviews_per_reward", 5)), 1)
+	var reward_label := Label.new()
+	reward_label.text = "PROSSIMO PREMIO RECENSIONI · %d/%d recensioni positive" % [int(GameState.review_reward_progress), review_target]
+	reward_label.add_theme_font_override("font", GameFonts.semibold())
+	reward_box.add_child(reward_label)
+	var reward_progress := ProgressBar.new()
+	reward_progress.max_value = review_target
+	reward_progress.value = mini(int(GameState.review_reward_progress), review_target)
+	reward_progress.show_percentage = false
+	reward_progress.custom_minimum_size.y = 12
+	reward_box.add_child(reward_progress)
 	var detail_card := ui.make_card()
 	var detail_label := Label.new()
 	detail_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
@@ -268,21 +360,21 @@ static func _album(content: VBoxContainer, ui: RestaurantUI) -> void:
 	detail_card.add_child(detail_label)
 	content.add_child(detail_card)
 	var grid := GridContainer.new()
-	grid.columns = 3 if ui.root.size.y > ui.root.size.x else 6
+	grid.columns = 2 if ui.root.size.x < 520.0 else 3 if ui.root.size.y > ui.root.size.x else 6
 	grid.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	grid.add_theme_constant_override("h_separation", 10)
 	grid.add_theme_constant_override("v_separation", 12)
 	content.add_child(grid)
 	for ingredient: Dictionary in DataRegistry.ingredients:
 		var ingredient_id := String(ingredient.id)
-		var entry: Dictionary = GameState.stock[ingredient_id]
-		var is_unlocked := bool(entry.unlocked)
+		var amount := int(GameState.album_inventory.get(ingredient_id, 0))
+		var discovered := bool(GameState.album_discovered.get(ingredient_id, false)) or amount > 0
 		var card := PanelContainer.new()
-		card.custom_minimum_size = Vector2(170, 160)
+		card.custom_minimum_size = Vector2(155, 160)
 		card.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		var card_style := StyleBoxFlat.new()
 		card_style.bg_color = Color("fffdf7")
-		card_style.border_color = Color("a9cad5") if is_unlocked else Color("c8c3b8")
+		card_style.border_color = Color("a9cad5") if discovered else Color("c8c3b8")
 		card_style.set_border_width_all(2)
 		card_style.set_corner_radius_all(9)
 		card_style.content_margin_left = 7
@@ -294,7 +386,7 @@ static func _album(content: VBoxContainer, ui: RestaurantUI) -> void:
 		box.add_theme_constant_override("separation", 2)
 		card.add_child(box)
 		var name := Label.new()
-		name.text = String(ingredient.name) if is_unlocked else "???"
+		name.text = String(ingredient.name) if discovered else "???"
 		name.add_theme_font_override("font", GameFonts.semibold())
 		name.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		name.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
@@ -302,21 +394,24 @@ static func _album(content: VBoxContainer, ui: RestaurantUI) -> void:
 		name.add_theme_color_override("font_color", Color("607f88"))
 		box.add_child(name)
 		var visual := Control.new()
-		visual.custom_minimum_size = Vector2(150, 98)
+		visual.custom_minimum_size = Vector2(138, 98)
 		visual.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		box.add_child(visual)
 		visual.clip_contents = true
-		var ingredient_icon := _new_icon(GameIcons.ingredient_icon(ingredient), Vector2(150, 98), not is_unlocked)
+		var ingredient_icon := _new_icon(GameIcons.ingredient_icon(ingredient), Vector2(138, 98))
 		ingredient_icon.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-		ingredient_icon.tooltip_text = String(ingredient.name) if is_unlocked else String(ingredient.get("unlock", "Da scoprire"))
+		ingredient_icon.tooltip_text = String(ingredient.name) if discovered else "Ingrediente da scoprire"
+		if not discovered:
+			ingredient_icon.modulate = Color(0.10, 0.14, 0.15, 0.62)
 		visual.add_child(ingredient_icon)
 		var inspect_button := Button.new()
 		inspect_button.flat = true
 		inspect_button.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-		inspect_button.tooltip_text = "Dettagli %s" % (ingredient.name if is_unlocked else "sblocco")
+		inspect_button.tooltip_text = "Dettagli %s" % (ingredient.name if discovered else "ingrediente da scoprire")
 		var ingredient_ref := ingredient
-		var entry_ref := entry
-		inspect_button.pressed.connect(func(): detail_label.text = _album_detail_text(ingredient_ref, entry_ref))
+		var amount_ref := amount
+		var discovered_ref := discovered
+		inspect_button.pressed.connect(func(): detail_label.text = _album_detail_text(ingredient_ref, amount_ref, discovered_ref))
 		visual.add_child(inspect_button)
 		var quantity := Label.new()
 		quantity.add_theme_font_override("font", GameFonts.bold())
@@ -326,44 +421,26 @@ static func _album(content: VBoxContainer, ui: RestaurantUI) -> void:
 		quantity.offset_right = -4
 		quantity.offset_top = 4
 		quantity.offset_bottom = 30
-		quantity.text = str(int(entry.amount))
+		quantity.text = "x%d" % amount
 		quantity.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		quantity.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 		quantity.add_theme_color_override("font_color", Color("31535a"))
 		quantity.add_theme_stylebox_override("normal", ui._panel_style(Color("eff8f5ee"), 5))
 		quantity.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		visual.add_child(quantity)
-		if not is_unlocked:
-			var lock := TextureRect.new()
-			lock.texture = GameIcons.lock_icon()
-			lock.set_anchors_preset(Control.PRESET_CENTER_BOTTOM)
-			lock.offset_left = -22
-			lock.offset_right = 22
-			lock.offset_top = -48
-			lock.offset_bottom = -4
-			lock.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-			lock.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-			lock.texture_filter = CanvasItem.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
-			lock.tooltip_text = String(ingredient.get("unlock", "Da scoprire"))
-			lock.mouse_filter = Control.MOUSE_FILTER_IGNORE
-			visual.add_child(lock)
 		var rarity := int(ingredient.get("rarity", 1))
 		var stars := _new_icon(GameIcons.rarity_icon(rarity), Vector2(132, 24))
 		stars.tooltip_text = "Rarità %d/5" % rarity
 		box.add_child(stars)
-		var unlock_cost := int(ingredient.get("unlock_cost", 0))
-		if not is_unlocked and unlock_cost > 0:
-			var button := ui.make_button("Sblocca · %d [coin]" % unlock_cost, func():
-				if GameState.spend(unlock_cost, "Sblocco %s" % ingredient.name):
-					GameState.unlock_ingredient(ingredient_id, "Acquisto album")
-					ui.refresh_screen(), "yellow")
-			button.custom_minimum_size = Vector2(120, 32)
-			button.add_theme_font_size_override("font_size", 12)
-			box.add_child(button)
 		grid.add_child(card)
 	if not DataRegistry.ingredients.is_empty():
 		var first: Dictionary = DataRegistry.ingredients[0]
-		detail_label.text = _album_detail_text(first, GameState.stock[first.id])
+		for ingredient: Dictionary in DataRegistry.ingredients:
+			if bool(GameState.album_discovered.get(String(ingredient.id), false)):
+				first = ingredient
+				break
+		var first_id := String(first.id)
+		detail_label.text = _album_detail_text(first, int(GameState.album_inventory.get(first_id, 0)), bool(GameState.album_discovered.get(first_id, false)))
 
 
 static func _legacy_album(content: VBoxContainer, ui: RestaurantUI) -> void:
@@ -448,21 +525,31 @@ static func _compatible_recipe_count(ingredient_id: String) -> int:
 	return count
 
 
-static func _album_detail_text(ingredient: Dictionary, entry: Dictionary) -> String:
+static func _album_detail_text(ingredient: Dictionary, amount_or_entry: Variant = 0, discovered_override: Variant = null) -> String:
+	var amount := 0
+	var discovered := false
+	if amount_or_entry is Dictionary:
+		# Compatibility for the unused legacy builder below; the live Album never
+		# passes a stock entry and reads only album_inventory/album_discovered.
+		amount = int(amount_or_entry.get("amount", 0))
+		discovered = bool(amount_or_entry.get("unlocked", false))
+	else:
+		amount = int(amount_or_entry)
+		discovered = amount > 0 if discovered_override == null else bool(discovered_override)
 	var rarity := int(ingredient.get("rarity", 1))
-	if not bool(entry.unlocked):
-		return "INGREDIENTE BLOCCATO · %s\nRarità %d/5 · Fonte: %s" % [ingredient.category, rarity, ingredient.get("unlock", "Da scoprire")]
 	var recipes: Array[String] = []
 	for recipe: Dictionary in DataRegistry.recipes:
-		for step: Dictionary in recipe.steps:
-			if step.get("inputs", {}).has(ingredient.id):
-				recipes.append(String(recipe.name))
-				break
-	var preparations: Array[String] = []
-	for preparation: Dictionary in DataRegistry.preparations:
-		if preparation.get("inputs", {}).has(ingredient.id):
-			preparations.append(String(preparation.name))
-	return "%s · %s · stock %d · rarità %d/5\nRicette: %s · Preparazioni: %s · Fonte: %s" % [ingredient.name, ingredient.category, int(entry.amount), rarity, ", ".join(recipes) if not recipes.is_empty() else "nessuna", ", ".join(preparations) if not preparations.is_empty() else "nessuna", ingredient.get("unlock", "Sbloccato inizialmente")]
+		if recipe.get("unlock_cost", {}).has(ingredient.id):
+			recipes.append(String(recipe.name))
+	var display_name := String(ingredient.name) if discovered else "INGREDIENTE DA SCOPRIRE"
+	return "%s · %s · Album x%d · rarità %d/5\nServe per imparare: %s\nFonti principali: %s" % [
+		display_name,
+		String(ingredient.category),
+		amount,
+		rarity,
+		", ".join(recipes) if not recipes.is_empty() else "nessuna ricetta attuale",
+		CollectionManager.reward_sources_text(String(ingredient.id)),
+	]
 
 
 static func _missing_ingredients(recipe: Dictionary) -> Array[String]:
