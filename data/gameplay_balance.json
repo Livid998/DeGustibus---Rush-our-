@@ -92,6 +92,10 @@
     "dirty_dish_penalty": 3,
     "spill_penalty": 13,
     "kitchen_dirt_penalty": 1,
+    "kitchen_dirt_per_task": 0.45,
+    "kitchen_clean_task_threshold": 8,
+    "kitchen_clean_amount": 18,
+    "kitchen_dirt_visual_step": 6,
     "visible_insect_penalty": 8,
     "visible_mouse_penalty": 16
   },

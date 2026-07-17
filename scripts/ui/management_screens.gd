@@ -14,6 +14,73 @@ static func populate(screen_name: String, content: VBoxContainer, ui: Restaurant
 		"Impostazioni": _settings(content, ui)
 
 
+static func refresh(screen_name: String, content: VBoxContainer, ui: RestaurantUI) -> void:
+	if screen_name == "Personale":
+		var staff := content.find_child("StaffScreen", true, false) as StaffScreen
+		if staff != null:
+			staff.refresh_from_state()
+			return
+	elif screen_name == "Statistiche":
+		var reviews := content.find_child("ReviewsScreen", true, false) as ReviewsScreen
+		if reviews != null:
+			reviews.refresh()
+		var operations := content.find_child(
+			"OperationalStatisticsScreen",
+			true,
+			false
+		) as OperationalStatisticsScreen
+		if operations != null:
+			operations.refresh()
+			return
+	elif screen_name == "Impostazioni":
+		var profile := content.find_child("ProfileScreen", true, false) as ProfileScreen
+		if profile != null:
+			profile.refresh()
+			return
+	_clear(content)
+	populate(screen_name, content, ui)
+
+
+static func apply_responsive_layout(content: Control, ui: RestaurantUI) -> void:
+	if content == null:
+		return
+	var phone := ui.is_phone_layout()
+	var portrait := ui.is_portrait_layout()
+	for child: Node in content.find_children("*", "GridContainer", true, false):
+		var grid := child as GridContainer
+		match String(grid.get_meta("responsive_grid", "")):
+			"album":
+				grid.columns = 2 if phone else 3 if portrait else 6
+			"legacy_album":
+				grid.columns = 2 if portrait else 4
+			"landscape_two":
+				grid.columns = 1 if portrait else 2
+	var operations := content.find_child(
+		"OperationalStatisticsScreen",
+		true,
+		false
+	) as OperationalStatisticsScreen
+	if operations != null:
+		operations.apply_responsive_layout(phone, portrait)
+
+
+static func update_market_countdowns(content: Control, provider: MockMarketProvider) -> void:
+	if content == null or provider == null:
+		return
+	var offers_by_id: Dictionary = {}
+	for offer: Dictionary in provider.get_offers():
+		offers_by_id[String(offer.get("id", ""))] = offer
+	for child: Node in content.find_children("*", "Label", true, false):
+		if not child.has_meta("market_offer_id"):
+			continue
+		var offer: Dictionary = offers_by_id.get(
+			String(child.get_meta("market_offer_id")),
+			{}
+		)
+		if not offer.is_empty():
+			(child as Label).text = _market_offer_text(offer)
+
+
 static func _restaurant(content: VBoxContainer, ui: RestaurantUI) -> void:
 	var state_text: String = {
 		"closed":"Costruzione completa disponibile. Tocca un oggetto sulla griglia per spostarlo o venderlo.",
@@ -53,7 +120,9 @@ static func _menu(content: VBoxContainer, ui: RestaurantUI) -> void:
 	balance.add_theme_color_override("font_color", Color("3f8f5f") if "equilibrato" in balance.text else Color("b35d50"))
 	content.add_child(balance)
 	var grid := GridContainer.new()
-	grid.columns = 1 if ui.root.size.y > ui.root.size.x else 2
+	grid.name = "MenuGrid"
+	grid.set_meta("responsive_grid", "landscape_two")
+	grid.columns = 1 if ui.is_portrait_layout() else 2
 	grid.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	grid.add_theme_constant_override("h_separation", 10)
 	grid.add_theme_constant_override("v_separation", 10)
@@ -321,7 +390,9 @@ static func _stock(content: VBoxContainer, ui: RestaurantUI) -> void:
 	content.add_child(cart_card)
 
 	var grid := GridContainer.new()
-	grid.columns = 1 if ui.root.size.y > ui.root.size.x else 2
+	grid.name = "WarehouseGrid"
+	grid.set_meta("responsive_grid", "landscape_two")
+	grid.columns = 1 if ui.is_portrait_layout() else 2
 	grid.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	grid.add_theme_constant_override("h_separation", 10)
 	grid.add_theme_constant_override("v_separation", 10)
@@ -515,7 +586,9 @@ static func _album(content: VBoxContainer, ui: RestaurantUI) -> void:
 	detail_card.add_child(detail_label)
 	content.add_child(detail_card)
 	var grid := GridContainer.new()
-	grid.columns = 2 if ui.root.size.x < 520.0 else 3 if ui.root.size.y > ui.root.size.x else 6
+	grid.name = "AlbumGrid"
+	grid.set_meta("responsive_grid", "album")
+	grid.columns = 2 if ui.is_phone_layout() else 3 if ui.is_portrait_layout() else 6
 	grid.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	grid.add_theme_constant_override("h_separation", 10)
 	grid.add_theme_constant_override("v_separation", 12)
@@ -605,14 +678,16 @@ static func _legacy_album(content: VBoxContainer, ui: RestaurantUI) -> void:
 			unlocked += 1
 	content.add_child(ui.make_section("Album ingredienti", "Collezione permanente %d/%d · lo sblocco non viene perso quando le scorte finiscono." % [unlocked, DataRegistry.ingredients.size()]))
 	var body: BoxContainer
-	if ui.root.size.y > ui.root.size.x:
+	if ui.is_portrait_layout():
 		body = VBoxContainer.new()
 	else:
 		body = HBoxContainer.new()
 	body.add_theme_constant_override("separation", 12)
 	content.add_child(body)
 	var grid := GridContainer.new()
-	grid.columns = 2 if ui.root.size.y > ui.root.size.x else 4
+	grid.name = "LegacyAlbumGrid"
+	grid.set_meta("responsive_grid", "legacy_album")
+	grid.columns = 2 if ui.is_portrait_layout() else 4
 	grid.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	grid.add_theme_constant_override("h_separation", 8)
 	grid.add_theme_constant_override("v_separation", 8)
@@ -730,7 +805,7 @@ static func _recipe_hottest_station(recipe: Dictionary) -> Dictionary:
 static func _legacy_stock(content: VBoxContainer, ui: RestaurantUI) -> void:
 	content.add_child(ui.make_section("Album ingredienti", "Lo sblocco è permanente; lo stock è consumabile. Tocca il nome per ruotare il modello reale."))
 	var preview := ModelPreview.new()
-	preview.visible = ui.root.size.x >= ui.root.size.y
+	preview.visible = not ui.is_portrait_layout()
 	content.add_child(preview)
 	var first_path := ""
 	for ingredient: Dictionary in DataRegistry.ingredients:
@@ -758,11 +833,7 @@ static func _legacy_stock(content: VBoxContainer, ui: RestaurantUI) -> void:
 		box.add_child(detail)
 		var ingredient_id := String(ingredient.id)
 		if bool(entry.unlocked):
-			var reorder: BoxContainer
-			if ui.root.size.y > ui.root.size.x:
-				reorder = VBoxContainer.new()
-			else:
-				reorder = HBoxContainer.new()
+			var reorder := HFlowContainer.new()
 			var auto := CheckBox.new()
 			auto.text = "Auto"
 			auto.button_pressed = bool(entry.auto_reorder)
@@ -816,7 +887,9 @@ static func _market(content: VBoxContainer, ui: RestaurantUI) -> void:
 	market_header.add_child(refresh)
 	content.add_child(market_header)
 	var offer_grid := GridContainer.new()
-	offer_grid.columns = 1 if ui.root.size.y > ui.root.size.x else 2
+	offer_grid.name = "MarketOfferGrid"
+	offer_grid.set_meta("responsive_grid", "landscape_two")
+	offer_grid.columns = 1 if ui.is_portrait_layout() else 2
 	offer_grid.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	offer_grid.add_theme_constant_override("h_separation", 10)
 	offer_grid.add_theme_constant_override("v_separation", 10)
@@ -832,7 +905,9 @@ static func _market(content: VBoxContainer, ui: RestaurantUI) -> void:
 		row.add_child(offer_icon)
 		var label := Label.new()
 		label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		label.text = "%s\n%s x%d · Qualità %d/3 · %.1f cad. · %ds" % [offer.seller, offer.name, int(offer.amount), int(offer.quality), float(offer.unit_price), int(offer.remaining)]
+		label.name = "MarketOfferLabel_%s" % String(offer.get("id", "")).validate_node_name()
+		label.set_meta("market_offer_id", String(offer.get("id", "")))
+		label.text = _market_offer_text(offer)
 		label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 		row.add_child(label)
 		var offer_id := String(offer.id)
@@ -843,7 +918,9 @@ static func _market(content: VBoxContainer, ui: RestaurantUI) -> void:
 		total_preparations += amount
 	content.add_child(ui.make_section("Negozi NPC", "%d semilavorati disponibili: quelli acquistati sostituiscono realmente le fasi preparabili delle ricette." % total_preparations))
 	var shop_grid := GridContainer.new()
-	shop_grid.columns = 1 if ui.root.size.y > ui.root.size.x else 2
+	shop_grid.name = "MarketShopGrid"
+	shop_grid.set_meta("responsive_grid", "landscape_two")
+	shop_grid.columns = 1 if ui.is_portrait_layout() else 2
 	shop_grid.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	shop_grid.add_theme_constant_override("h_separation", 10)
 	content.add_child(shop_grid)
@@ -883,49 +960,8 @@ static func _staff(content: VBoxContainer, ui: RestaurantUI) -> void:
 
 
 static func _statistics(content: VBoxContainer, ui: RestaurantUI) -> void:
-	var summary := SimulationManager.summary()
-	content.add_child(ui.make_section("Statistiche di servizio", "Aggiornamento continuo; code e capacità provengono dalla task board reale."))
-	var overview := ui.make_card()
-	var text := Label.new()
-	text.text = "Ricavi %d monete · Ingredienti %d monete · Personale %d monete · Utile %d monete\nServiti %d · Persi %d · Soddisfazione %.0f%% · Tempo medio %.1fs\nPiù venduto: %s · Meno venduto: %s · Spreco %d · Terminati: %s" % [summary.revenue, summary.ingredient_cost, summary.labor_cost, summary.profit, summary.customers_served, summary.customers_lost, float(summary.satisfaction)*100, float(summary.average_time), summary.top_recipe, summary.low_recipe, summary.waste, ", ".join(summary.ingredients_out) if not summary.ingredients_out.is_empty() else "nessuno"]
-	text.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	overview.add_child(text)
-	content.add_child(overview)
-	content.add_child(ui.make_section("Produttività brigata", "Task cucina e servizio completati nella sessione corrente."))
-	var productivity := ui.make_card()
-	var productivity_box := VBoxContainer.new()
-	productivity.add_child(productivity_box)
-	for employee: Dictionary in GameState.employees:
-		var employee_row := HBoxContainer.new()
-		var employee_name := Label.new()
-		employee_name.text = "%s · %s" % [employee.name, _role_name(String(employee.role))]
-		employee_name.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		employee_row.add_child(employee_name)
-		var completed := int(summary.employee_tasks.get(String(employee.id), 0))
-		var completed_label := Label.new()
-		completed_label.text = "%d task · stress %.0f%%" % [completed, float(employee.get("stress", 0.0)) * 100.0]
-		employee_row.add_child(completed_label)
-		productivity_box.add_child(employee_row)
-	content.add_child(productivity)
-	content.add_child(ui.make_section("Carico postazioni", "Previsto dal menu · attuale dal tempo occupato · coda dai task in attesa."))
-	for metric: Dictionary in SimulationManager.station_metrics():
-		if int(metric.capacity) == 0 and float(metric.predicted) <= 0.0:
-			continue
-		var card := ui.make_card()
-		var box := VBoxContainer.new()
-		card.add_child(box)
-		var status := "SOVRACCARICO" if float(metric.predicted) > 100.0 else "elevato" if float(metric.predicted) > 80.0 else "regolare" if float(metric.predicted) > 45.0 else "sottoutilizzato"
-		var label := Label.new()
-		label.text = "%s · previsto %.0f%% (%s) · attuale %.0f%%\nCoda %d · attivi %d/%d · attesa media %.1fs · completati %d · bloccati %d" % [metric.name, float(metric.predicted), status, float(metric.utilization), int(metric.queue), int(metric.busy), int(metric.capacity), float(metric.average_wait), int(metric.completed), int(metric.blocked)]
-		label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-		label.add_theme_color_override("font_color", Color("b94e48") if float(metric.predicted) > 100.0 else Color("9b761e") if float(metric.predicted) > 80.0 else Color("376c4a"))
-		box.add_child(label)
-		var bar := ProgressBar.new()
-		bar.max_value = 150
-		bar.value = minf(float(metric.predicted), 150.0)
-		bar.show_percentage = true
-		box.add_child(bar)
-		content.add_child(card)
+	content.add_child(ReviewsScreen.create())
+	content.add_child(OperationalStatisticsScreen.create(ui))
 
 
 static func _settings(content: VBoxContainer, ui: RestaurantUI) -> void:
@@ -1108,6 +1144,17 @@ static func _format_countdown(seconds: float) -> String:
 	return "%02d:%02d" % [rounded / 60, rounded % 60]
 
 
+static func _market_offer_text(offer: Dictionary) -> String:
+	return "%s\n%s x%d · Qualità %d/3 · %.1f cad. · %ds" % [
+		String(offer.get("seller", "")),
+		String(offer.get("name", "")),
+		int(offer.get("amount", 0)),
+		int(offer.get("quality", 0)),
+		float(offer.get("unit_price", 0.0)),
+		maxi(int(ceil(float(offer.get("remaining", 0.0)))), 0),
+	]
+
+
 static func _storage_type_name(storage_type: String) -> String:
 	return "Refrigerato" if storage_type == "refrigerated" else "Ambiente"
 
@@ -1150,3 +1197,9 @@ static func _menu_balance_text() -> String:
 	if hottest_load > 100.0:
 		return "menu sbilanciato: %s %.0f%%" % [hottest_name, hottest_load]
 	return "menu equilibrato su %d postazioni" % used.size() if used.size() >= 4 else "menu concentrato su poche postazioni"
+
+
+static func _clear(node: Node) -> void:
+	for child: Node in node.get_children():
+		node.remove_child(child)
+		child.queue_free()

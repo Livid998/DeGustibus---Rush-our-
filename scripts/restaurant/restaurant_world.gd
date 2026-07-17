@@ -79,6 +79,7 @@ var spill_records: Dictionary = {}
 var wash_batches: Dictionary = {}
 var ambience_system: RestaurantAmbienceSystem
 var kitchen_dirt := 0.0
+var kitchen_dirt_visuals: Array[Node3D] = []
 var pest_visuals: Dictionary = {}
 var _spill_serial := 0
 var _spill_clock := 18.0
@@ -125,7 +126,6 @@ func _process(delta: float) -> void:
 		_ambience_tick_accumulator += ambience_scaled
 		var ambience_ticks := 0
 		while _ambience_tick_accumulator >= 0.5 and ambience_ticks < 4:
-			ambience_system.refresh_from_world()
 			ambience_system.advance_pest_risk(0.5)
 			_ambience_tick_accumulator -= 0.5
 			ambience_ticks += 1
@@ -160,6 +160,7 @@ func _setup_ambience() -> void:
 	ambience_system.configure(self, {}, true)
 	ambience_system.refresh_from_world()
 	_restore_ambience_pest_visuals()
+	_refresh_kitchen_dirt_visuals()
 	_ensure_kitchen_cleaning_task()
 
 
@@ -184,6 +185,33 @@ func visible_pest_incidents() -> Array:
 	return result
 
 
+func beauty_preview(
+	definition: Dictionary,
+	cell: Vector2i,
+	move_source: PlacedObject = null
+) -> Dictionary:
+	var current := ambience_snapshot()
+	var current_score := float(current.get("beauty_score", 0.0))
+	if ambience_system == null or definition.is_empty():
+		return {"before": current_score, "after": current_score, "delta": 0.0, "item_beauty": 0.0}
+	var entries: Array = []
+	for object: PlacedObject in placed_objects.values():
+		if not is_instance_valid(object) or object == move_source:
+			continue
+		entries.append(object)
+	entries.append({"definition": definition, "cell": [cell.x, cell.y]})
+	var context := ambience_system.dining_context_from_world(self)
+	var calculated := ambience_system.calculate_beauty(entries, context)
+	var multiplier := float(current.get("beauty_cleanliness_multiplier", 1.0))
+	var after_score := clampf(float(calculated.get("base_score", 0.0)) * multiplier, 0.0, 100.0)
+	return {
+		"before": current_score,
+		"after": after_score,
+		"delta": after_score - current_score,
+		"item_beauty": float(definition.get("beauty", 0.0)),
+	}
+
+
 func register_kitchen_work_dirt(task: Dictionary = {}) -> void:
 	if task.is_empty():
 		return
@@ -192,6 +220,7 @@ func register_kitchen_work_dirt(task: Dictionary = {}) -> void:
 		return
 	var addition := float(DataRegistry.balance_value("cleanliness.kitchen_dirt_per_task", 0.45))
 	kitchen_dirt = clampf(kitchen_dirt + maxf(addition, 0.0), 0.0, 100.0)
+	_refresh_kitchen_dirt_visuals()
 	_refresh_ambience()
 	_ensure_kitchen_cleaning_task()
 
@@ -292,8 +321,8 @@ func _pest_spawn_cell(kind: String, incident_id: String) -> Vector2i:
 	if candidates.is_empty():
 		return _nearest_open_cell(Vector2i(10, 9))
 	candidates.sort_custom(func(a: Vector2i, b: Vector2i):
-		var a_key := abs(a.x * 31 + a.y * 17 + incident_id.hash())
-		var b_key := abs(b.x * 31 + b.y * 17 + incident_id.hash())
+		var a_key: int = absi(a.x * 31 + a.y * 17 + incident_id.hash())
+		var b_key: int = absi(b.x * 31 + b.y * 17 + incident_id.hash())
 		return a_key < b_key
 	)
 	return candidates[0]
@@ -404,6 +433,40 @@ func _ensure_kitchen_cleaning_task() -> void:
 		"maintenance_category": "kitchen",
 		"animation": "PickUp",
 	}, 2 if kitchen_dirt >= threshold * 2.0 else 1, 2.8, "res://assets/cleaning/Cleaning_Sponge.glb")
+
+
+func _refresh_kitchen_dirt_visuals() -> void:
+	if cleanup_root == null:
+		return
+	var units_per_mark := maxf(float(DataRegistry.balance_value("cleanliness.kitchen_dirt_visual_step", 6.0)), 0.1)
+	var desired := clampi(floori(kitchen_dirt / units_per_mark), 0, 5)
+	while kitchen_dirt_visuals.size() > desired:
+		var removed := kitchen_dirt_visuals.pop_back()
+		if removed != null and is_instance_valid(removed):
+			removed.queue_free()
+	while kitchen_dirt_visuals.size() < desired:
+		var index := kitchen_dirt_visuals.size()
+		var visual := _create_spill_visual("KitchenGrime_%02d" % index)
+		visual.name = "KitchenGrime_%02d" % index
+		visual.scale = Vector3.ONE * 0.72
+		cleanup_root.add_child(visual)
+		visual.global_position = cell_to_world(_kitchen_grime_cell(index)) + Vector3.UP * 0.025
+		kitchen_dirt_visuals.append(visual)
+
+
+func _kitchen_grime_cell(index: int) -> Vector2i:
+	var candidates: Array[Vector2i] = []
+	for cell: Vector2i in floor_tiles:
+		if String(floor_tiles.get(cell, "")) != "floor_kitchen":
+			continue
+		if astar.is_in_boundsv(cell) and not astar.is_point_solid(cell):
+			candidates.append(cell)
+	candidates.sort_custom(func(a: Vector2i, b: Vector2i):
+		var a_key: int = absi(a.x * 19 + a.y * 29)
+		var b_key: int = absi(b.x * 19 + b.y * 29)
+		return a_key < b_key
+	)
+	return candidates[index % candidates.size()] if not candidates.is_empty() else _nearest_open_cell(Vector2i(9, 10))
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -3098,6 +3161,7 @@ func maintenance_completed(action: String, payload: Dictionary) -> void:
 		"clean_kitchen":
 			var cleaning_amount := float(DataRegistry.balance_value("cleanliness.kitchen_clean_amount", 18.0))
 			kitchen_dirt = maxf(kitchen_dirt - maxf(cleaning_amount, 0.0), 0.0)
+			_refresh_kitchen_dirt_visuals()
 			_ensure_kitchen_cleaning_task()
 		"remove_pest":
 			var incident_id := String(payload.get("incident_id", ""))

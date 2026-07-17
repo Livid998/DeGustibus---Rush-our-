@@ -82,8 +82,12 @@ func _test_catalogue_and_diminishing_returns() -> void:
 			"%s uses its real decor asset and a purchasable price" % item_id
 		)
 	var rug: Dictionary = DataRegistry.build_by_id.rug_rectangle
+	var rug_footprint: Array = rug.get("footprint", [])
 	_expect(
-		rug.get("footprint", []) == [2, 1] and not bool(rug.get("blocking", true)),
+		rug_footprint.size() == 2
+			and int(rug_footprint[0]) == 2
+			and int(rug_footprint[1]) == 1
+			and not bool(rug.get("blocking", true)),
 		"the rectangular rug uses a two-cell non-blocking floor footprint"
 	)
 	var table_cloth: Dictionary = DataRegistry.build_by_id.table_cloth

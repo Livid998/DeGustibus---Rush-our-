@@ -24,9 +24,20 @@ var rush_progress: ProgressBar
 var customer_label: Label
 var speed_icon_rect: TextureRect
 var speed_selector: OptionButton
+var top_bar_flow: HFlowContainer
+var money_group: HBoxContainer
+var reputation_group: HBoxContainer
+var clock_stack: VBoxContainer
 var build_hud: BuildHUD
 var nav_buttons: Dictionary = {}
+var nav_panel: PanelContainer
+var nav_row: HBoxContainer
+var more_button: Button
+var more_sheet: PanelContainer
+var more_sheet_grid: GridContainer
+var more_sheet_buttons: Dictionary = {}
 var screen_title_label: Label
+var screen_close_button: Button
 var world_action_panel: PanelContainer
 var world_build_button: Button
 var profile_summary_button: Button
@@ -41,8 +52,22 @@ var _market_refresh_clock := 0.0
 var _theme: Theme
 var _orientation_initialized := false
 var _was_portrait := false
+var _layout_viewport_size := Vector2(1280, 720)
+var _screen_pages: Dictionary = {}
+var _screen_scroll_positions: Dictionary = {}
+var _screen_build_counts: Dictionary = {}
+var _dirty_screens: Dictionary = {}
 
 const SCREENS := ["Ristorante", "Menu", "Album", "Magazzino", "Mercato", "Personale", "Statistiche", "Impostazioni"]
+const PHONE_PRIMARY_SCREENS := ["Ristorante", "Menu", "Magazzino", "Personale"]
+const PHONE_MORE_SCREENS := ["Album", "Mercato", "Statistiche", "Impostazioni"]
+const QUALITY_DEFECT_LABELS := {
+	"small_portion": "Porzione piccola",
+	"undercooked": "Cottura insufficiente",
+	"overcooked": "Cottura eccessiva",
+	"burned": "Piatto bruciato",
+	"poor_presentation": "Presentazione debole",
+}
 const TUTORIAL_STEPS := [
 	"Sposta un tavolo in modalità costruzione.",
 	"Aggiungi una sedia alla sala.",
@@ -89,11 +114,18 @@ func _process(delta: float) -> void:
 		_pass_refresh_clock = 0.0
 		if current_screen == "Ristorante":
 			_update_pass()
-		elif current_screen == "Statistiche":
-			show_screen("Statistiche", false)
-	if current_screen == "Mercato" and (market_changed or _market_refresh_clock <= 0.0):
+		var market_page: VBoxContainer = _screen_pages.get("Mercato")
+		if market_page != null:
+			ManagementScreens.update_market_countdowns(market_page, market_provider)
+	if market_changed:
+		_mark_screen_dirty("Mercato")
+		if current_screen == "Mercato" and screen_panel.visible:
+			refresh_screen()
+	elif current_screen == "Mercato" and _market_refresh_clock <= 0.0:
 		_market_refresh_clock = 1.0
-		show_screen("Mercato", false)
+		var visible_market_page: VBoxContainer = _screen_pages.get("Mercato")
+		if visible_market_page != null:
+			ManagementScreens.update_market_countdowns(visible_market_page, market_provider)
 	if Input.is_action_just_pressed("toggle_debug"):
 		debug_panel.visible = not debug_panel.visible
 	if Input.is_action_just_pressed("speed_1"):
@@ -105,17 +137,24 @@ func _process(delta: float) -> void:
 
 
 func show_screen(screen_name: String, sound: bool = true) -> void:
+	if screen_name not in SCREENS:
+		return
 	if build_hud and build_hud.is_open:
 		build_hud.close_builder()
+	_store_current_scroll()
+	_close_more_sheet()
 	current_screen = screen_name
 	if screen_name == "Ristorante":
 		close_screen()
 		if sound:
 			AudioManager.play_feedback()
 		return
-	_clear(screen_content)
-	ManagementScreens.populate(screen_name, screen_content, self)
-	GameFonts.sanitize_control_tree(screen_content)
+	var page := _ensure_screen_page(screen_name)
+	if _dirty_screens.has(screen_name):
+		_refresh_screen_page(screen_name, page)
+		_dirty_screens.erase(screen_name)
+	_show_only_screen_page(page)
+	ManagementScreens.apply_responsive_layout(page, self)
 	screen_title_label.text = screen_name.to_upper()
 	var animate_open := sound or not screen_panel.visible
 	screen_panel.visible = true
@@ -125,6 +164,7 @@ func show_screen(screen_name: String, sound: bool = true) -> void:
 	_update_nav_selection()
 	_update_world_actions()
 	_update_pass()
+	_restore_current_scroll.call_deferred(screen_name)
 	if sound:
 		AudioManager.play_feedback()
 	if screen_name == "Statistiche" and not GameState.tutorial.complete:
@@ -132,6 +172,8 @@ func show_screen(screen_name: String, sound: bool = true) -> void:
 
 
 func close_screen() -> void:
+	_store_current_scroll()
+	_close_more_sheet()
 	current_screen = "Ristorante"
 	screen_panel.visible = false
 	_update_nav_selection()
@@ -144,7 +186,92 @@ func open_builder() -> void:
 
 
 func refresh_screen() -> void:
-	show_screen(current_screen, false)
+	if current_screen == "Ristorante":
+		return
+	var page := _ensure_screen_page(current_screen)
+	_store_current_scroll()
+	_refresh_screen_page(current_screen, page)
+	_dirty_screens.erase(current_screen)
+	_restore_current_scroll.call_deferred(current_screen)
+
+
+func screen_page(screen_name: String) -> VBoxContainer:
+	return _screen_pages.get(screen_name)
+
+
+func screen_build_count(screen_name: String) -> int:
+	return int(_screen_build_counts.get(screen_name, 0))
+
+
+func is_phone_layout() -> bool:
+	return _layout_viewport_size.x <= 600.0
+
+
+func is_portrait_layout() -> bool:
+	return _layout_viewport_size.y > _layout_viewport_size.x
+
+
+func responsive_viewport_size() -> Vector2:
+	return _layout_viewport_size
+
+
+func _ensure_screen_page(screen_name: String) -> VBoxContainer:
+	var existing: VBoxContainer = _screen_pages.get(screen_name)
+	if is_instance_valid(existing):
+		return existing
+	var page := VBoxContainer.new()
+	page.name = "%sPage" % screen_name.validate_node_name()
+	page.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	page.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	page.add_theme_constant_override("separation", 10)
+	page.visible = false
+	screen_content.add_child(page)
+	ManagementScreens.populate(screen_name, page, self)
+	GameFonts.sanitize_control_tree(page)
+	_screen_pages[screen_name] = page
+	_screen_build_counts[screen_name] = int(_screen_build_counts.get(screen_name, 0)) + 1
+	return page
+
+
+func _refresh_screen_page(screen_name: String, page: VBoxContainer) -> void:
+	if not is_instance_valid(page):
+		return
+	ManagementScreens.refresh(screen_name, page, self)
+	GameFonts.sanitize_control_tree(page)
+	ManagementScreens.apply_responsive_layout(page, self)
+
+
+func _show_only_screen_page(page: VBoxContainer) -> void:
+	for candidate: VBoxContainer in _screen_pages.values():
+		if is_instance_valid(candidate):
+			candidate.visible = candidate == page
+
+
+func _store_current_scroll() -> void:
+	if (
+		screen_scroll == null
+		or current_screen == "Ristorante"
+		or not screen_panel.visible
+	):
+		return
+	_screen_scroll_positions[current_screen] = screen_scroll.scroll_vertical
+
+
+func _restore_current_scroll(screen_name: String) -> void:
+	if screen_scroll == null or current_screen != screen_name or not screen_panel.visible:
+		return
+	screen_scroll.scroll_vertical = int(_screen_scroll_positions.get(screen_name, 0))
+
+
+func _mark_screen_dirty(screen_name: String) -> void:
+	if screen_name in SCREENS and screen_name != "Ristorante":
+		_dirty_screens[screen_name] = true
+
+
+func _request_screen_update(screen_name: String) -> void:
+	_mark_screen_dirty(screen_name)
+	if current_screen == screen_name and screen_panel.visible:
+		refresh_screen()
 
 
 func make_button(text: String, callback: Callable, tone: String = "blue") -> Button:
@@ -247,6 +374,7 @@ func _build_shell() -> void:
 	add_child(root)
 	_build_top_bar()
 	_build_bottom_nav()
+	_build_more_sheet()
 	_build_screen_panel()
 	_build_world_actions()
 	_build_pass_panel()
@@ -273,13 +401,15 @@ func _build_top_bar() -> void:
 	margin.add_theme_constant_override("margin_top", 8)
 	margin.add_theme_constant_override("margin_bottom", 8)
 	top_bar.add_child(margin)
-	var row := HBoxContainer.new()
-	row.add_theme_constant_override("separation", 12)
-	margin.add_child(row)
+	top_bar_flow = HFlowContainer.new()
+	top_bar_flow.name = "TopBarFlow"
+	top_bar_flow.add_theme_constant_override("h_separation", 12)
+	top_bar_flow.add_theme_constant_override("v_separation", 6)
+	margin.add_child(top_bar_flow)
 	money_label = Label.new()
 	money_label.add_theme_font_override("font", GameFonts.bold())
 	money_label.add_theme_color_override("font_color", Color("f5fbf9"))
-	var money_group := HBoxContainer.new()
+	money_group = HBoxContainer.new()
 	money_group.custom_minimum_size.x = 118
 	money_group.add_theme_constant_override("separation", 5)
 	money_group.add_child(_top_bar_icon(GameIcons.currency_icon()))
@@ -287,7 +417,7 @@ func _build_top_bar() -> void:
 	reputation_label = Label.new()
 	reputation_label.add_theme_font_override("font", GameFonts.bold())
 	reputation_label.add_theme_color_override("font_color", Color("f5fbf9"))
-	var reputation_group := HBoxContainer.new()
+	reputation_group = HBoxContainer.new()
 	reputation_group.custom_minimum_size.x = 82
 	reputation_group.add_theme_constant_override("separation", 5)
 	reputation_group.add_child(_top_bar_icon(GameIcons.reputation_icon()))
@@ -306,7 +436,7 @@ func _build_top_bar() -> void:
 	rush_progress.custom_minimum_size.y = 5
 	rush_progress.max_value = 1.0
 	rush_progress.show_percentage = false
-	var clock_stack := VBoxContainer.new()
+	clock_stack = VBoxContainer.new()
 	clock_stack.custom_minimum_size.x = 220
 	clock_stack.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	clock_stack.add_theme_constant_override("separation", 1)
@@ -321,14 +451,14 @@ func _build_top_bar() -> void:
 		speed_selector.add_item(label)
 	speed_icon_rect = _top_bar_icon(GameIcons.speed_icon(0))
 	speed_selector.item_selected.connect(_on_speed_selected)
-	row.add_child(money_group)
-	row.add_child(reputation_group)
-	row.add_child(state_button)
-	row.add_child(period_icon_rect)
-	row.add_child(clock_stack)
-	row.add_child(customer_label)
-	row.add_child(speed_icon_rect)
-	row.add_child(speed_selector)
+	top_bar_flow.add_child(money_group)
+	top_bar_flow.add_child(reputation_group)
+	top_bar_flow.add_child(state_button)
+	top_bar_flow.add_child(period_icon_rect)
+	top_bar_flow.add_child(clock_stack)
+	top_bar_flow.add_child(customer_label)
+	top_bar_flow.add_child(speed_icon_rect)
+	top_bar_flow.add_child(speed_selector)
 
 
 func _top_bar_icon(texture: Texture2D) -> TextureRect:
@@ -426,18 +556,21 @@ func _sync_speed_controls() -> void:
 
 
 func _build_bottom_nav() -> void:
-	var nav_panel := PanelContainer.new()
+	nav_panel = PanelContainer.new()
+	nav_panel.name = "PrimaryNavigation"
 	nav_panel.set_anchors_preset(Control.PRESET_BOTTOM_WIDE)
 	nav_panel.offset_top = -68
 	nav_panel.mouse_filter = Control.MOUSE_FILTER_STOP
 	nav_panel.add_theme_stylebox_override("panel", _panel_style(Color("173f45f2"), 0))
 	root.add_child(nav_panel)
-	var row := HBoxContainer.new()
-	row.alignment = BoxContainer.ALIGNMENT_CENTER
-	row.add_theme_constant_override("separation", 8)
-	nav_panel.add_child(row)
+	nav_row = HBoxContainer.new()
+	nav_row.name = "PrimaryNavigationRow"
+	nav_row.alignment = BoxContainer.ALIGNMENT_CENTER
+	nav_row.add_theme_constant_override("separation", 8)
+	nav_panel.add_child(nav_row)
 	for screen_name: String in SCREENS:
 		var button := make_button(screen_name, func(): show_screen(screen_name), "blue")
+		button.name = "Nav_%s" % screen_name.validate_node_name()
 		button.custom_minimum_size = Vector2(92, 46)
 		button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		button.add_theme_font_size_override("font_size", 14)
@@ -446,7 +579,91 @@ func _build_bottom_nav() -> void:
 		button.add_theme_constant_override("icon_max_width", 34)
 		button.icon_alignment = HORIZONTAL_ALIGNMENT_LEFT
 		nav_buttons[screen_name] = button
-		row.add_child(button)
+		nav_row.add_child(button)
+	more_button = make_button("Altro", _toggle_more_sheet, "blue")
+	more_button.name = "Nav_Altro"
+	more_button.custom_minimum_size = Vector2(92, 46)
+	more_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	more_button.add_theme_font_size_override("font_size", 14)
+	more_button.icon = GameIcons.navigation_icon("Impostazioni")
+	more_button.expand_icon = true
+	more_button.add_theme_constant_override("icon_max_width", 34)
+	more_button.icon_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	more_button.visible = false
+	nav_row.add_child(more_button)
+
+
+func _build_more_sheet() -> void:
+	more_sheet = PanelContainer.new()
+	more_sheet.name = "MoreNavigationSheet"
+	more_sheet.anchor_left = 0.0
+	more_sheet.anchor_right = 1.0
+	more_sheet.anchor_top = 1.0
+	more_sheet.anchor_bottom = 1.0
+	more_sheet.offset_left = 8
+	more_sheet.offset_right = -8
+	more_sheet.offset_top = -338
+	more_sheet.offset_bottom = -76
+	more_sheet.mouse_filter = Control.MOUSE_FILTER_STOP
+	more_sheet.z_index = 40
+	more_sheet.add_theme_stylebox_override(
+		"panel",
+		_panel_style(Color("173f45fa"), 18)
+	)
+	root.add_child(more_sheet)
+	var shell := VBoxContainer.new()
+	shell.add_theme_constant_override("separation", 10)
+	more_sheet.add_child(shell)
+	var heading_row := HBoxContainer.new()
+	shell.add_child(heading_row)
+	var title := Label.new()
+	title.text = "ALTRE SEZIONI"
+	title.add_theme_font_override("font", GameFonts.bold())
+	title.add_theme_font_size_override("font_size", 20)
+	title.add_theme_color_override("font_color", Color("fffaf0"))
+	title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	heading_row.add_child(title)
+	var close := make_button("Chiudi", _close_more_sheet, "ghost")
+	close.custom_minimum_size = Vector2(96, 42)
+	close.size_flags_horizontal = Control.SIZE_SHRINK_END
+	heading_row.add_child(close)
+	more_sheet_grid = GridContainer.new()
+	more_sheet_grid.name = "MoreNavigationGrid"
+	more_sheet_grid.columns = 2
+	more_sheet_grid.add_theme_constant_override("h_separation", 10)
+	more_sheet_grid.add_theme_constant_override("v_separation", 10)
+	shell.add_child(more_sheet_grid)
+	for screen_name: String in PHONE_MORE_SCREENS:
+		var button := make_button(
+			screen_name,
+			func(): show_screen(screen_name),
+			"blue"
+		)
+		button.name = "MoreNav_%s" % screen_name.validate_node_name()
+		button.custom_minimum_size = Vector2(150, 72)
+		button.icon = GameIcons.navigation_icon(screen_name)
+		button.expand_icon = true
+		button.add_theme_constant_override("icon_max_width", 40)
+		button.icon_alignment = HORIZONTAL_ALIGNMENT_LEFT
+		button.tooltip_text = "Apri %s" % screen_name
+		more_sheet_buttons[screen_name] = button
+		more_sheet_grid.add_child(button)
+	more_sheet.visible = false
+
+
+func _toggle_more_sheet() -> void:
+	if more_sheet == null or not is_phone_layout():
+		return
+	more_sheet.visible = not more_sheet.visible
+	_update_nav_selection()
+	if more_sheet.visible:
+		AudioManager.play_feedback()
+
+
+func _close_more_sheet() -> void:
+	if more_sheet != null:
+		more_sheet.visible = false
+	_update_nav_selection()
 
 
 func _build_screen_panel() -> void:
@@ -472,10 +689,11 @@ func _build_screen_panel() -> void:
 	screen_title_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	screen_title_label.add_theme_font_size_override("font_size", 20)
 	header.add_child(screen_title_label)
-	var close := make_button("Torna alla mappa", close_screen, "ghost")
-	close.custom_minimum_size = Vector2(160, 42)
-	close.size_flags_horizontal = Control.SIZE_SHRINK_END
-	header.add_child(close)
+	screen_close_button = make_button("Torna alla mappa", close_screen, "ghost")
+	screen_close_button.name = "ManagementCloseButton"
+	screen_close_button.custom_minimum_size = Vector2(160, 42)
+	screen_close_button.size_flags_horizontal = Control.SIZE_SHRINK_END
+	header.add_child(screen_close_button)
 	shell.add_child(header)
 	screen_scroll = ScrollContainer.new()
 	screen_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
@@ -794,6 +1012,36 @@ func _update_pass() -> void:
 		label.add_theme_font_size_override("font_size", 14)
 		label.add_theme_color_override("font_color", Color("8ff0aa") if order.ready else Color("ff9b8f") if elapsed > 28 else Color("ffe48c") if elapsed > 16 else Color.WHITE)
 		row.add_child(label)
+		if order.has("quality_score"):
+			var quality_box := VBoxContainer.new()
+			quality_box.add_theme_constant_override("separation", 2)
+			var quality_label := Label.new()
+			quality_label.text = "Qualità %d · %s" % [
+				int(order.get("quality_score", 0)),
+				String(order.get("quality_tier", "normale")).capitalize(),
+			]
+			quality_label.add_theme_font_size_override("font_size", 11)
+			quality_label.add_theme_color_override("font_color", Color("d7efea"))
+			quality_box.add_child(quality_label)
+			var quality_events: Array = order.get("quality_events", [])
+			if not quality_events.is_empty() and quality_events.back() is Dictionary:
+				var quality_event := quality_events.back() as Dictionary
+				var icon_id := String(quality_event.get("icon_id", ""))
+				var event_icon_texture := GameIcons.casual_system_icon(icon_id)
+				if event_icon_texture != null:
+					var event_icon := TextureRect.new()
+					event_icon.texture = event_icon_texture
+					event_icon.custom_minimum_size = Vector2(25, 25)
+					event_icon.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+					event_icon.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+					event_icon.tooltip_text = String(
+						QUALITY_DEFECT_LABELS.get(
+							String(quality_event.get("id", "")),
+							"Evento qualità"
+						)
+					)
+					quality_box.add_child(event_icon)
+			row.add_child(quality_box)
 		var ticket_actions := VBoxContainer.new()
 		ticket_actions.add_theme_constant_override("separation", 2)
 		var suspended := bool(order.get("suspended", false))
@@ -821,11 +1069,7 @@ func _update_pass() -> void:
 		empty.add_theme_color_override("font_color", Color("f2faf8"))
 		pass_content.add_child(empty)
 	GameFonts.sanitize_control_tree(pass_content)
-	var portrait := root.size.y > root.size.x
-	for screen_name: String in nav_buttons:
-		var nav_button: Button = nav_buttons[screen_name]
-		nav_button.text = "" if portrait else screen_name
-		nav_button.add_theme_constant_override("icon_max_width", 40 if portrait else 34)
+	var portrait := is_portrait_layout()
 	pass_panel.visible = not portrait and current_screen == "Ristorante" and not screen_panel.visible and (GameState.restaurant_state in ["open", "closing"] or active_count > 0)
 
 
@@ -841,12 +1085,31 @@ func _update_tutorial() -> void:
 func _connect_state() -> void:
 	GameState.money_changed.connect(func(_value: int): _update_top_bar())
 	GameState.reputation_changed.connect(func(_value: float): _update_top_bar())
-	GameState.restaurant_state_changed.connect(func(_value: String): _update_top_bar(); _update_world_actions(); if current_screen != "Ristorante": refresh_screen())
-	GameState.stock_changed.connect(func(_id: String, _value: int): if current_screen == "Magazzino": refresh_screen())
-	GameState.menu_changed.connect(func(): if current_screen == "Menu": refresh_screen())
-	GameState.album_inventory_changed.connect(func(_id: String, _value: int): if current_screen == "Album": refresh_screen())
-	GameState.album_discovered_changed.connect(func(_id: String, _value: bool): if current_screen == "Album": refresh_screen())
-	GameState.review_reward_progress_changed.connect(func(_value: int): if current_screen == "Album": refresh_screen())
+	GameState.restaurant_state_changed.connect(func(_value: String):
+		_update_top_bar()
+		_update_world_actions()
+		for screen_name: String in SCREENS:
+			_mark_screen_dirty(screen_name)
+		if current_screen != "Ristorante":
+			refresh_screen()
+	)
+	GameState.stock_changed.connect(func(_id: String, _value: int):
+		_request_screen_update("Magazzino")
+		_mark_screen_dirty("Menu")
+	)
+	GameState.menu_changed.connect(func():
+		_request_screen_update("Menu")
+		_mark_screen_dirty("Statistiche")
+	)
+	GameState.album_inventory_changed.connect(func(_id: String, _value: int):
+		_request_screen_update("Album")
+	)
+	GameState.album_discovered_changed.connect(func(_id: String, _value: bool):
+		_request_screen_update("Album")
+	)
+	GameState.review_reward_progress_changed.connect(func(_value: int):
+		_request_screen_update("Album")
+	)
 	# StaffScreen listens directly and refreshes only its role-filtered rows,
 	# preserving the selected tab, scroll and focus instead of rebuilding the
 	# entire management screen after every hire or dismissal.
@@ -870,25 +1133,96 @@ func _on_preview_changed(_valid: bool, _reason: String, _cost: int) -> void:
 		refresh_screen()
 
 
-func _apply_responsive_layout() -> void:
+func _apply_responsive_layout(viewport_size: Vector2 = Vector2.ZERO) -> void:
 	if root == null:
 		return
-	var portrait := root.size.y > root.size.x
-	var compact_phone := root.size.x < 700.0
+	_layout_viewport_size = (
+		viewport_size
+		if viewport_size.x > 0.0 and viewport_size.y > 0.0
+		else _detected_viewport_size()
+	)
+	var portrait := is_portrait_layout()
+	var compact_phone := is_phone_layout()
+	var nav_height := 82.0 if compact_phone else 68.0
+	var top_height := 124.0 if compact_phone else 68.0
+	if top_bar != null:
+		top_bar.offset_bottom = top_height
+	if nav_panel != null:
+		nav_panel.offset_top = -nav_height
+	if more_sheet != null:
+		more_sheet.visible = more_sheet.visible and compact_phone
+		more_sheet.offset_top = -(nav_height + 270.0)
+		more_sheet.offset_bottom = -(nav_height + 8.0)
+	if money_group != null:
+		money_group.custom_minimum_size.x = 82.0 if compact_phone else 118.0
+	if reputation_group != null:
+		reputation_group.custom_minimum_size.x = 66.0 if compact_phone else 82.0
+	if state_button != null:
+		state_button.custom_minimum_size.x = 168.0 if compact_phone else 250.0
+		state_button.custom_minimum_size.y = 42.0 if compact_phone else 48.0
+	if clock_stack != null:
+		clock_stack.custom_minimum_size.x = 150.0 if compact_phone else 220.0
+	if customer_label != null:
+		customer_label.visible = not compact_phone
+	if speed_icon_rect != null:
+		speed_icon_rect.visible = not compact_phone
+	if screen_close_button != null:
+		screen_close_button.text = "Mappa" if compact_phone else "Torna alla mappa"
+		screen_close_button.custom_minimum_size.x = 92.0 if compact_phone else 160.0
+	for screen_name: String in nav_buttons:
+		var nav_button: Button = nav_buttons[screen_name]
+		nav_button.visible = not compact_phone or screen_name in PHONE_PRIMARY_SCREENS
+		nav_button.text = screen_name
+		nav_button.custom_minimum_size = Vector2(
+			68.0 if compact_phone else 92.0,
+			54.0 if compact_phone else 46.0
+		)
+		nav_button.add_theme_font_size_override("font_size", 12 if compact_phone else 14)
+		nav_button.add_theme_constant_override("icon_max_width", 30 if compact_phone else 34)
+		nav_button.icon_alignment = (
+			HORIZONTAL_ALIGNMENT_CENTER
+			if compact_phone
+			else HORIZONTAL_ALIGNMENT_LEFT
+		)
+	if more_button != null:
+		more_button.visible = compact_phone
+		more_button.custom_minimum_size = Vector2(68, 54)
+		more_button.add_theme_font_size_override("font_size", 12)
+		more_button.add_theme_constant_override("icon_max_width", 30)
+		more_button.icon_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	if profile_summary_button != null:
 		profile_summary_button.visible = not compact_phone
 	if world_action_panel != null:
 		world_action_panel.offset_right = 222 if compact_phone else 420
+		world_action_panel.offset_top = -(nav_height + 54.0)
+		world_action_panel.offset_bottom = -(nav_height + 8.0)
+	if camera_controls != null:
+		camera_controls.offset_top = top_height + 12.0
+		camera_controls.offset_bottom = top_height + 74.0
 	screen_panel.anchor_left = 0
 	screen_panel.anchor_right = 1
+	screen_panel.offset_top = top_height + 8.0
+	screen_panel.offset_bottom = -(nav_height + 10.0)
 	screen_panel.offset_left = 8 if portrait else 14
 	screen_panel.offset_right = -8 if portrait else -14
 	if portrait:
 		pass_panel.visible = false
-	if _orientation_initialized and portrait != _was_portrait and screen_panel.visible:
-		show_screen.call_deferred(current_screen, false)
+	for page: VBoxContainer in _screen_pages.values():
+		if is_instance_valid(page):
+			ManagementScreens.apply_responsive_layout(page, self)
 	_was_portrait = portrait
 	_orientation_initialized = true
+	_update_nav_selection()
+
+
+func _detected_viewport_size() -> Vector2:
+	if DisplayServer.get_name() != "headless":
+		var window_size := Vector2(get_window().size)
+		if window_size.x > 0.0 and window_size.y > 0.0:
+			return window_size
+	if root != null and root.size.x > 0.0 and root.size.y > 0.0:
+		return root.size
+	return Vector2(1280, 720)
 
 
 func _build_theme() -> void:
@@ -935,6 +1269,26 @@ func _update_nav_selection() -> void:
 		button.add_theme_stylebox_override("normal", _button_style("yellow" if screen_panel.visible and screen_name == current_screen else "blue"))
 		if screen_name == "Ristorante" and not screen_panel.visible:
 			button.add_theme_stylebox_override("normal", _button_style("yellow"))
+	for screen_name: String in more_sheet_buttons:
+		var sheet_button: Button = more_sheet_buttons[screen_name]
+		sheet_button.add_theme_stylebox_override(
+			"normal",
+			_button_style(
+				"yellow"
+				if screen_panel.visible and screen_name == current_screen
+				else "blue"
+			)
+		)
+	if more_button != null:
+		var more_selected := (
+			more_sheet != null
+			and more_sheet.visible
+			or screen_panel.visible and current_screen in PHONE_MORE_SCREENS
+		)
+		more_button.add_theme_stylebox_override(
+			"normal",
+			_button_style("yellow" if more_selected else "blue")
+		)
 
 
 func _update_world_actions() -> void:

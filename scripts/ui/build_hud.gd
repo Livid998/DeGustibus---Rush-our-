@@ -112,9 +112,17 @@ func refresh_catalog() -> void:
 		if GameState.restaurant_state == "open" and not world.build_system.can_edit_definition(definition):
 			continue
 		var item_id := String(definition.id)
-		var button := ui.make_button("%s\n%d [coin]" % [definition.name, int(definition.price)], func(): world.build_system.start_place(item_id), "blue")
-		button.custom_minimum_size = Vector2(146, 64)
+		var beauty := float(definition.get("beauty", 0.0))
+		var beauty_line := "\n+%s bellezza" % str(snappedf(beauty, 0.1)) if beauty > 0.0 else ""
+		var button := ui.make_button(
+			"%s\n%d [coin]%s" % [definition.name, int(definition.price), beauty_line],
+			func(): world.build_system.start_place(item_id),
+			"blue"
+		)
+		button.custom_minimum_size = Vector2(154, 76 if beauty > 0.0 else 64)
 		button.tooltip_text = "%s · ingombro %s" % [definition.name, definition.footprint]
+		if beauty > 0.0:
+			button.tooltip_text += " · +%s bellezza sala" % str(snappedf(beauty, 0.1))
 		item_row.add_child(button)
 	for index: int in category_row.get_child_count():
 		var button := category_row.get_child(index) as Button
@@ -133,7 +141,20 @@ func refresh_actions() -> void:
 	label.add_theme_color_override("font_color", Color("294b50"))
 	if build.active:
 		var cost := 0 if build.move_source else int(build.current_definition.get("price", 0))
-		label.text = "%s  ·  %s%s" % [build.current_definition.get("name", "Oggetto"), build.reason, "  ·  %d monete" % cost if cost > 0 else ""]
+		var preview_beauty := world.beauty_preview(build.current_definition, build.preview_cell, build.move_source)
+		var beauty_suffix := ""
+		if float(preview_beauty.get("item_beauty", 0.0)) > 0.0:
+			beauty_suffix = "  ·  Bellezza %.0f → %.0f (%+.1f)" % [
+				float(preview_beauty.get("before", 0.0)),
+				float(preview_beauty.get("after", 0.0)),
+				float(preview_beauty.get("delta", 0.0)),
+			]
+		label.text = "%s  ·  %s%s%s" % [
+			build.current_definition.get("name", "Oggetto"),
+			build.reason,
+			"  ·  %d monete" % cost if cost > 0 else "",
+			beauty_suffix,
+		]
 		action_row.add_child(label)
 		if world.is_edge_placement(build.current_definition) or String(build.current_definition.get("placement", "cell")) == "wall_mount":
 			var previous := _action_button("Bordo prec.", build.rotate_preview_back, "ghost")
@@ -155,7 +176,14 @@ func refresh_actions() -> void:
 	elif build.selected_object and is_instance_valid(build.selected_object):
 		var selected := build.selected_object
 		var editable := build.can_edit_definition(selected.definition)
-		label.text = "%s  ·  cella %d,%d%s" % [selected.definition.name, selected.grid_cell.x, selected.grid_cell.y, "  ·  bloccato durante il servizio" if not editable else ""]
+		var selected_beauty := float(selected.definition.get("beauty", 0.0))
+		label.text = "%s  ·  cella %d,%d%s%s" % [
+			selected.definition.name,
+			selected.grid_cell.x,
+			selected.grid_cell.y,
+			"  ·  +%s bellezza" % str(snappedf(selected_beauty, 0.1)) if selected_beauty > 0.0 else "",
+			"  ·  bloccato durante il servizio" if not editable else "",
+		]
 		action_row.add_child(label)
 		var support := world.placed_objects.get(selected.support_uid) as PlacedObject
 		var attachments := world.attached_objects(selected.uid)
@@ -171,7 +199,11 @@ func refresh_actions() -> void:
 			action_row.add_child(_action_button(sell_label, build.sell_selected, "red"))
 		action_row.add_child(_action_button("Deseleziona", build.clear_selection, "ghost"))
 	else:
-		label.text = "Trascina per muovere la mappa · rotella/pinch per zoom · tocca un oggetto per modificarlo"
+		var ambience := world.ambience_snapshot()
+		label.text = "Trascina la mappa · rotella/pinch per zoom · Ambiente %.0f · Pulizia %.0f" % [
+			float(ambience.get("beauty_score", 0.0)),
+			float(ambience.get("cleanliness_score", 100.0)),
+		]
 		action_row.add_child(label)
 
 
