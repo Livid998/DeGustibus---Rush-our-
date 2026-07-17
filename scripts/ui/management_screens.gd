@@ -200,15 +200,126 @@ static func _recipe_unlock_missing_text(recipe: Dictionary) -> String:
 
 
 static func _stock(content: VBoxContainer, ui: RestaurantUI) -> void:
+	StorageManager.recalculate_layout_capacity()
 	var unlocked_count := 0
 	var low_count := 0
 	for ingredient: Dictionary in DataRegistry.ingredients:
 		var state: Dictionary = GameState.stock[ingredient.id]
 		if bool(state.unlocked):
 			unlocked_count += 1
-			if int(state.amount) <= int(state.threshold):
+			if StorageManager.available_amount(String(ingredient.id)) <= int(state.threshold):
 				low_count += 1
-	content.add_child(ui.make_section("Magazzino operativo", "%d ingredienti acquistabili · %d sotto soglia · %d consegne in arrivo" % [unlocked_count, low_count, GameState.deliveries.size()]))
+	var normal_batch := EconomyManager.normal_batch_snapshot()
+	var urgent_batch := EconomyManager.urgent_batch_snapshot()
+	var normal_count := _delivery_item_count(normal_batch.get("items", {}))
+	var urgent_count := _delivery_item_count(urgent_batch.get("items", {}))
+	content.add_child(ui.make_section(
+		"Magazzino operativo",
+		"%d ingredienti fisici · %d sotto soglia · prossimo batch tra %s · %d normali + %d urgenti" % [
+			unlocked_count,
+			low_count,
+			_format_countdown(float(normal_batch.get("remaining", 0.0))),
+			normal_count,
+			urgent_count
+		]
+	))
+
+	var capacity_card := ui.make_card()
+	var capacity_box := VBoxContainer.new()
+	capacity_box.add_theme_constant_override("separation", 9)
+	capacity_card.add_child(capacity_box)
+	var capacity_title := Label.new()
+	capacity_title.text = "CAPACITÀ DAL LAYOUT"
+	capacity_title.add_theme_font_override("font", GameFonts.bold())
+	capacity_title.add_theme_font_size_override("font_size", 19)
+	capacity_box.add_child(capacity_title)
+	var capacity_row := HBoxContainer.new()
+	capacity_row.add_theme_constant_override("separation", 14)
+	capacity_box.add_child(capacity_row)
+	for storage_type: String in ["ambient", "refrigerated"]:
+		var capacity_group := HBoxContainer.new()
+		capacity_group.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		var capacity_icon := _new_icon(GameIcons.casual_system_icon("storage_%s" % storage_type), Vector2(48, 48))
+		capacity_icon.tooltip_text = _storage_type_name(storage_type)
+		capacity_group.add_child(capacity_icon)
+		var capacity_label := Label.new()
+		capacity_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		var used := StorageManager.used_for(storage_type)
+		var capacity := StorageManager.capacity_for(storage_type)
+		var overflow_text := "\nSOVRACCARICO: nuovi acquisti bloccati" if StorageManager.is_overflowing(storage_type) else ""
+		capacity_label.text = "%s\n%d / %d unità%s" % [_storage_type_name(storage_type), used, capacity, overflow_text]
+		capacity_label.add_theme_font_override("font", GameFonts.semibold())
+		capacity_label.add_theme_color_override("font_color", Color("b94e48") if StorageManager.is_overflowing(storage_type) else Color("35685d"))
+		capacity_group.add_child(capacity_label)
+		capacity_row.add_child(capacity_group)
+	content.add_child(capacity_card)
+
+	var cart_card := ui.make_card()
+	var cart_box := VBoxContainer.new()
+	cart_box.add_theme_constant_override("separation", 8)
+	cart_card.add_child(cart_box)
+	var cart_header := HBoxContainer.new()
+	var delivery_icon := _new_icon(GameIcons.casual_system_icon("delivery_truck"), Vector2(44, 44))
+	delivery_icon.tooltip_text = "Prossima consegna"
+	cart_header.add_child(delivery_icon)
+	var cart_title := Label.new()
+	cart_title.text = "CARRELLO PROSSIMO BATCH"
+	cart_title.add_theme_font_override("font", GameFonts.bold())
+	cart_title.add_theme_font_size_override("font_size", 19)
+	cart_title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	cart_header.add_child(cart_title)
+	cart_box.add_child(cart_header)
+	var cart_items := EconomyManager.delivery_cart_snapshot()
+	var normal_preview := EconomyManager.delivery_preview(cart_items, false)
+	var urgent_preview := EconomyManager.delivery_preview(cart_items, true)
+	var cart_description := Label.new()
+	cart_description.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	if cart_items.is_empty():
+		cart_description.text = "Carrello vuoto. Aggiungi lotti dalle schede qui sotto."
+	else:
+		var item_names: Array[String] = []
+		for ingredient_id: String in cart_items:
+			var ingredient_name := String(DataRegistry.ingredients_by_id.get(ingredient_id, {"name": ingredient_id}).name)
+			item_names.append("%s x%d" % [ingredient_name, int(cart_items[ingredient_id])])
+		var forecast: Dictionary = normal_preview.forecast
+		cart_description.text = "%s\nCosto normale %d monete · previsto Ambiente %d/%d · Refrigerato %d/%d" % [
+			", ".join(item_names),
+			int(normal_preview.cost),
+			int(forecast.get("ambient", 0)),
+			StorageManager.capacity_for("ambient"),
+			int(forecast.get("refrigerated", 0)),
+			StorageManager.capacity_for("refrigerated")
+		]
+	cart_description.add_theme_color_override("font_color", Color("52686b"))
+	cart_box.add_child(cart_description)
+	var cart_controls := HBoxContainer.new()
+	var confirm_normal := ui.make_button("Conferma nel batch", func():
+		if EconomyManager.confirm_delivery_cart(false):
+			ui.show_toast("Carrello aggiunto alla prossima consegna", "income")
+		ui.refresh_screen()
+	, "green")
+	confirm_normal.icon = GameIcons.casual_system_icon("delivery_truck")
+	confirm_normal.disabled = cart_items.is_empty() or not bool(normal_preview.valid)
+	confirm_normal.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	cart_controls.add_child(confirm_normal)
+	var confirm_urgent := ui.make_button("Urgente · %d monete" % int(urgent_preview.cost), func():
+		if EconomyManager.confirm_delivery_cart(true):
+			ui.show_toast("Consegna urgente confermata", "income")
+		ui.refresh_screen()
+	, "red")
+	confirm_urgent.icon = GameIcons.casual_system_icon("delivery_truck")
+	confirm_urgent.disabled = cart_items.is_empty() or not bool(urgent_preview.valid)
+	confirm_urgent.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	cart_controls.add_child(confirm_urgent)
+	var clear_cart := ui.make_button("Svuota", func():
+		EconomyManager.clear_delivery_cart()
+		ui.refresh_screen()
+	, "ghost")
+	clear_cart.disabled = cart_items.is_empty()
+	cart_controls.add_child(clear_cart)
+	cart_box.add_child(cart_controls)
+	content.add_child(cart_card)
+
 	var grid := GridContainer.new()
 	grid.columns = 1 if ui.root.size.y > ui.root.size.x else 2
 	grid.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -222,11 +333,12 @@ static func _stock(content: VBoxContainer, ui: RestaurantUI) -> void:
 		var ingredient_id := String(ingredient.id)
 		var card := ui.make_card()
 		var box := VBoxContainer.new()
+		box.add_theme_constant_override("separation", 7)
 		card.add_child(box)
 		var heading := HBoxContainer.new()
-		var stock_icon := _new_icon(GameIcons.ingredient_icon(ingredient), Vector2(46, 46))
-		stock_icon.tooltip_text = String(ingredient.name)
-		heading.add_child(stock_icon)
+		var metadata := StorageManager.storage_metadata(ingredient_id)
+		var storage_type := String(metadata.storage_type)
+		heading.add_child(_warehouse_ingredient_icon(ingredient, storage_type))
 		var name := Label.new()
 		name.text = String(ingredient.name)
 		name.add_theme_font_override("font", GameFonts.semibold())
@@ -234,9 +346,10 @@ static func _stock(content: VBoxContainer, ui: RestaurantUI) -> void:
 		name.add_theme_font_size_override("font_size", 18)
 		heading.add_child(name)
 		var amount := Label.new()
-		amount.text = "%d / %d" % [int(entry.amount), int(entry.target)]
+		amount.text = "x%d" % int(entry.amount)
 		amount.add_theme_font_override("font", GameFonts.bold())
-		amount.add_theme_color_override("font_color", Color("c95360") if int(entry.amount) <= int(entry.threshold) else Color("1d8065"))
+		amount.add_theme_font_size_override("font_size", 20)
+		amount.add_theme_color_override("font_color", Color("c95360") if StorageManager.available_amount(ingredient_id) <= int(entry.threshold) else Color("1d8065"))
 		heading.add_child(amount)
 		box.add_child(heading)
 		var progress := ProgressBar.new()
@@ -247,14 +360,47 @@ static func _stock(content: VBoxContainer, ui: RestaurantUI) -> void:
 		progress.custom_minimum_size.y = 12
 		box.add_child(progress)
 		var stock_meta := Label.new()
-		stock_meta.text = "Qualità fornitura %d/3 · costo medio %.1f monete · lotto %d" % [int(entry.quality), float(entry.average_cost), int(entry.lot)]
+		var reserved := StorageManager.reserved_amount(ingredient_id)
+		var available := StorageManager.available_amount(ingredient_id)
+		stock_meta.text = "Disponibili %d · Riservati %d · Totale fisico %d\n%s · %d/%d unità · lotto %d" % [
+			available,
+			reserved,
+			int(entry.amount),
+			_storage_type_name(storage_type),
+			StorageManager.used_for(storage_type),
+			StorageManager.capacity_for(storage_type),
+			int(entry.lot)
+		]
 		stock_meta.add_theme_color_override("font_color", Color("60767a"))
+		stock_meta.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 		box.add_child(stock_meta)
+		var incoming := StorageManager.pending_delivery_summary(ingredient_id)
+		var incoming_label := Label.new()
+		if int(incoming.amount) > 0:
+			incoming_label.text = "Prossima consegna: +%d tra %s%s" % [
+				int(incoming.amount),
+				_format_countdown(float(incoming.remaining)),
+				" · urgente" if String(incoming.kind) == "urgent" else ""
+			]
+		else:
+			incoming_label.text = "Prossima consegna: nessuna quantità prenotata"
+		incoming_label.add_theme_color_override("font_color", Color("4a7277"))
+		box.add_child(incoming_label)
+		var linked_sold_out := _linked_auto_sold_out_recipes(ingredient_id)
+		var sold_out_label := Label.new()
+		sold_out_label.text = "Esaurimento automatico: %s" % (", ".join(linked_sold_out) if not linked_sold_out.is_empty() else "nessuna ricetta collegata")
+		sold_out_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		sold_out_label.add_theme_color_override("font_color", Color("b94e48") if not linked_sold_out.is_empty() else Color("60767a"))
+		box.add_child(sold_out_label)
 		var controls := HBoxContainer.new()
 		var auto := CheckBox.new()
 		auto.text = "Riordino auto"
 		auto.button_pressed = bool(entry.auto_reorder)
-		auto.toggled.connect(func(value: bool): GameState.stock[ingredient_id].auto_reorder = value; if ingredient_id == "tomato" and value: ui.advance_tutorial_to(3))
+		auto.toggled.connect(func(value: bool):
+			StorageManager.set_auto_reorder(ingredient_id, value)
+			if ingredient_id == "tomato" and value:
+				ui.advance_tutorial_to(3)
+		)
 		controls.add_child(auto)
 		var threshold := SpinBox.new()
 		threshold.min_value = 0
@@ -262,7 +408,7 @@ static func _stock(content: VBoxContainer, ui: RestaurantUI) -> void:
 		threshold.value = int(entry.threshold)
 		threshold.prefix = "Soglia "
 		threshold.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		threshold.value_changed.connect(func(value: float): GameState.stock[ingredient_id].threshold = int(value))
+		threshold.value_changed.connect(func(value: float): StorageManager.set_reorder_threshold(ingredient_id, int(value)))
 		controls.add_child(threshold)
 		var target := SpinBox.new()
 		target.min_value = 1
@@ -270,7 +416,7 @@ static func _stock(content: VBoxContainer, ui: RestaurantUI) -> void:
 		target.value = int(entry.target)
 		target.prefix = "Target "
 		target.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		target.value_changed.connect(func(value: float): GameState.stock[ingredient_id].target = int(value))
+		target.value_changed.connect(func(value: float): StorageManager.set_stock_target(ingredient_id, int(value)))
 		controls.add_child(target)
 		box.add_child(controls)
 		var purchase := HBoxContainer.new()
@@ -284,7 +430,7 @@ static func _stock(content: VBoxContainer, ui: RestaurantUI) -> void:
 				selected_index = index
 		supplier.select(selected_index)
 		supplier.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		supplier.item_selected.connect(func(index: int): GameState.stock[ingredient_id].supplier = supplier.get_item_metadata(index))
+		supplier.item_selected.connect(func(index: int): StorageManager.set_supplier(ingredient_id, String(supplier.get_item_metadata(index))))
 		purchase.add_child(supplier)
 		var lot := SpinBox.new()
 		lot.min_value = 1
@@ -292,11 +438,20 @@ static func _stock(content: VBoxContainer, ui: RestaurantUI) -> void:
 		lot.value = int(entry.lot)
 		lot.prefix = "Lotto "
 		lot.custom_minimum_size.x = 115
-		lot.value_changed.connect(func(value: float): GameState.stock[ingredient_id].lot = int(value))
+		lot.value_changed.connect(func(value: float): StorageManager.set_lot_size(ingredient_id, int(value)))
 		purchase.add_child(lot)
-		var urgent := ui.make_button("Ordina lotto", func(): EconomyManager.order_stock(ingredient_id, int(GameState.stock[ingredient_id].lot), true), "red")
-		urgent.custom_minimum_size = Vector2(130, 42)
-		purchase.add_child(urgent)
+		var remove_cart := ui.make_button("- Lotto", func():
+			EconomyManager.remove_from_delivery_cart(ingredient_id, int(GameState.stock[ingredient_id].lot))
+			ui.refresh_screen()
+		, "ghost")
+		remove_cart.custom_minimum_size = Vector2(92, 42)
+		purchase.add_child(remove_cart)
+		var add_cart := ui.make_button("+ Lotto", func():
+			EconomyManager.add_to_delivery_cart(ingredient_id, int(GameState.stock[ingredient_id].lot))
+			ui.refresh_screen()
+		, "yellow")
+		add_cart.custom_minimum_size = Vector2(92, 42)
+		purchase.add_child(add_cart)
 		box.add_child(purchase)
 		grid.add_child(card)
 
@@ -553,14 +708,11 @@ static func _album_detail_text(ingredient: Dictionary, amount_or_entry: Variant 
 
 
 static func _missing_ingredients(recipe: Dictionary) -> Array[String]:
-	var required: Dictionary = {}
-	for step: Dictionary in recipe.steps:
-		for ingredient_id: String in step.get("inputs", {}):
-			required[ingredient_id] = int(required.get(ingredient_id, 0)) + int(step.inputs[ingredient_id])
+	var required := DataRegistry.recipe_raw_requirements(recipe)
 	var missing: Array[String] = []
 	for ingredient_id: String in required:
 		var entry: Dictionary = GameState.stock.get(ingredient_id, {})
-		if not bool(entry.get("unlocked", false)) or int(entry.get("amount", 0)) < int(required[ingredient_id]):
+		if not bool(entry.get("unlocked", false)) or StorageManager.available_amount(ingredient_id) < int(required[ingredient_id]):
 			missing.append(String(DataRegistry.ingredients_by_id.get(ingredient_id, {"name": ingredient_id}).name))
 	return missing
 
@@ -962,6 +1114,62 @@ static func _new_icon(texture: Texture2D, minimum_size: Vector2, locked: bool = 
 	if locked:
 		icon.modulate = Color("686868")
 	return icon
+
+
+static func _warehouse_ingredient_icon(ingredient: Dictionary, storage_type: String) -> Control:
+	var stack := Control.new()
+	stack.custom_minimum_size = Vector2(72, 72)
+	stack.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var background := TextureRect.new()
+	background.texture = GameIcons.casual_system_icon("storage_%s" % storage_type)
+	background.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	background.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	background.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	background.texture_filter = CanvasItem.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
+	background.modulate = Color(1.0, 1.0, 1.0, 0.92)
+	background.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	stack.add_child(background)
+	var foreground := TextureRect.new()
+	foreground.texture = GameIcons.ingredient_icon(ingredient)
+	foreground.position = Vector2(16, 13)
+	foreground.size = Vector2(40, 40)
+	foreground.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	foreground.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	foreground.texture_filter = CanvasItem.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
+	foreground.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	stack.add_child(foreground)
+	stack.tooltip_text = "%s · %s" % [String(ingredient.get("name", "")), _storage_type_name(storage_type)]
+	return stack
+
+
+static func _delivery_item_count(items: Variant) -> int:
+	if not items is Dictionary:
+		return 0
+	var total := 0
+	for ingredient_id: String in items:
+		var value: Variant = (items as Dictionary)[ingredient_id]
+		total += maxi(int((value as Dictionary).get("amount", 0)) if value is Dictionary else int(value), 0)
+	return total
+
+
+static func _format_countdown(seconds: float) -> String:
+	var rounded := maxi(int(ceil(maxf(seconds, 0.0))), 0)
+	return "%02d:%02d" % [rounded / 60, rounded % 60]
+
+
+static func _storage_type_name(storage_type: String) -> String:
+	return "Refrigerato" if storage_type == "refrigerated" else "Ambiente"
+
+
+static func _linked_auto_sold_out_recipes(ingredient_id: String) -> Array[String]:
+	var result: Array[String] = []
+	for recipe: Dictionary in DataRegistry.recipes:
+		if not DataRegistry.recipe_raw_requirements(recipe).has(ingredient_id):
+			continue
+		var state: Dictionary = GameState.menu.get(String(recipe.id), {})
+		if bool(state.get("auto_sold_out", false)):
+			result.append(String(recipe.name))
+	return result
 
 
 static func _station_names(station_ids: Array) -> Array[String]:

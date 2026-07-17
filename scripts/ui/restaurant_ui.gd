@@ -18,8 +18,12 @@ var money_label: Label
 var reputation_label: Label
 var state_button: Button
 var clock_label: Label
+var period_icon_rect: TextureRect
+var rush_status_label: Label
+var rush_progress: ProgressBar
 var customer_label: Label
 var speed_icon_rect: TextureRect
+var speed_selector: OptionButton
 var build_hud: BuildHUD
 var nav_buttons: Dictionary = {}
 var screen_title_label: Label
@@ -50,9 +54,11 @@ const TUTORIAL_STEPS := [
 
 
 func _ready() -> void:
+	process_mode = Node.PROCESS_MODE_ALWAYS
 	_build_theme()
 	_build_shell()
 	_connect_state()
+	_connect_day_cycle()
 	_update_top_bar()
 	_update_pass()
 	_update_tutorial()
@@ -69,7 +75,9 @@ func setup(value_world: RestaurantWorld) -> void:
 
 
 func _process(delta: float) -> void:
-	var market_changed := market_provider.tick(delta * SimulationManager.simulation_speed)
+	var cycle := _day_cycle()
+	var simulation_paused := cycle != null and bool(cycle.get("paused"))
+	var market_changed := market_provider.tick(0.0 if simulation_paused else delta * SimulationManager.simulation_speed)
 	_market_refresh_clock -= delta
 	_refresh_clock += delta
 	_pass_refresh_clock += delta
@@ -88,11 +96,11 @@ func _process(delta: float) -> void:
 	if Input.is_action_just_pressed("toggle_debug"):
 		debug_panel.visible = not debug_panel.visible
 	if Input.is_action_just_pressed("speed_1"):
-		SimulationManager.set_speed(1.0)
+		_select_simulation_speed(1.0)
 	if Input.is_action_just_pressed("speed_2"):
-		SimulationManager.set_speed(2.0)
+		_select_simulation_speed(2.0)
 	if Input.is_action_just_pressed("speed_4"):
-		SimulationManager.set_speed(4.0)
+		_select_simulation_speed(4.0)
 
 
 func show_screen(screen_name: String, sound: bool = true) -> void:
@@ -286,26 +294,40 @@ func _build_top_bar() -> void:
 	state_button = make_button("CHIUSO", _toggle_restaurant, "red")
 	state_button.custom_minimum_size.x = 250
 	clock_label = Label.new()
-	clock_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	clock_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	clock_label.add_theme_color_override("font_color", Color("f5fbf9"))
+	clock_label.add_theme_font_override("font", GameFonts.bold())
+	rush_status_label = Label.new()
+	rush_status_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	rush_status_label.add_theme_font_size_override("font_size", 11)
+	rush_status_label.add_theme_color_override("font_color", Color("b9d9d4"))
+	rush_progress = ProgressBar.new()
+	rush_progress.custom_minimum_size.y = 5
+	rush_progress.max_value = 1.0
+	rush_progress.show_percentage = false
+	var clock_stack := VBoxContainer.new()
+	clock_stack.custom_minimum_size.x = 220
+	clock_stack.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	clock_stack.add_theme_constant_override("separation", 1)
+	clock_stack.add_child(clock_label)
+	clock_stack.add_child(rush_status_label)
+	clock_stack.add_child(rush_progress)
+	period_icon_rect = _top_bar_icon(GameIcons.casual_system_icon("sun"))
 	customer_label = Label.new()
 	customer_label.add_theme_color_override("font_color", Color("f5fbf9"))
-	var speed := OptionButton.new()
-	for label: String in ["1x", "2x", "4x"]:
-		speed.add_item(label)
+	speed_selector = OptionButton.new()
+	for label: String in ["0x", "1x", "2x", "4x"]:
+		speed_selector.add_item(label)
 	speed_icon_rect = _top_bar_icon(GameIcons.speed_icon(0))
-	speed.item_selected.connect(func(index: int):
-		SimulationManager.set_speed([1.0, 2.0, 4.0][index])
-		speed_icon_rect.texture = GameIcons.speed_icon(index)
-	)
+	speed_selector.item_selected.connect(_on_speed_selected)
 	row.add_child(money_group)
 	row.add_child(reputation_group)
 	row.add_child(state_button)
-	row.add_child(clock_label)
+	row.add_child(period_icon_rect)
+	row.add_child(clock_stack)
 	row.add_child(customer_label)
 	row.add_child(speed_icon_rect)
-	row.add_child(speed)
+	row.add_child(speed_selector)
 
 
 func _top_bar_icon(texture: Texture2D) -> TextureRect:
@@ -317,6 +339,89 @@ func _top_bar_icon(texture: Texture2D) -> TextureRect:
 	icon.texture_filter = CanvasItem.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
 	icon.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	return icon
+
+
+func _day_cycle() -> Node:
+	if not is_inside_tree():
+		return null
+	return get_tree().root.get_node_or_null("DayCycleManager")
+
+
+func _connect_day_cycle() -> void:
+	var cycle := _day_cycle()
+	if cycle == null:
+		return
+	_connect_cycle_signal(cycle, "minute_changed", "_on_day_cycle_minute_changed")
+	_connect_cycle_signal(cycle, "period_changed", "_on_day_cycle_period_changed")
+	_connect_cycle_signal(cycle, "rush_warning", "_on_day_cycle_rush_warning")
+	_connect_cycle_signal(cycle, "rush_started", "_on_day_cycle_rush_changed")
+	_connect_cycle_signal(cycle, "rush_ended", "_on_day_cycle_rush_changed")
+	_connect_cycle_signal(cycle, "pause_changed", "_on_day_cycle_pause_changed")
+
+
+func _connect_cycle_signal(cycle: Node, signal_name: String, method_name: String) -> void:
+	if not cycle.has_signal(signal_name):
+		return
+	var callback := Callable(self, method_name)
+	if not cycle.is_connected(signal_name, callback):
+		cycle.connect(signal_name, callback)
+
+
+func _on_day_cycle_minute_changed(_day: int, _minute: int) -> void:
+	_update_top_bar()
+
+
+func _on_day_cycle_period_changed(_period_id: String) -> void:
+	_update_top_bar()
+
+
+func _on_day_cycle_rush_warning(_rush_id: String, _seconds_remaining: float) -> void:
+	_update_top_bar()
+
+
+func _on_day_cycle_rush_changed(_rush_id: String) -> void:
+	_update_top_bar()
+
+
+func _on_day_cycle_pause_changed(_paused: bool) -> void:
+	_update_top_bar()
+
+
+func _on_speed_selected(index: int) -> void:
+	var cycle := _day_cycle()
+	if index == 0:
+		if cycle != null and cycle.has_method("set_paused"):
+			cycle.call("set_paused", true)
+		_sync_speed_controls()
+		return
+	_select_simulation_speed([1.0, 2.0, 4.0][clampi(index - 1, 0, 2)])
+
+
+func _select_simulation_speed(speed: float) -> void:
+	var cycle := _day_cycle()
+	if cycle != null and cycle.has_method("set_paused"):
+		cycle.call("set_paused", false)
+	SimulationManager.set_speed(speed)
+	_sync_speed_controls()
+	_update_top_bar()
+
+
+func _sync_speed_controls() -> void:
+	if speed_selector == null or speed_icon_rect == null:
+		return
+	var cycle := _day_cycle()
+	var is_paused := cycle != null and bool(cycle.get("paused"))
+	if is_paused:
+		speed_selector.select(0)
+		speed_icon_rect.texture = GameIcons.pause_icon()
+		return
+	var speed_index := 0
+	if SimulationManager.simulation_speed >= 3.0:
+		speed_index = 2
+	elif SimulationManager.simulation_speed >= 1.5:
+		speed_index = 1
+	speed_selector.select(speed_index + 1)
+	speed_icon_rect.texture = GameIcons.speed_icon(speed_index)
 
 
 func _build_bottom_nav() -> void:
@@ -537,7 +642,7 @@ func _build_debug_actions() -> void:
 		["Riempi magazzino", func(): _debug_fill_stock(99)],
 		["Svuota magazzino", func(): _debug_fill_stock(0)],
 		["Genera clienti", func(): world.spawn_customer_group()],
-		["Rush hour", func(): world.set_rush_mode(true); show_toast("Rush hour avviata", "warning")],
+		["Forza rush debug", func(): world.set_rush_mode(true); show_toast("Rush debug avviato", "warning")],
 		["Chiudi immediatamente", SimulationManager.close_immediately],
 		["Mostra griglia", func(): world.toggle_debug_grid(); show_toast("Griglia logica: %s" % world.show_grid)],
 		["Mostra percorsi", func(): world.toggle_debug_paths(); show_toast("Percorsi: %s" % world.show_paths)],
@@ -552,8 +657,8 @@ func _build_debug_actions() -> void:
 func _toggle_restaurant() -> void:
 	match GameState.restaurant_state:
 		"closed":
-			SimulationManager.open_restaurant()
-			advance_tutorial_to(4)
+			if SimulationManager.open_restaurant():
+				advance_tutorial_to(4)
 		"open":
 			SimulationManager.request_close()
 		"closing":
@@ -568,9 +673,44 @@ func _update_top_bar() -> void:
 	var states := {"closed":"RISTORANTE CHIUSO", "open":"RISTORANTE APERTO", "closing":"IN CHIUSURA"}
 	state_button.text = states.get(GameState.restaurant_state, GameState.restaurant_state)
 	state_button.add_theme_stylebox_override("normal", _button_style("green" if GameState.restaurant_state == "open" else "yellow" if GameState.restaurant_state == "closing" else "red"))
-	var minutes := int(GameState.service_seconds) / 60
-	var seconds := int(GameState.service_seconds) % 60
-	clock_label.text = "%02d:%02d · %.0fx" % [minutes, seconds, SimulationManager.simulation_speed]
+	var cycle := _day_cycle()
+	if cycle != null:
+		var period_id := String(cycle.get("current_period_id"))
+		var period_name := String(cycle.call("period_display_name", period_id))
+		clock_label.text = "Giorno %d | %s | %s" % [int(cycle.get("day")), String(cycle.call("formatted_time")), period_name]
+		var rush: Dictionary = cycle.call("rush_status", SimulationManager.simulation_speed)
+		var rush_phase := String(rush.get("phase", "idle"))
+		var rush_id := String(rush.get("id", ""))
+		var seconds_remaining := float(rush.get("seconds_remaining", -1.0))
+		var traffic_warning := ""
+		if world != null and world.has_method("traffic_flow_status"):
+			traffic_warning = String((world.traffic_flow_status() as Dictionary).get("warning", ""))
+		if rush_phase == "warning":
+			rush_status_label.text = "Rush %s tra %ds" % [String(cycle.call("period_display_name", rush_id)), ceili(seconds_remaining)]
+			rush_status_label.add_theme_color_override("font_color", Color("ffe48c"))
+		elif rush_phase == "active":
+			rush_status_label.text = "RUSH %s%s" % [
+				String(cycle.call("period_display_name", rush_id)).to_upper(),
+				" | %ds" % ceili(seconds_remaining) if seconds_remaining >= 0.0 else "",
+			]
+			rush_status_label.add_theme_color_override("font_color", Color("ffb17f"))
+		elif not traffic_warning.is_empty():
+			rush_status_label.text = traffic_warning
+			rush_status_label.add_theme_color_override("font_color", Color("ffe48c"))
+		else:
+			rush_status_label.text = "Afflusso regolare"
+			rush_status_label.add_theme_color_override("font_color", Color("b9d9d4"))
+		rush_progress.visible = rush_phase in ["warning", "active"]
+		rush_progress.value = float(rush.get("progress", 0.0))
+		period_icon_rect.texture = GameIcons.casual_system_icon("rush" if rush_phase in ["warning", "active"] else "moon" if period_id == "night" else "sun")
+	else:
+		var minutes := int(GameState.service_seconds) / 60
+		var seconds := int(GameState.service_seconds) % 60
+		clock_label.text = "%02d:%02d" % [minutes, seconds]
+		rush_status_label.text = "Ciclo giornaliero non disponibile"
+		rush_progress.visible = false
+		period_icon_rect.texture = GameIcons.casual_system_icon("sun")
+	_sync_speed_controls()
 	var guest_count := 0
 	for customer: Node in SimulationManager.customers:
 		guest_count += int(customer.get("group_size"))

@@ -1,0 +1,21 @@
+[
+  {"id":"casual_bald","name":"Casual rasato","appearance":"Casual_Bald","model":"res://assets/characters/Casual_Bald.gltf"},
+  {"id":"casual_female","name":"Casual donna","appearance":"Casual_Female","model":"res://assets/characters/Casual_Female.gltf"},
+  {"id":"casual_male","name":"Casual uomo","appearance":"Casual_Male","model":"res://assets/characters/Casual_Male.gltf"},
+  {"id":"casual_2_female","name":"Casual 2 donna","appearance":"Casual2_Female","model":"res://assets/characters/Casual2_Female.gltf"},
+  {"id":"casual_2_male","name":"Casual 2 uomo","appearance":"Casual2_Male","model":"res://assets/characters/Casual2_Male.gltf"},
+  {"id":"casual_3_female","name":"Casual 3 donna","appearance":"Casual3_Female","model":"res://assets/characters/Casual3_Female.gltf"},
+  {"id":"casual_3_male","name":"Casual 3 uomo","appearance":"Casual3_Male","model":"res://assets/characters/Casual3_Male.gltf"},
+  {"id":"chef_female","name":"Chef donna","appearance":"Chef_Female","model":"res://assets/characters/Chef_Female.gltf"},
+  {"id":"chef_male","name":"Chef uomo","appearance":"Chef_Male","model":"res://assets/characters/Chef_Male.gltf"},
+  {"id":"doctor_female_old","name":"Dottoressa senior","appearance":"Doctor_Female_Old","model":"res://assets/characters/Doctor_Female_Old.gltf"},
+  {"id":"doctor_female_young","name":"Dottoressa","appearance":"Doctor_Female_Young","model":"res://assets/characters/Doctor_Female_Young.gltf"},
+  {"id":"doctor_male_old","name":"Dottore senior","appearance":"Doctor_Male_Old","model":"res://assets/characters/Doctor_Male_Old.gltf"},
+  {"id":"doctor_male_young","name":"Dottore","appearance":"Doctor_Male_Young","model":"res://assets/characters/Doctor_Male_Young.gltf"},
+  {"id":"old_classy_female","name":"Elegante senior donna","appearance":"OldClassy_Female","model":"res://assets/characters/OldClassy_Female.gltf"},
+  {"id":"old_classy_male","name":"Elegante senior uomo","appearance":"OldClassy_Male","model":"res://assets/characters/OldClassy_Male.gltf"},
+  {"id":"suit_female","name":"Completo elegante donna","appearance":"Suit_Female","model":"res://assets/characters/Suit_Female.gltf"},
+  {"id":"suit_male","name":"Completo elegante uomo","appearance":"Suit_Male","model":"res://assets/characters/Suit_Male.gltf"},
+  {"id":"worker_female","name":"Lavoratrice","appearance":"Worker_Female","model":"res://assets/characters/Worker_Female.gltf"},
+  {"id":"worker_male","name":"Lavoratore","appearance":"Worker_Male","model":"res://assets/characters/Worker_Male.gltf"}
+]

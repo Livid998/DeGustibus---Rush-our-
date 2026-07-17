@@ -132,6 +132,10 @@ func _process(delta: float) -> void:
 			_set_people_mode("conversation", false)
 			if state_elapsed > patience * 1.8:
 				_leave_lost("CONTO IN RITARDO")
+		"change_order":
+			_set_people_mode("conversation", false)
+			if state_elapsed > patience * 1.2:
+				_leave_lost("CAMBIO ORDINE IN RITARDO")
 		"waiting_exit_door":
 			if world.try_begin_customer_exit(self):
 				_begin_exit_sequence()
@@ -315,6 +319,15 @@ func _return_to_queue() -> void:
 	_refresh_queue_targets(true)
 
 
+func order_requires_change(order_id: String, _reason: String = "") -> void:
+	if _local_order(order_id).is_empty() or state in ["standing_to_leave", "waiting_exit_door", "leaving"]:
+		return
+	_set_state("change_order")
+	_set_people_mode("conversation", false)
+	_thought.text = "CAMBIO ORDINE"
+	_thought.visible = true
+
+
 func service_completed(action: String, payload: Dictionary) -> void:
 	match action:
 		"take_order":
@@ -327,13 +340,17 @@ func service_completed(action: String, payload: Dictionary) -> void:
 			_diner_eat_total.clear()
 			_diner_finished.clear()
 			for guest_index: int in group_size:
-				var recipe := _choose_recipe()
-				if recipe.is_empty():
-					continue
-				var order := SimulationManager.create_order(recipe.id, String(table.get("uid", "")), self)
-				if not order.is_empty():
-					order.diner_index = guest_index
-					orders.append(order)
+				var excluded: Dictionary = {}
+				while excluded.size() < DataRegistry.recipes.size():
+					var recipe := _choose_recipe(excluded)
+					if recipe.is_empty():
+						break
+					var order := SimulationManager.create_order(recipe.id, String(table.get("uid", "")), self)
+					if not order.is_empty():
+						order.diner_index = guest_index
+						orders.append(order)
+						break
+					excluded[String(recipe.id)] = true
 			if orders.size() != group_size:
 				_leave_lost("MENU NON DISPONIBILE")
 				return
@@ -370,6 +387,28 @@ func service_completed(action: String, payload: Dictionary) -> void:
 			_thought.visible = true
 			AudioManager.play_feedback("income")
 			_begin_leaving(false)
+		"change_order":
+			if state != "change_order" or not _seated or not _owns_reserved_table():
+				return
+			var order_id := String(payload.get("order_id", ""))
+			var changed_order: Dictionary = SimulationManager.orders.get(order_id, {})
+			if changed_order.is_empty() or String(changed_order.get("state", "")) != "change_order":
+				return
+			var alternatives := SimulationManager.order_change_alternatives(order_id, budget)
+			if alternatives.is_empty():
+				SimulationManager.cancel_order(order_id, "no_affordable_alternative")
+				_leave_lost("NESSUNA ALTERNATIVA")
+				return
+			var delay := maxf(GameState.service_seconds - float(changed_order.get("change_requested_at", GameState.service_seconds)), 0.0)
+			var replacement: Dictionary = SimulationManager.complete_order_change(order_id, String(alternatives[0].id), delay)
+			if replacement.is_empty():
+				SimulationManager.cancel_order(order_id, "replacement_reservation_failed")
+				_leave_lost("NESSUNA ALTERNATIVA")
+				return
+			satisfaction = maxf(satisfaction - float(replacement.get("satisfaction_penalty", 0.0)), 0.25)
+			_thought.text = "CAMBIO ORDINE"
+			_thought.visible = true
+			_set_state("eating" if not served_order_ids.is_empty() else "waiting_food")
 
 
 func _update_dining(delta: float) -> void:
@@ -407,6 +446,9 @@ func accepts_service_action(action: String, payload: Dictionary = {}) -> bool:
 			var order_id := String(payload.get("order_id", ""))
 			return state in ["waiting_food", "eating"] and _seated and _owns_reserved_table() and not served_order_ids.has(order_id) and not _local_order(order_id).is_empty() and _order_is_ready_to_serve(order_id)
 		"payment": return state == "waiting_payment" and _seated and not _payment_committed and served_order_ids.size() == orders.size() and not orders.is_empty()
+		"change_order":
+			var order_id := String(payload.get("order_id", ""))
+			return state == "change_order" and _seated and _owns_reserved_table() and not _local_order(order_id).is_empty() and String(SimulationManager.orders.get(order_id, {}).get("state", "")) == "change_order"
 	return false
 
 
@@ -421,12 +463,14 @@ func _request_service_once(action: String, payload: Dictionary = {}) -> void:
 		_service_request_ids[action] = String(task.id)
 
 
-func _choose_recipe() -> Dictionary:
+func _choose_recipe(excluded: Dictionary = {}) -> Dictionary:
 	var candidates: Array = []
 	var weights: Array[float] = []
 	for recipe: Dictionary in DataRegistry.active_recipes(GameState.menu):
+		if excluded.has(String(recipe.id)):
+			continue
 		var price := int(GameState.menu[recipe.id].price)
-		if price > budget or bool(GameState.menu[recipe.id].sold_out):
+		if price > budget or GameState.is_recipe_sold_out(String(recipe.id)):
 			continue
 		candidates.append(recipe)
 		var weight := float(recipe.get("popularity", 1.0))

@@ -18,21 +18,23 @@ var _pity_progress := 0
 
 func _ready() -> void:
 	_reward_rng.randomize()
+	_pity_progress = maxi(int(GameState.progress.get("album_reward_pity", 0)), 0)
 
 
 func set_reward_seed(seed_value: int, pity_progress: int = 0) -> void:
 	_reward_rng.seed = seed_value
-	_pity_progress = maxi(pity_progress, 0)
+	_set_pity_progress(pity_progress)
 
 
 func inject_reward_rng(value: RandomNumberGenerator, pity_progress: int = 0) -> void:
 	if value == null:
 		return
 	_reward_rng = value
-	_pity_progress = maxi(pity_progress, 0)
+	_set_pity_progress(pity_progress)
 
 
 func reward_pity_progress() -> int:
+	_sync_pity_from_state()
 	return _pity_progress
 
 
@@ -102,6 +104,7 @@ func debug_remove(ingredient_id: String, amount: int = 1) -> bool:
 
 
 func grant_weighted_reward(source: String, quantity_override: int = -1) -> Dictionary:
+	_sync_pity_from_state()
 	var all_candidates: Array[String] = []
 	for ingredient: Dictionary in DataRegistry.ingredients:
 		all_candidates.append(String(ingredient.id))
@@ -125,9 +128,9 @@ func grant_weighted_reward(source: String, quantity_override: int = -1) -> Dicti
 		return {}
 
 	if useful.has(ingredient_id):
-		_pity_progress = 0
+		_set_pity_progress(0)
 	else:
-		_pity_progress += 1
+		_set_pity_progress(_pity_progress + 1)
 	return {
 		"ingredient_id": ingredient_id,
 		"amount": quantity,
@@ -243,6 +246,19 @@ func _set_review_reward_progress(value: int) -> void:
 	GameState.review_reward_progress = sanitized
 	GameState.review_reward_progress_changed.emit(sanitized)
 	GameState.mark_save_dirty()
+
+
+func _set_pity_progress(value: int) -> void:
+	var sanitized := maxi(value, 0)
+	_pity_progress = sanitized
+	if int(GameState.progress.get("album_reward_pity", 0)) == sanitized:
+		return
+	GameState.progress["album_reward_pity"] = sanitized
+	GameState.mark_save_dirty()
+
+
+func _sync_pity_from_state() -> void:
+	_pity_progress = maxi(int(GameState.progress.get("album_reward_pity", _pity_progress)), 0)
 
 
 func _restore_album_amounts(previous_amounts: Dictionary) -> void:

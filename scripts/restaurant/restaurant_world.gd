@@ -39,11 +39,16 @@ var object_root: Node3D
 var preview_root: Node3D
 var build_system: BuildSystem
 var camera_rig: RestaurantCamera
-var rush_mode := false
 var show_grid := false
 var show_paths := false
 var show_station_queues := false
 var _spawn_clock := 0.0
+var _day_cycle_manager: Node
+var _world_environment: WorldEnvironment
+var _sun_light: DirectionalLight3D
+var _last_lighting_minute := -1
+var _traffic_recipe_warning := false
+var _debug_force_rush_fallback := false
 var floor_root: Node3D
 var floor_tiles: Dictionary = {}
 var floor_batches: Dictionary = {}
@@ -77,6 +82,7 @@ func _ready() -> void:
 	load_layout()
 	spawn_staff()
 	SimulationManager.bind_world(self)
+	_bind_day_cycle()
 	if not GameState.layout_changed.is_connected(refresh_shell_cutaway):
 		GameState.layout_changed.connect(refresh_shell_cutaway)
 	if not WebPlatformProfile.quality_changed.is_connected(apply_graphics_quality):
@@ -105,10 +111,13 @@ func _process(delta: float) -> void:
 	if _spill_clock <= 0.0:
 		_spill_clock = randf_range(22.0, 34.0)
 		_spawn_service_spill()
-	var maximum := 8 if rush_mode else 5
-	if _spawn_clock <= 0.0 and SimulationManager.customers.size() < maximum:
-		spawn_customer_group()
-		_spawn_clock = randf_range(1.8, 3.2) if rush_mode else randf_range(4.2, 6.5)
+	var has_producible_recipe := has_producible_active_recipe()
+	_traffic_recipe_warning = not has_producible_recipe
+	var maximum := customer_group_cap()
+	if _spawn_clock <= 0.0:
+		if maximum > 0 and SimulationManager.customers.size() < maximum:
+			spawn_customer_group()
+		_spawn_clock = effective_customer_spawn_interval(has_producible_recipe)
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -177,8 +186,8 @@ func _create_roots() -> void:
 
 
 func _create_environment() -> void:
-	var world_environment := WorldEnvironment.new()
-	world_environment.name = "WorldEnvironment"
+	_world_environment = WorldEnvironment.new()
+	_world_environment.name = "WorldEnvironment"
 	var environment := Environment.new()
 	environment.background_mode = Environment.BG_COLOR
 	environment.background_color = Color("91bdc1")
@@ -187,23 +196,75 @@ func _create_environment() -> void:
 	environment.ambient_light_energy = 0.38
 	environment.tonemap_mode = Environment.TONE_MAPPER_LINEAR
 	environment.fog_enabled = false
-	world_environment.environment = environment
-	add_child(world_environment)
-	var sun := DirectionalLight3D.new()
-	sun.name = "Sun"
-	sun.rotation_degrees = Vector3(-58, -35, 0)
-	sun.light_color = Color("fff7e8")
-	sun.light_energy = 0.84
-	sun.shadow_enabled = WebPlatformProfile.shadows_enabled()
-	sun.directional_shadow_max_distance = WebPlatformProfile.shadow_distance()
-	add_child(sun)
+	_world_environment.environment = environment
+	add_child(_world_environment)
+	_sun_light = DirectionalLight3D.new()
+	_sun_light.name = "Sun"
+	_sun_light.rotation_degrees = Vector3(-58, -35, 0)
+	_sun_light.light_color = Color("fff7e8")
+	_sun_light.light_energy = 0.84
+	_sun_light.shadow_enabled = WebPlatformProfile.shadows_enabled()
+	_sun_light.directional_shadow_max_distance = WebPlatformProfile.shadow_distance()
+	add_child(_sun_light)
 
 
 func apply_graphics_quality(_preset: String = "auto") -> void:
-	var sun := get_node_or_null("Sun") as DirectionalLight3D
+	var sun := _sun_light if _sun_light != null else get_node_or_null("Sun") as DirectionalLight3D
 	if sun != null:
 		sun.shadow_enabled = WebPlatformProfile.shadows_enabled()
 		sun.directional_shadow_max_distance = WebPlatformProfile.shadow_distance()
+
+
+func _bind_day_cycle() -> void:
+	_day_cycle_manager = get_tree().root.get_node_or_null("DayCycleManager")
+	if _day_cycle_manager != null and _day_cycle_manager.has_signal("minute_changed"):
+		var callback := Callable(self, "_on_day_cycle_minute_changed")
+		if not _day_cycle_manager.is_connected("minute_changed", callback):
+			_day_cycle_manager.connect("minute_changed", callback)
+	_apply_day_cycle_lighting()
+
+
+func _on_day_cycle_minute_changed(_day: int, current_minute: int) -> void:
+	if current_minute == _last_lighting_minute:
+		return
+	_last_lighting_minute = current_minute
+	_apply_day_cycle_lighting()
+
+
+func _apply_day_cycle_lighting() -> void:
+	if _day_cycle_manager == null or not _day_cycle_manager.has_method("lighting_profile_for_minute"):
+		return
+	var profile: Dictionary = _day_cycle_manager.call("lighting_profile_for_minute", float(_day_cycle_manager.get("minute")))
+	if _world_environment != null and _world_environment.environment != null:
+		_world_environment.environment.background_color = Color(profile.get("background_color", Color("91bdc1")))
+		_world_environment.environment.ambient_light_color = Color(profile.get("ambient_color", Color("dce3e2")))
+		_world_environment.environment.ambient_light_energy = float(profile.get("ambient_energy", 0.38))
+	if _sun_light != null:
+		_sun_light.light_color = Color(profile.get("sun_color", Color("fff7e8")))
+		_sun_light.light_energy = float(profile.get("sun_energy", 0.84))
+	var lamp_energy := float(profile.get("lamp_energy", 0.0))
+	for lamp_node: Node in get_tree().get_nodes_in_group("day_cycle_lamp"):
+		if lamp_node is Light3D:
+			var lamp := lamp_node as Light3D
+			lamp.visible = lamp_energy > 0.02
+			lamp.light_energy = lamp_energy
+
+
+func _attach_day_cycle_lamp(object: PlacedObject) -> void:
+	if object == null or object.item_id != "exterior_streetlight" or object.get_node_or_null("NightLight") != null:
+		return
+	var lamp := OmniLight3D.new()
+	lamp.name = "NightLight"
+	lamp.position = Vector3(0.0, 3.3, 0.0)
+	lamp.light_color = Color("ffd598")
+	lamp.light_energy = 0.0
+	lamp.omni_range = 6.0
+	lamp.shadow_enabled = false
+	lamp.distance_fade_enabled = true
+	lamp.distance_fade_begin = 18.0
+	lamp.distance_fade_length = 8.0
+	lamp.add_to_group("day_cycle_lamp")
+	object.add_child(lamp)
 
 
 func _on_camera_view_changed(_quadrant: int) -> void:
@@ -352,6 +413,7 @@ func load_layout() -> void:
 	_loading_layout = false
 	_rebuild_floor_batches()
 	_refresh_all_attachments()
+	_refresh_operational_stations()
 	_rebuild_astar()
 	refresh_shell_cutaway()
 
@@ -371,6 +433,8 @@ func instantiate_layout_object(uid: String, item_id: String, cell: Vector2i, rot
 	placed_objects[uid] = object
 	set_object_occupancy(object, true)
 	object.register_station()
+	object.refresh_operational_feedback()
+	_attach_day_cycle_lamp(object)
 	if item_id.begins_with("table"):
 		table_occupants[uid] = null
 	return object
@@ -395,6 +459,7 @@ func add_layout_object(item_id: String, cell: Vector2i, rotation_steps: int, sup
 	GameState.layout.append(record)
 	var object := instantiate_layout_object(uid, item_id, cell, rotation_steps, support_uid, attachment_slot)
 	_refresh_attachment(object)
+	_refresh_operational_stations()
 	_rebuild_astar()
 	GameState.layout_changed.emit()
 	return object
@@ -412,6 +477,7 @@ func remove_placed_object(object: PlacedObject, remove_record: bool = true) -> v
 				GameState.layout.erase(record)
 				break
 	object.queue_free()
+	_refresh_operational_stations()
 	_rebuild_astar()
 	GameState.layout_changed.emit()
 
@@ -425,13 +491,18 @@ func move_layout_object(object: PlacedObject, cell: Vector2i, rotation_steps: in
 	object.position = placement_world_position(object.definition, cell, rotation_steps, support_uid, attachment_slot)
 	set_object_occupancy(object, true)
 	_update_layout_record(object)
+	SimulationManager.refresh_station(object)
 	for attached: PlacedObject in attached_objects(object.uid):
 		var child_rotation := posmod(attached.rotation_steps + rotation_delta, 4)
-		if String(attached.definition.get("placement", "cell")) == "seat":
+		var child_placement := String(attached.definition.get("placement", "cell"))
+		if child_placement == "seat":
 			child_rotation = seat_rotation_for_slot(attached.attachment_slot, rotation_steps)
+		elif child_placement == "overhead":
+			child_rotation = rotation_steps
 		attached.set_layout_state(cell, child_rotation, object.uid, attached.attachment_slot)
 		_refresh_attachment(attached)
 		_update_layout_record(attached)
+	_refresh_operational_stations()
 	_rebuild_astar()
 	GameState.layout_changed.emit()
 
@@ -506,7 +577,7 @@ func is_edge_placement(definition: Dictionary) -> bool:
 
 
 func is_attachment_placement(definition: Dictionary) -> bool:
-	return String(definition.get("placement", "cell")) in ["seat", "surface", "wall_mount"]
+	return String(definition.get("placement", "cell")) in ["seat", "surface", "wall_mount", "overhead"]
 
 
 func attachment_world_position(definition: Dictionary, support: PlacedObject, attachment_slot: int, rotation_steps: int = 0) -> Vector3:
@@ -534,6 +605,8 @@ func attachment_world_position(definition: Dictionary, support: PlacedObject, at
 		var result := cell_to_world(support.grid_cell) + wall_mount_offset(definition, support.rotation_steps)
 		result.y = float(definition.get("mount_height", 1.25))
 		return result
+	if placement == "overhead":
+		return support.position + Vector3.UP * float(definition.get("overhead_height", 1.55))
 	return support.position
 
 
@@ -587,6 +660,9 @@ func attachment_target_at(definition: Dictionary, world_hit: Vector3, requested_
 		else:
 			slot = 0 if nz < 0.0 else 2
 		rotation = seat_rotation_for_slot(slot, best_support.rotation_steps)
+	elif String(definition.get("placement", "cell")) == "overhead":
+		slot = 0
+		rotation = best_support.rotation_steps
 	else:
 		var width := maxi(int(raw[0]), 1)
 		var height := maxi(int(raw[1]), 1)
@@ -658,11 +734,54 @@ func _refresh_attachment(object: PlacedObject) -> void:
 	var placement := String(object.definition.get("placement", "cell"))
 	if placement == "seat":
 		rotation = seat_rotation_for_slot(object.attachment_slot, support.rotation_steps)
-	elif placement == "wall_mount":
+	elif placement in ["wall_mount", "overhead"]:
 		rotation = support.rotation_steps
 	object.set_layout_state(support.grid_cell, rotation, support.uid, object.attachment_slot)
 	object.position = attachment_world_position(object.definition, support, object.attachment_slot, object.rotation_steps)
 	_update_layout_record(object)
+	SimulationManager.refresh_station(object)
+
+
+func ventilation_hood_for(station: PlacedObject) -> PlacedObject:
+	if station == null or not is_instance_valid(station):
+		return null
+	var required_kind := String(station.definition.get("support_kind", ""))
+	for candidate: PlacedObject in attached_objects(station.uid):
+		if String(candidate.definition.get("placement", "cell")) != "overhead":
+			continue
+		if bool(candidate.definition.get("provides_ventilation", false)) and String(candidate.definition.get("requires_support", "")) == required_kind:
+			return candidate
+	return null
+
+
+func station_is_operational(station: PlacedObject) -> bool:
+	if station == null or not is_instance_valid(station):
+		return false
+	if not bool(station.definition.get("ventilation_required", false)):
+		return true
+	return ventilation_hood_for(station) != null
+
+
+func unventilated_heat_stations() -> Array[PlacedObject]:
+	var result: Array[PlacedObject] = []
+	for object: PlacedObject in placed_objects.values():
+		if is_instance_valid(object) and bool(object.definition.get("ventilation_required", false)) and not station_is_operational(object):
+			result.append(object)
+	result.sort_custom(func(a: PlacedObject, b: PlacedObject): return a.uid < b.uid)
+	return result
+
+
+func restaurant_opening_blockers() -> Array[String]:
+	var result: Array[String] = []
+	for station: PlacedObject in unventilated_heat_stations():
+		result.append("%s in cella %d,%d: manca una cappa aspirante" % [String(station.definition.get("name", station.item_id)), station.grid_cell.x, station.grid_cell.y])
+	return result
+
+
+func _refresh_operational_stations() -> void:
+	for object: PlacedObject in placed_objects.values():
+		if is_instance_valid(object):
+			object.refresh_operational_feedback()
 
 
 func station_interaction_position(object: PlacedObject) -> Vector3:
@@ -727,6 +846,8 @@ func validate_placement(definition: Dictionary, cell: Vector2i, rotation_steps: 
 					return {"valid": false, "reason": "Porta la sedia sopra un tavolo e scegli uno dei quattro lati"}
 				"surface":
 					return {"valid": false, "reason": "Questa attrezzatura deve essere appoggiata su un banco da lavoro"}
+				"overhead":
+					return {"valid": false, "reason": "La cappa deve essere agganciata sopra un fornello compatibile"}
 				_:
 					return {"valid": false, "reason": "La mensola deve essere agganciata a un muro pieno"}
 		if placement == "wall_mount":
@@ -748,6 +869,8 @@ func validate_placement(definition: Dictionary, cell: Vector2i, rotation_steps: 
 					return {"valid": false, "reason": "Questo punto di aggancio è già occupato"}
 		if placement == "seat" and rotation_steps != seat_rotation_for_slot(attachment_slot, support.rotation_steps):
 			return {"valid": false, "reason": "La sedia deve essere rivolta verso il tavolo"}
+		if placement == "overhead" and rotation_steps != support.rotation_steps:
+			return {"valid": false, "reason": "La cappa deve essere allineata al fornello"}
 		if not String(definition.get("station", "")).is_empty():
 			var access_error := _new_station_access_error(definition, cell, rotation_steps, support.uid, attachment_slot)
 			if not access_error.is_empty():
@@ -2293,10 +2416,84 @@ func release_table(customer: Node) -> void:
 	release_waiting_position(customer)
 
 
+func day_cycle_manager() -> Node:
+	if _day_cycle_manager == null or not is_instance_valid(_day_cycle_manager):
+		_day_cycle_manager = get_tree().root.get_node_or_null("DayCycleManager")
+	return _day_cycle_manager
+
+
 func set_rush_mode(enabled: bool) -> void:
-	rush_mode = enabled
+	# Backward-compatible debug entry point. Normal rush state is exclusively
+	# derived from the configured world clock.
+	_debug_force_rush_fallback = enabled
+	var manager := day_cycle_manager()
+	if manager != null and manager.has_method("force_rush_debug"):
+		manager.call("force_rush_debug", enabled)
 	if enabled:
 		_spawn_clock = 0.0
+
+
+func is_rush_active() -> bool:
+	var manager := day_cycle_manager()
+	if manager != null:
+		return bool(manager.get("rush_active"))
+	return _debug_force_rush_fallback
+
+
+func customer_seat_count() -> int:
+	var result := 0
+	for table_uid: String in table_occupants:
+		var table_object := placed_objects.get(table_uid) as PlacedObject
+		if table_object != null and is_instance_valid(table_object):
+			result += _seat_assignments_for_table(table_object).size()
+	return result
+
+
+func customer_group_cap() -> int:
+	var manager := day_cycle_manager()
+	if manager != null and manager.has_method("group_cap"):
+		return int(manager.call("group_cap", customer_seat_count()))
+	var queue_buffer := maxi(int(DataRegistry.balance_value("traffic.queue_buffer_groups", 0)), 0)
+	var configured_cap := maxi(int(DataRegistry.balance_value("traffic.absolute_group_cap", 1)), 1)
+	return mini(customer_seat_count() + queue_buffer, configured_cap)
+
+
+func effective_customer_spawn_interval(has_producible_recipe: bool = true) -> float:
+	var manager := day_cycle_manager()
+	if manager != null and manager.has_method("effective_spawn_interval"):
+		return maxf(float(manager.call("effective_spawn_interval", GameState.reputation, has_producible_recipe, -1.0)), 0.05)
+	return maxf(float(DataRegistry.balance_value("traffic.base_spawn_interval", 1.0)), 0.05)
+
+
+func has_producible_active_recipe() -> bool:
+	for recipe: Dictionary in DataRegistry.active_recipes(GameState.menu):
+		var recipe_id := String(recipe.get("id", ""))
+		if GameState.is_recipe_sold_out(recipe_id):
+			continue
+		var requirements := DataRegistry.recipe_raw_requirements(recipe)
+		var available := true
+		for ingredient_id: String in requirements:
+			if not GameState.stock.has(ingredient_id):
+				continue
+			var stock_entry: Dictionary = GameState.stock.get(ingredient_id, {})
+			var free_amount := int(stock_entry.get("amount", 0)) - int(stock_entry.get("reserved", 0))
+			if free_amount < int(requirements[ingredient_id]):
+				available = false
+				break
+		if available:
+			return true
+	return false
+
+
+func traffic_flow_status() -> Dictionary:
+	var producible := has_producible_active_recipe()
+	return {
+		"has_producible_recipe": producible,
+		"warning": "Nessuna ricetta producibile: afflusso ridotto" if not producible else "",
+		"interval": effective_customer_spawn_interval(producible),
+		"group_cap": customer_group_cap(),
+		"active_groups": SimulationManager.customers.size(),
+	}
 
 
 func waiting_position(customer: Node) -> Vector3:

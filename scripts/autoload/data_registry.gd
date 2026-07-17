@@ -165,6 +165,8 @@ func recipe_raw_requirements(recipe_or_id: Variant) -> Dictionary:
 
 func _validate_gameplay_balance() -> bool:
 	balance_validation_errors.clear()
+	_require_balance_number("schema_version", 1.0)
+	_require_balance_number("save.autosave_debounce_seconds", 0.05)
 	_require_balance_number("day_cycle.real_seconds_at_1x", 1.0)
 	_require_balance_number("day_cycle.start_minute", 0.0, 1439.0)
 	_require_balance_number("day_cycle.rush_warning_seconds", 0.0)
@@ -183,6 +185,22 @@ func _validate_gameplay_balance() -> bool:
 	_require_balance_number("cleanliness.very_dirty_threshold", 0.0, 100.0)
 	_require_balance_number("cleanliness.pest_threshold", 0.0, 100.0)
 	_require_balance_number("cleanliness.pest_delay_seconds", 0.0)
+	_require_balance_number("album.reward_quantity_min", 1.0)
+	_require_balance_number("album.reward_quantity_max", 1.0)
+	_require_balance_number("album.pity_interval", 1.0)
+	_require_balance_number("album.positive_reviews_per_reward", 1.0)
+	_require_balance_number("album.five_star_gift_chance", 0.0, 1.0)
+	_require_balance_number("album.reputation_threshold_reward", 0.0)
+	_require_balance_number("album.day_completion_reward", 0.0)
+	if float(balance_value("traffic.reputation_multiplier_min", 0.0)) > float(balance_value("traffic.reputation_multiplier_max", 0.0)):
+		balance_validation_errors.append("traffic reputation multiplier min cannot exceed max")
+	if (
+		float(balance_value("cleanliness.pest_threshold", 0.0)) > float(balance_value("cleanliness.very_dirty_threshold", 0.0))
+		or float(balance_value("cleanliness.very_dirty_threshold", 0.0)) > float(balance_value("cleanliness.dirty_threshold", 0.0))
+	):
+		balance_validation_errors.append("cleanliness thresholds must be ordered pest <= very_dirty <= dirty")
+	if int(balance_value("album.reward_quantity_min", 1)) > int(balance_value("album.reward_quantity_max", 1)):
+		balance_validation_errors.append("album reward quantity min cannot exceed max")
 	var rush_windows: Variant = balance_value("day_cycle.rush_windows", null)
 	if not rush_windows is Array or (rush_windows as Array).is_empty():
 		balance_validation_errors.append("day_cycle.rush_windows must be a non-empty array")
@@ -195,8 +213,14 @@ func _validate_gameplay_balance() -> bool:
 			for field: String in ["start", "end", "traffic_multiplier"]:
 				if not (window as Dictionary).has(field) or not ((window as Dictionary)[field] is int or (window as Dictionary)[field] is float):
 					balance_validation_errors.append("day_cycle.rush_windows[%d].%s must be numeric" % [index, field])
-			if float((window as Dictionary).get("start", 0.0)) >= float((window as Dictionary).get("end", 0.0)):
+			var start := float((window as Dictionary).get("start", 0.0))
+			var end := float((window as Dictionary).get("end", 0.0))
+			if start < 0.0 or end > 1440.0:
+				balance_validation_errors.append("day_cycle.rush_windows[%d] must stay inside the day" % index)
+			if start >= end:
 				balance_validation_errors.append("day_cycle.rush_windows[%d] must end after it starts" % index)
+			if float((window as Dictionary).get("traffic_multiplier", 0.0)) <= 0.0:
+				balance_validation_errors.append("day_cycle.rush_windows[%d].traffic_multiplier must be positive" % index)
 	var allowed_types: Variant = balance_value("storage.allowed_types", null)
 	if not allowed_types is Array or not (allowed_types as Array).has("ambient") or not (allowed_types as Array).has("refrigerated"):
 		balance_validation_errors.append("storage.allowed_types must include ambient and refrigerated")

@@ -97,6 +97,15 @@ func _test_seeded_rewards_and_pity() -> void:
 	_expect(bool(pity_reward.get("pity_forced", false)), "la soglia pity forza un premio utile")
 	_expect(useful_before.has(String(pity_reward.get("ingredient_id", ""))), "il premio pity è necessario a una ricetta scoperta ma bloccata")
 
+	CollectionManager.set_reward_seed(19, 3)
+	var saved := GameState.serialize().duplicate(true)
+	CollectionManager.set_reward_seed(19, 0)
+	GameState.deserialize(saved)
+	_expect(
+		CollectionManager.reward_pity_progress() == 3,
+		"il progresso pity sopravvive al round-trip del salvataggio"
+	)
+
 
 func _reset_reward_state() -> void:
 	for ingredient: Dictionary in DataRegistry.ingredients:

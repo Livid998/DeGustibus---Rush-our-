@@ -19,7 +19,7 @@ signal cleanliness_state_changed(value: Dictionary)
 signal pest_state_changed(value: Dictionary)
 signal staff_preferences_changed(employee_id: String, preference: Variant)
 
-const SAVE_VERSION := 10
+const SAVE_VERSION := 11
 
 var money: int = 10000
 var reputation: float = 1.0
@@ -195,7 +195,9 @@ func _default_layout() -> Array:
 		{"uid":"support_cut_2","item":"prep_counter","cell":[14,9],"rotation":0},
 		{"uid":"cut_2","item":"cutting_board","cell":[14,9],"rotation":0,"support_uid":"support_cut_2","attachment_slot":0},
 		{"uid":"stove_1","item":"stove","cell":[11,9],"rotation":0},
+		{"uid":"hood_stove_1","item":"extractor_hood","cell":[11,9],"rotation":0,"support_uid":"stove_1","attachment_slot":0},
 		{"uid":"multi_1","item":"multi_stove","cell":[13,9],"rotation":0},
+		{"uid":"hood_multi_1","item":"extractor_hood","cell":[13,9],"rotation":0,"support_uid":"multi_1","attachment_slot":0},
 		{"uid":"support_pizza_1","item":"prep_counter","cell":[2,12],"rotation":2},
 		{"uid":"pizza_1","item":"pizza_oven","cell":[2,12],"rotation":2,"support_uid":"support_pizza_1","attachment_slot":0},
 		{"uid":"support_oven_1","item":"worktable","cell":[5,12],"rotation":2},
@@ -205,7 +207,8 @@ func _default_layout() -> Array:
 		{"uid":"rack_1","item":"dish_rack","cell":[9,12],"rotation":2,"support_uid":"support_rack_1","attachment_slot":0},
 		{"uid":"pass_1","item":"pass","cell":[11,12],"rotation":2},
 		{"uid":"pass_tray_1","item":"pass_tray","cell":[11,12],"rotation":2,"support_uid":"pass_1","attachment_slot":0},
-		{"uid":"dessert_1","item":"dessert","cell":[14,12],"rotation":2},
+		{"uid":"support_dessert_1","item":"worktable","cell":[14,12],"rotation":2},
+		{"uid":"dessert_1","item":"dessert","cell":[14,12],"rotation":2,"support_uid":"support_dessert_1","attachment_slot":0},
 		{"uid":"support_dough_1","item":"worktable","cell":[16,12],"rotation":2},
 		{"uid":"dough_1","item":"dough","cell":[16,12],"rotation":2,"support_uid":"support_dough_1","attachment_slot":0},
 		{"uid":"plant_1","item":"plant","cell":[15,3],"rotation":0}
@@ -590,6 +593,8 @@ func deserialize(data: Dictionary) -> void:
 		_migrate_exterior_v8()
 	if loaded_version < 9:
 		_migrate_complete_shell_v9()
+	if loaded_version < 11:
+		_migrate_technical_kitchen_v11()
 	if data.get("settings") is Dictionary:
 		settings.merge(data.settings, true)
 	if data.get("tutorial") is Dictionary:
@@ -1095,6 +1100,72 @@ func _migrate_complete_shell_v9() -> void:
 		layout.append(migrated_record)
 		occupied_edges[edge_key] = true
 		used_uids[uid] = true
+
+
+func _migrate_technical_kitchen_v11() -> void:
+	# Dessert changed from a blocking floor station to a surface attachment.
+	# Reuse the proven attachment repair pass: it keeps the machine UID and
+	# authored scale intact, creates a deterministic free worktop only when
+	# needed, and preserves the closest viable layout position.
+	_migrate_attachment_integrity_v7()
+
+	var used_uids: Dictionary = {}
+	for record: Dictionary in layout:
+		var uid := String(record.get("uid", ""))
+		if not uid.is_empty():
+			used_uids[uid] = true
+
+	var additions: Array[Dictionary] = []
+	for station: Dictionary in layout:
+		var station_definition: Dictionary = DataRegistry.build_by_id.get(
+			String(station.get("item", "")),
+			{}
+		)
+		if not bool(station_definition.get("ventilation_required", false)):
+			continue
+		var station_uid := String(station.get("uid", ""))
+		if station_uid.is_empty() or _layout_has_compatible_hood(station_uid):
+			continue
+		var station_cell: Array = station.get("cell", [0, 0])
+		var hood_uid := _deterministic_migration_uid(
+			"v11_hood_%s" % station_uid,
+			used_uids
+		)
+		additions.append({
+			"uid": hood_uid,
+			"item": "extractor_hood",
+			"cell": [int(station_cell[0]), int(station_cell[1])],
+			"rotation": int(station.get("rotation", 0)),
+			"support_uid": station_uid,
+			"attachment_slot": 0
+		})
+		used_uids[hood_uid] = true
+	layout.append_array(additions)
+
+
+func _layout_has_compatible_hood(station_uid: String) -> bool:
+	for record: Dictionary in layout:
+		if String(record.get("support_uid", "")) != station_uid:
+			continue
+		var definition: Dictionary = DataRegistry.build_by_id.get(
+			String(record.get("item", "")),
+			{}
+		)
+		if (
+			String(definition.get("placement", "cell")) == "overhead"
+			and String(definition.get("requires_support", "")) == "heat_station"
+		):
+			return true
+	return false
+
+
+func _deterministic_migration_uid(base_uid: String, used_uids: Dictionary) -> String:
+	if not used_uids.has(base_uid):
+		return base_uid
+	var suffix := 2
+	while used_uids.has("%s_%d" % [base_uid, suffix]):
+		suffix += 1
+	return "%s_%d" % [base_uid, suffix]
 
 
 func _layout_edge_key(record: Dictionary) -> String:
