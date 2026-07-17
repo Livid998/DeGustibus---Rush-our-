@@ -69,7 +69,12 @@ func _test_v9_migration() -> void:
 	_expect(GameState.money == 4321 and is_equal_approx(GameState.reputation, 2.75), "v9 migration preserves money and reputation")
 	_expect(int(GameState.stock.tomato.amount) == 77 and int(GameState.stock.potato.amount) == 64, "v9 migration preserves physical stock exactly")
 	_expect(int(GameState.stock.tomato.reserved) == 0, "v9 migration initializes runtime reservation to zero")
-	_expect(String(GameState.stock.tomato.storage_type) == "refrigerated" and int(GameState.stock.tomato.storage_units) == 1, "v9 migration adds authoritative storage metadata")
+	var tomato_storage := DataRegistry.storage_metadata_for_ingredient("tomato")
+	_expect(
+		String(GameState.stock.tomato.storage_type) == String(tomato_storage.storage_type)
+		and int(GameState.stock.tomato.storage_units) == int(tomato_storage.storage_units),
+		"v9 migration adds authoritative storage metadata"
+	)
 	_expect(not bool(GameState.menu.margherita.active) and bool(GameState.menu.margherita.unlocked) and int(GameState.menu.margherita.price) == 37, "v9 migration preserves menu active, unlocked and price")
 	_expect(bool(GameState.menu.margherita.manual_paused) and not bool(GameState.menu.margherita.auto_sold_out) and bool(GameState.menu.margherita.sold_out), "legacy sold_out becomes manual pause only")
 	_expect(String(GameState.employees[0].id) == "legacy_employee" and String(GameState.settings.graphics_quality) == "high", "v9 migration preserves staff and settings")
@@ -106,7 +111,7 @@ func _test_v10_round_trip() -> void:
 	GameState.stock.tomato.reserved = 99
 
 	var serialized: Dictionary = JSON.parse_string(JSON.stringify(GameState.serialize()))
-	_expect(int(serialized.save_version) == 10, "new saves use schema version 10")
+	_expect(int(serialized.save_version) == GameState.SAVE_VERSION, "new saves use the current schema version")
 	_expect(int(serialized.stock.tomato.reserved) == 0, "runtime reservations are not persisted")
 	GameState.reset_to_defaults(false)
 	GameState.deserialize(serialized)

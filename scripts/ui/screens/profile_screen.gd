@@ -195,7 +195,7 @@ func _ensure_hierarchy() -> void:
 	_preview_button = Button.new()
 	_preview_button.name = "AvatarPreviewButton"
 	_preview_button.text = "Mostra anteprima 3D"
-	_preview_button.add_theme_font_override("font", GameFonts.semi_bold())
+	_preview_button.add_theme_font_override("font", GameFonts.semibold())
 	_preview_button.pressed.connect(request_avatar_preview)
 	avatar_column.add_child(_preview_button)
 
@@ -218,7 +218,7 @@ func _ensure_hierarchy() -> void:
 	_preset_name_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_preset_name_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	_preset_name_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_preset_name_label.add_theme_font_override("font", GameFonts.semi_bold())
+	_preset_name_label.add_theme_font_override("font", GameFonts.semibold())
 	preset_controls.add_child(_preset_name_label)
 
 	var next_button := Button.new()
@@ -286,14 +286,14 @@ func _ensure_hierarchy() -> void:
 	badge_row.add_child(badge_icon)
 	_badge_label = Label.new()
 	_badge_label.name = "StarterBadgeLabel"
-	_badge_label.add_theme_font_override("font", GameFonts.semi_bold())
+	_badge_label.add_theme_font_override("font", GameFonts.semibold())
 	badge_row.add_child(_badge_label)
 
 
 func _field_label(text: String) -> Label:
 	var label := Label.new()
 	label.text = text
-	label.add_theme_font_override("font", GameFonts.semi_bold())
+	label.add_theme_font_override("font", GameFonts.semibold())
 	return label
 
 
