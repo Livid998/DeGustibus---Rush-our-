@@ -1,5 +1,21 @@
 # Changelog demo
 
+## 2.0.0 - 2026-07-17
+
+- Aggiunti ciclo giorno/notte persistente, rush naturali, pausa, velocità e costo giornaliero del personale.
+- Separati definitivamente Album e stock: le ricette si imparano consumando collezione, con premi recensione e pity persistente.
+- Implementati capacità ambiente/refrigerata, prenotazioni atomiche, carrello consegna, batch standard, urgenze, auto sold-out e cambio ordine.
+- Aggiunti qualità piatto 0–100, difetti contestuali, rifacimento automatico, cause strutturate e icone reali nel pass.
+- Introdotte una recensione aggregata per gruppo, mance, reputazione EMA bidirezionale e schermata Recensioni persistente.
+- Aggiunti bellezza effettiva, pulizia, sporco cucina, avvisi e incidenti visibili di topi/insetti collegati ai task del tuttofare.
+- Separati personale e candidati per ruolo con preferenze operative reali per cuochi, camerieri e tuttofare.
+- Resi obbligatori supporti da tavolo e cappe; la macchina gelato mantiene modello, scala e dimensioni originali come elettrodomestico da tavolo.
+- Aggiunto profilo del ristorante con nome e avatar preset-based salvato.
+- Convertita la UI gestionale in pagine persistenti/event-driven; eliminate le ricostruzioni periodiche di Statistiche e Mercato.
+- Su telefono la navigazione usa Ristorante, Menu, Magazzino, Personale e un bottom sheet `Altro`; tablet e desktop mostrano tutte le sezioni.
+- Integrati orientamento PWA libero, safe area, aggiornamento in-place, audit glifi e test responsive per 390x844, 412x915, 800x1024, 1280x720 e 1366x768.
+- Aggiornato il salvataggio alla versione 11 con migrazione v9–v11 e preservazione dei dati esistenti.
+
 ## 1.2.0 - 2026-07-15
 
 - Rimossa la patina chiara dalla mappa con illuminazione neutra, contrasto ripristinato e fog disattivata.

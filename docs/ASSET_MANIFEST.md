@@ -44,6 +44,15 @@ I numeri includono `.import`, `.bin` e texture necessarie a rendere i GLTF autos
 - Icone Album/Menu/pass: tavole raster 1254×1254 fornite direttamente dall’utente, conservate in `assets/ui/ingredient_icons.png` e `assets/ui/recipe_icons.png`.
 - Navigazione e lucchetto: sorgenti conservate in `assets/ui/navigation_icons_source.png` e `assets/ui/lock_icon_source.png`.
 - Il runtime usa le versioni RGBA derivate `ingredient_icons_transparent.png`, `recipe_icons_transparent.png`, `navigation_icons.png` e `lock_icon.png`. Il ritaglio, la rimozione del fondo e la centratura sono riproducibili tramite `tools/extract_icon_atlases.py` e non usano generazione grafica.
+- Espansione esterna: elementi KayKit City Builder Bits e Forest Nature Pack
+  forniti dall’utente per terreno, strada, marciapiede, alberi e decorazioni.
+- Sistemi casual: 20 icone RGBA quadrate in
+  `assets/ui/generated/casual_system/` per giorno/notte, rush, bellezza,
+  pulizia, infestazioni, logistica, ruoli, profilo, cappa e difetti qualità.
+  Sorgente, prompt, ritagli e atlante sono documentati in
+  `assets/ui/generated_sources/README.md` e `docs/ASSET_REQUESTS.md`.
+- Bubble di stato: gli atlanti forniti dall’utente sono ritagliati in
+  `assets/ui/status_bubbles/` e mostrati soltanto allo zoom previsto dal gioco.
 
 Il personaggio chef contiene 17 clip rilevate: Death, Defeat, Idle, Jump, PickUp, Punch, RecieveHit, Roll, Run, Run_Carry, Shoot_OneHanded, SitDown, StandUp, SwordSlash, Victory, Walk e Walk_Carry. Il resolver usa nomi case-insensitive e ripiega su `Idle` quando una clip non esiste.
 

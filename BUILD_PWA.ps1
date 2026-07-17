@@ -32,6 +32,16 @@ if ($LASTEXITCODE -ne 0) {
     throw "Audit glifi UI/Web fallito con codice $LASTEXITCODE"
 }
 
+& $Godot --headless --path $ProjectRoot --scene 'res://tests/responsive_ui_smoke.tscn'
+if ($LASTEXITCODE -ne 0) {
+    throw "Smoke test UI responsive fallito con codice $LASTEXITCODE"
+}
+
+& $Godot --headless --path $ProjectRoot --scene 'res://tests/pwa_delivery_smoke.tscn'
+if ($LASTEXITCODE -ne 0) {
+    throw "Verifica configurazione PWA fallita con codice $LASTEXITCODE"
+}
+
 $exportMode = if ($DebugBuild) { '--export-debug' } else { '--export-release' }
 & $Godot --headless --path $ProjectRoot $exportMode 'PWA' (Join-Path $BuildDir 'index.html')
 if ($LASTEXITCODE -ne 0) {

@@ -1,0 +1,2 @@
+RESPONSIVE UI: FAIL | checks=29 failures=1
+FAIL: switching away and back restores the saved scroll position

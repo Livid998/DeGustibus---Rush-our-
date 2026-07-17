@@ -39,8 +39,34 @@ La prima volta, nel repository GitHub aprire `Settings > Pages` e scegliere `Git
 
 Aprire l'indirizzo HTTPS in Safari, usare `Condividi` e scegliere `Aggiungi alla schermata Home`.
 
+La PWA non blocca l'orientamento: può essere usata in portrait su telefono e
+tablet oppure in landscape su tablet e desktop. La barra inferiore mostra
+quattro destinazioni principali e `Altro` a 390x844 e 412x915; da 800 px in su
+mostra direttamente tutte le sezioni. I target verificati sono:
+
+- 390x844;
+- 412x915;
+- 800x1024;
+- 1280x720;
+- 1366x768.
+
+Le schermate gestionali vengono mantenute in memoria: cambiare sezione conserva
+scroll e selezione. Recensioni, personale, statistiche operative e countdown del
+mercato aggiornano soltanto i controlli interessati.
+
 ## Modalita sicura su iPad
 
 La build Web riconosce automaticamente i dispositivi mobili e riduce il carico della GPU. Se iOS segnala comunque `WebGL context lost`, la pagina esegue una sola volta il riavvio in modalita sicura, con risoluzione 3D e frequenza ridotte.
 
 La modalita sicura puo essere attivata manualmente aggiungendo `?safe=1` alla fine dell'indirizzo della PWA. Prima di riprovare, chiudere le altre schede o applicazioni Web 3D aperte. Non cancellare i dati del sito: contengono anche il salvataggio locale.
+
+## Verifica prima della pubblicazione
+
+`BUILD_PWA.ps1` interrompe l'export se falliscono l'audit dei glifi, lo smoke
+test responsive o la verifica del flusso di aggiornamento. Anche il workflow
+GitHub Pages esegue la suite completa prima di caricare l'artifact.
+
+Ogni export genera una nuova versione del service worker. Quando una build è
+pronta compare `Aggiorna e riavvia`; il worker in attesa prende il controllo,
+la pagina si ricarica una sola volta e il salvataggio locale resta nello stesso
+origin.

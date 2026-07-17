@@ -79,10 +79,7 @@ func _run() -> void:
 	var active_ids := _active_pest_ids(world.visible_pest_incidents())
 	_expect(active_ids.has(incident_id), "only the confirmed world visual becomes a visible ambience incident")
 	_expect(
-		(GameState.pest_state.get("active", []) as Array).any(
-			func(record: Variant) -> bool:
-				return record is Dictionary and String((record as Dictionary).get("id", "")) == incident_id
-		),
+		_active_pest_ids(GameState.pest_state.get("active", []) as Array).has(incident_id),
 		"confirmed infestations are persisted for reload"
 	)
 

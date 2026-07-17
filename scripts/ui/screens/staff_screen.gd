@@ -281,8 +281,9 @@ func _employee_card(employee: Dictionary) -> PanelContainer:
 	box.add_theme_constant_override("separation", 7)
 	card.add_child(box)
 
-	var top := HBoxContainer.new()
-	top.add_theme_constant_override("separation", 10)
+	var top := HFlowContainer.new()
+	top.add_theme_constant_override("h_separation", 10)
+	top.add_theme_constant_override("v_separation", 7)
 	box.add_child(top)
 	top.add_child(_role_icon(String(employee.get("role", "cook")), Vector2(50, 50)))
 	var identity := VBoxContainer.new()
@@ -319,8 +320,9 @@ func _employee_card(employee: Dictionary) -> PanelContainer:
 func _candidate_card(candidate: Dictionary) -> PanelContainer:
 	var card := _card()
 	card.name = "Candidate_%s" % String(candidate.get("id", ""))
-	var row := HBoxContainer.new()
-	row.add_theme_constant_override("separation", 10)
+	var row := HFlowContainer.new()
+	row.add_theme_constant_override("h_separation", 10)
+	row.add_theme_constant_override("v_separation", 7)
 	card.add_child(row)
 	row.add_child(_role_icon(String(candidate.get("role", "cook")), Vector2(46, 46)))
 	var details := VBoxContainer.new()
@@ -353,12 +355,13 @@ func _candidate_card(candidate: Dictionary) -> PanelContainer:
 
 
 func _preference_selector(employee: Dictionary) -> Control:
-	var row := HBoxContainer.new()
+	var row := HFlowContainer.new()
 	row.name = "OperationalPreference"
-	row.add_theme_constant_override("separation", 8)
+	row.add_theme_constant_override("h_separation", 8)
+	row.add_theme_constant_override("v_separation", 6)
 	var label := Label.new()
 	label.text = _preference_label(String(employee.get("role", "")))
-	label.custom_minimum_size.x = 174
+	label.custom_minimum_size.x = 156
 	label.add_theme_font_override("font", GameFonts.semibold())
 	row.add_child(label)
 	var selector := OptionButton.new()

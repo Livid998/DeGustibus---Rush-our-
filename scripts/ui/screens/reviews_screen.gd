@@ -105,6 +105,15 @@ func summary_snapshot() -> Dictionary:
 	return _last_summary.duplicate(true)
 
 
+func apply_responsive_layout_for_width(available_width: float) -> void:
+	if _overview_grid == null or _insights_grid == null:
+		return
+	var columns := 1 if available_width < 720.0 else 2
+	_overview_grid.columns = columns
+	_insights_grid.columns = columns
+	_history_scroll.custom_minimum_size.y = 330.0 if available_width < 600.0 else 280.0
+
+
 func _ensure_review_system() -> void:
 	if _review_system == null:
 		_review_system = ReviewSystem.new()
@@ -588,10 +597,7 @@ func _apply_responsive_layout() -> void:
 	if get_viewport() != null:
 		var viewport_width := get_viewport_rect().size.x
 		available_width = viewport_width if available_width <= 1.0 else minf(available_width, viewport_width)
-	var columns := 1 if available_width < 720.0 else 2
-	_overview_grid.columns = columns
-	_insights_grid.columns = columns
-	_history_scroll.custom_minimum_size.y = 330.0 if available_width < 600.0 else 280.0
+	apply_responsive_layout_for_width(available_width)
 
 
 func _connect_state_signals() -> void:

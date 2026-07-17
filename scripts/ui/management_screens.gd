@@ -1,6 +1,10 @@
 class_name ManagementScreens
 extends RefCounted
 
+const OPERATIONAL_STATISTICS_SCREEN := preload(
+	"res://scripts/ui/screens/operational_statistics_screen.gd"
+)
+
 
 static func populate(screen_name: String, content: VBoxContainer, ui: RestaurantUI) -> void:
 	match screen_name:
@@ -28,9 +32,9 @@ static func refresh(screen_name: String, content: VBoxContainer, ui: RestaurantU
 			"OperationalStatisticsScreen",
 			true,
 			false
-		) as OperationalStatisticsScreen
+		)
 		if operations != null:
-			operations.refresh()
+			operations.call("refresh")
 			return
 	elif screen_name == "Impostazioni":
 		var profile := content.find_child("ProfileScreen", true, false) as ProfileScreen
@@ -59,9 +63,12 @@ static func apply_responsive_layout(content: Control, ui: RestaurantUI) -> void:
 		"OperationalStatisticsScreen",
 		true,
 		false
-	) as OperationalStatisticsScreen
+	)
 	if operations != null:
-		operations.apply_responsive_layout(phone, portrait)
+		operations.call("apply_responsive_layout", phone, portrait)
+	var reviews := content.find_child("ReviewsScreen", true, false) as ReviewsScreen
+	if reviews != null:
+		reviews.apply_responsive_layout_for_width(ui.responsive_viewport_size().x)
 
 
 static func update_market_countdowns(content: Control, provider: MockMarketProvider) -> void:
@@ -961,7 +968,7 @@ static func _staff(content: VBoxContainer, ui: RestaurantUI) -> void:
 
 static func _statistics(content: VBoxContainer, ui: RestaurantUI) -> void:
 	content.add_child(ReviewsScreen.create())
-	content.add_child(OperationalStatisticsScreen.create(ui))
+	content.add_child(OPERATIONAL_STATISTICS_SCREEN.create(ui))
 
 
 static func _settings(content: VBoxContainer, ui: RestaurantUI) -> void:

@@ -441,7 +441,7 @@ func _refresh_kitchen_dirt_visuals() -> void:
 	var units_per_mark := maxf(float(DataRegistry.balance_value("cleanliness.kitchen_dirt_visual_step", 6.0)), 0.1)
 	var desired := clampi(floori(kitchen_dirt / units_per_mark), 0, 5)
 	while kitchen_dirt_visuals.size() > desired:
-		var removed := kitchen_dirt_visuals.pop_back()
+		var removed: Node3D = kitchen_dirt_visuals.pop_back() as Node3D
 		if removed != null and is_instance_valid(removed):
 			removed.queue_free()
 	while kitchen_dirt_visuals.size() < desired:
