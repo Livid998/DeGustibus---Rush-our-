@@ -1,2 +1,1 @@
-RESPONSIVE UI: FAIL | checks=29 failures=1
-FAIL: switching away and back restores the saved scroll position
+RESPONSIVE UI: PASS | checks=40 failures=0

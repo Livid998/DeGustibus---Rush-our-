@@ -28,6 +28,7 @@ var _simulation_tick_accumulator := 0.0
 var _maintenance_clock := 0.0
 var review_system: ReviewSystem
 var dish_quality_resolver: DishQualityResolver
+var staff_performance_tracker: StaffPerformanceTracker
 
 const SIMULATION_TICK := 0.1
 const COMPLETED_WORK_RETENTION := 6.0
@@ -36,6 +37,7 @@ const COMPLETED_WORK_RETENTION := 6.0
 func _ready() -> void:
 	review_system = ReviewSystem.new()
 	dish_quality_resolver = DishQualityResolver.new()
+	staff_performance_tracker = StaffPerformanceTracker.new()
 	reset_service_stats()
 	if not EconomyManager.payroll_processed.is_connected(_on_payroll_processed):
 		EconomyManager.payroll_processed.connect(_on_payroll_processed)
@@ -581,7 +583,12 @@ func _complete_kitchen_task(task: Dictionary) -> void:
 	task.state = "completed"
 	var employee_id := String(task.get("employee_id", ""))
 	if not employee_id.is_empty():
-		stats.employee_tasks[employee_id] = int(stats.employee_tasks.get(employee_id, 0)) + 1
+		_record_employee_task_completed(
+			employee_id,
+			"kitchen",
+			String(task.get("station", "")),
+			task
+		)
 	if task.station_runtime:
 		var output_node := task.station_runtime.get("node") as Node3D
 		if output_node != null and is_instance_valid(output_node):
@@ -609,6 +616,7 @@ func _complete_kitchen_task(task: Dictionary) -> void:
 	var order: Dictionary = orders.get(task.order_id, {})
 	if not order.is_empty():
 		_accumulate_task_quality(order, task, employee_id)
+	statistics_changed.emit()
 	if world != null and world.has_method("register_kitchen_work_dirt"):
 		world.call("register_kitchen_work_dirt", task)
 	var all_done := not order.is_empty()
@@ -655,6 +663,7 @@ func _accumulate_task_quality(order: Dictionary, task: Dictionary, employee_id: 
 		"score": int(sample.get("quality_score", 70)),
 	})
 	order["_quality_samples"] = samples
+	_record_employee_quality_sample(employee_id, sample, task, order)
 
 
 func _finalize_order_quality(order: Dictionary) -> String:
@@ -680,6 +689,12 @@ func _finalize_order_quality(order: Dictionary) -> String:
 	context["remake_attempts"] = int(order.get("remake_attempts", 0))
 	var result := dish_quality_resolver.resolve(context)
 	dish_quality_resolver.accumulate_order_quality(order, result, 1.0)
+	_record_employee_quality_events(
+		String(defect_task.get("employee_id", "")),
+		result,
+		defect_task,
+		order
+	)
 	order["quality_recovery"] = (result.get("recovery", {}) as Dictionary).duplicate(true)
 	order["defect_probability"] = float(result.get("defect_probability", 0.0))
 	var review_tags: Array = order.get("review_tags", [])
@@ -943,7 +958,12 @@ func complete_service_task(task_id: String) -> void:
 	task.finished_at = GameState.service_seconds
 	var employee_id := String(task.get("employee_id", ""))
 	if not employee_id.is_empty():
-		stats.employee_tasks[employee_id] = int(stats.employee_tasks.get(employee_id, 0)) + 1
+		_record_employee_task_completed(
+			employee_id,
+			"service",
+			String(task.get("action", "")),
+			task
+		)
 	if is_instance_valid(task.customer) and task.customer.has_method("service_completed"):
 		var completed_payload: Dictionary = (task.get("payload", {}) as Dictionary).duplicate(true)
 		completed_payload["employee_id"] = employee_id
@@ -952,6 +972,7 @@ func complete_service_task(task_id: String) -> void:
 			0.0
 		)
 		task.customer.service_completed(task.action, completed_payload)
+	statistics_changed.emit()
 	task_board_changed.emit()
 
 
@@ -1124,10 +1145,16 @@ func complete_maintenance_task(task_id: String) -> bool:
 	task.state = "completed"
 	task.finished_at = GameState.service_seconds
 	if not employee_id.is_empty():
-		stats.employee_tasks[employee_id] = int(stats.employee_tasks.get(employee_id, 0)) + 1
+		_record_employee_task_completed(
+			employee_id,
+			"maintenance",
+			String(task.get("action", "")),
+			task
+		)
 	var owner := task.get("owner") as Node
 	if owner != null and is_instance_valid(owner) and owner.has_method("maintenance_completed"):
 		owner.call("maintenance_completed", String(task.get("action", "")), task.get("payload", {}))
+	statistics_changed.emit()
 	task_board_changed.emit()
 	return true
 
@@ -1426,6 +1453,51 @@ func _ensure_casual_systems() -> void:
 		dish_quality_resolver = DishQualityResolver.new()
 
 
+func _record_employee_task_completed(
+	employee_id: String,
+	task_kind: String,
+	action: String,
+	task: Dictionary
+) -> void:
+	if employee_id.is_empty():
+		return
+	stats.employee_tasks[employee_id] = int(stats.employee_tasks.get(employee_id, 0)) + 1
+	_staff_performance().record_task(
+		employee_id, task_kind, action, task, GameState.service_seconds
+	)
+
+
+func _record_employee_quality_sample(
+	employee_id: String,
+	sample: Dictionary,
+	task: Dictionary,
+	order: Dictionary
+) -> void:
+	_staff_performance().record_quality_sample(employee_id, sample, task, order)
+
+
+func _record_employee_quality_events(
+	employee_id: String,
+	result: Dictionary,
+	task: Dictionary,
+	order: Dictionary
+) -> void:
+	if _staff_performance().record_quality_events(
+		employee_id, result, task, order, GameState.service_seconds
+	):
+		statistics_changed.emit()
+
+
+func employee_performance_snapshot(employee_id: String = "") -> Dictionary:
+	return _staff_performance().snapshot(GameState.employees, employee_id)
+
+
+func _staff_performance() -> StaffPerformanceTracker:
+	if staff_performance_tracker == null:
+		staff_performance_tracker = StaffPerformanceTracker.new()
+	return staff_performance_tracker
+
+
 func get_station_position(runtime: Dictionary) -> Vector3:
 	if runtime.is_empty() or not is_instance_valid(runtime.node):
 		return Vector3.ZERO
@@ -1606,6 +1678,7 @@ func reset_service_stats() -> void:
 	maintenance_tasks.clear()
 	_simulation_tick_accumulator = 0.0
 	_maintenance_clock = 0.0
+	_staff_performance().reset()
 	statistics_changed.emit()
 
 
@@ -1666,5 +1739,6 @@ func summary() -> Dictionary:
 		"waste": int(stats.waste)
 		,"average_time": 0.0 if served == 0 else float(stats.service_time_total) / served
 		,"employee_tasks": stats.employee_tasks.duplicate(true)
+		,"employee_performance": employee_performance_snapshot()
 		,"ingredients_out": stats.ingredients_out.duplicate()
 	}

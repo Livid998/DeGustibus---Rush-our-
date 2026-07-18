@@ -220,6 +220,7 @@ func _update_employee_rows() -> void:
 	var live_ids: Dictionary = {}
 	var summary: Dictionary = SimulationManager.summary()
 	var employee_tasks: Dictionary = summary.get("employee_tasks", {})
+	var employee_performance: Dictionary = summary.get("employee_performance", {})
 	for employee: Dictionary in GameState.employees:
 		var employee_id := String(employee.get("id", ""))
 		if employee_id.is_empty():
@@ -235,10 +236,13 @@ func _update_employee_rows() -> void:
 			String(employee.get("name", "Dipendente")),
 			_role_name(String(employee.get("role", ""))),
 		]
-		value_label.text = "%d task · stress %.0f%%" % [
+		var performance: Dictionary = employee_performance.get(employee_id, {})
+		value_label.text = employee_performance_text(
 			int(employee_tasks.get(employee_id, 0)),
+			performance,
 			float(employee.get("stress", 0.0)) * 100.0,
-		]
+		)
+		value_label.tooltip_text = _employee_performance_tooltip(performance)
 	for employee_id: String in _employee_rows.keys():
 		if live_ids.has(employee_id):
 			continue
@@ -259,12 +263,47 @@ func _create_employee_row() -> Dictionary:
 	row.add_child(name_label)
 	var value_label := Label.new()
 	value_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	value_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	value_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	value_label.custom_minimum_size.x = 190.0
 	row.add_child(value_label)
 	return {
 		"row": row,
 		"name_label": name_label,
 		"value_label": value_label,
 	}
+
+
+func _employee_performance_tooltip(performance: Dictionary) -> String:
+	var parts := PackedStringArray()
+	var defects: Dictionary = performance.get("defects_by_id", {})
+	for defect_id: String in defects:
+		parts.append("%s: %d" % [
+			defect_id.replace("_", " ").capitalize(),
+			int(defects[defect_id]),
+		])
+	if parts.is_empty():
+		return "Nessun difetto attribuito nel servizio corrente."
+	return "Difetti attribuiti · %s" % " · ".join(parts)
+
+
+static func employee_performance_text(
+	task_count: int,
+	performance: Dictionary,
+	stress_percent: float
+) -> String:
+	var quality_samples := int(performance.get("quality_sample_count", 0))
+	var quality_text := (
+		"%.0f%%" % float(performance.get("quality_average", 0.0))
+		if quality_samples > 0 else "n/d"
+	)
+	return "%d task · qualità %s\n%d difetti · %d eventi · stress %.0f%%" % [
+		task_count,
+		quality_text,
+		int(performance.get("defects_attributed", 0)),
+		int(performance.get("quality_event_count", 0)),
+		stress_percent,
+	]
 
 
 func _update_station_cards() -> void:

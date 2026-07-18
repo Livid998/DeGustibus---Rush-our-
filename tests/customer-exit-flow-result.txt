@@ -1,1 +1,1 @@
-CUSTOMER EXIT FLOW: PASS checks=6 failures=0 elapsed=23.90 first_despawn=17.40 latest_stand=0.60
+CUSTOMER EXIT FLOW: PASS checks=6 failures=0 elapsed=25.20 first_despawn=17.50 latest_stand=0.60

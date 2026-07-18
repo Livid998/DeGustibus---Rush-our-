@@ -10,7 +10,7 @@ func _ready() -> void:
 	var original_state := GameState.serialize().duplicate(true)
 	_test_balance_registry()
 	_test_v9_migration()
-	_test_v10_round_trip()
+	_test_current_schema_round_trip()
 	GameState.deserialize(original_state)
 	SaveManager.writes_enabled = previous_writes_enabled
 	var result := "CASUAL STATE MIGRATION: %s | checks=%d failures=%d" % ["PASS" if failures.is_empty() else "FAIL", checks, failures.size()]
@@ -85,7 +85,7 @@ func _test_v9_migration() -> void:
 	_expect(String(GameState.pending_delivery_batch.id) == "legacy_batch" and int(GameState.pending_delivery_batch.items.tomato.amount) == 5 and is_equal_approx(float(GameState.pending_delivery_batch.remaining), 123.0), "an existing pending batch survives v9 migration")
 
 
-func _test_v10_round_trip() -> void:
+func _test_current_schema_round_trip() -> void:
 	GameState.album_inventory.tomato = 9
 	GameState.album_discovered.ice_vanilla = true
 	GameState.reviews = [{"id": "review_roundtrip", "stars": 5}]
@@ -115,14 +115,20 @@ func _test_v10_round_trip() -> void:
 	_expect(int(serialized.stock.tomato.reserved) == 0, "runtime reservations are not persisted")
 	GameState.reset_to_defaults(false)
 	GameState.deserialize(serialized)
-	_expect(int(GameState.album_inventory.tomato) == 9 and bool(GameState.album_discovered.ice_vanilla), "album state survives a v10 round-trip")
-	_expect(GameState.reviews.size() == 1 and String(GameState.reviews[0].id) == "review_roundtrip" and GameState.review_reward_progress == 4, "reviews and reward progress survive a v10 round-trip")
-	_expect(is_equal_approx(GameState.reputation_weight, 12.5) and int(GameState.world_clock.day) == 7 and is_equal_approx(float(GameState.world_clock.minute), 1215.5), "reputation weight and world clock survive a v10 round-trip")
-	_expect(String(GameState.restaurant_profile.player_name) == "Ada" and String(GameState.restaurant_profile.restaurant_name) == "Bistrot Test", "restaurant profile survives a v10 round-trip")
-	_expect(String(GameState.pending_delivery_batch.id) == "batch_roundtrip" and int(GameState.pending_delivery_batch.items.cheese.amount) == 12, "pending delivery batch survives a v10 round-trip")
-	_expect(is_equal_approx(float(GameState.cleanliness_state.score), 72.0) and bool(GameState.pest_state.warning), "cleanliness and pest state survive a v10 round-trip")
-	_expect(String(GameState.staff_preferences.legacy_employee) == "kitchen", "staff preferences survive a v10 round-trip")
-	_expect(int(GameState.stock.tomato.reserved) == 0, "reserved is forcibly reset when loading v10")
+	_expect(int(GameState.album_inventory.tomato) == 9 and bool(GameState.album_discovered.ice_vanilla), "album state survives a current-schema round-trip")
+	_expect(GameState.reviews.size() == 1 and String(GameState.reviews[0].id) == "review_roundtrip" and GameState.review_reward_progress == 4, "reviews and reward progress survive a current-schema round-trip")
+	_expect(
+		is_equal_approx(GameState.reputation_weight, 12.5)
+			and int(GameState.world_clock.day) == 7
+			and is_equal_approx(float(GameState.world_clock.minute), 1215.5),
+		"reputation weight and world clock survive a current-schema round-trip (weight=%.3f, day=%d, minute=%.3f)"
+			% [GameState.reputation_weight, int(GameState.world_clock.day), float(GameState.world_clock.minute)]
+	)
+	_expect(String(GameState.restaurant_profile.player_name) == "Ada" and String(GameState.restaurant_profile.restaurant_name) == "Bistrot Test", "restaurant profile survives a current-schema round-trip")
+	_expect(String(GameState.pending_delivery_batch.id) == "batch_roundtrip" and int(GameState.pending_delivery_batch.items.cheese.amount) == 12, "pending delivery batch survives a current-schema round-trip")
+	_expect(is_equal_approx(float(GameState.cleanliness_state.score), 72.0) and bool(GameState.pest_state.warning), "cleanliness and pest state survive a current-schema round-trip")
+	_expect(String(GameState.staff_preferences.legacy_employee) == "kitchen", "staff preferences survive a current-schema round-trip")
+	_expect(int(GameState.stock.tomato.reserved) == 0, "runtime reservations are forcibly reset when loading the current schema")
 
 
 func _expect(condition: bool, message: String) -> void:

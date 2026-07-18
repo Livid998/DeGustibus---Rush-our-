@@ -1230,6 +1230,11 @@ func _initial_wall_records() -> Array:
 func _emit_all() -> void:
 	money_changed.emit(money)
 	reputation_changed.emit(reputation)
+	# The day-cycle manager keeps a runtime clock mirror and commits it when the
+	# restaurant state changes. Refresh that mirror first while deserializing,
+	# otherwise the following state signal can overwrite the just-loaded clock
+	# with its stale pre-load value.
+	world_clock_changed.emit(world_clock.duplicate(true))
 	restaurant_state_changed.emit(restaurant_state)
 	menu_changed.emit()
 	employees_changed.emit()
@@ -1240,7 +1245,6 @@ func _emit_all() -> void:
 		album_discovered_changed.emit(ingredient_id, bool(album_discovered[ingredient_id]))
 	reviews_changed.emit()
 	review_reward_progress_changed.emit(review_reward_progress)
-	world_clock_changed.emit(world_clock.duplicate(true))
 	restaurant_profile_changed.emit(restaurant_profile.duplicate(true))
 	pending_delivery_batch_changed.emit(pending_delivery_batch.duplicate(true))
 	cleanliness_state_changed.emit(cleanliness_state.duplicate(true))

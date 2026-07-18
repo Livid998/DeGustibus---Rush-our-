@@ -19,6 +19,7 @@ func _ready() -> void:
 func _run() -> void:
 	var previous_writes_enabled := SaveManager.writes_enabled
 	SaveManager.writes_enabled = false
+	var orphan_baseline := Node.get_orphan_node_ids()
 	var original_state := GameState.serialize().duplicate(true)
 	GameState.reset_to_defaults(false)
 
@@ -26,6 +27,10 @@ func _run() -> void:
 	add_child(ui)
 	await get_tree().process_frame
 	await get_tree().process_frame
+	_expect(
+		String(ProjectSettings.get_setting("display/window/stretch/mode", "")) == "disabled",
+		"project uses pixel-native UI instead of stretching a desktop canvas"
+	)
 
 	ui.show_screen("Menu", false)
 	await get_tree().process_frame
@@ -33,12 +38,18 @@ func _run() -> void:
 	var menu_page_id := menu_page.get_instance_id()
 	var menu_grid := menu_page.find_child("MenuGrid", true, false) as GridContainer
 	_expect(menu_grid != null and ui.screen_build_count("Menu") == 1, "Menu builds one cached page")
+	# Keep the persistence check deterministic even if the fixture happens to
+	# expose fewer recipes than a real save and would otherwise not overflow.
+	menu_page.custom_minimum_size.y = 1200.0
+	await get_tree().process_frame
 	ui.screen_scroll.scroll_vertical = 96
 	await get_tree().process_frame
+	var saved_menu_scroll := ui.screen_scroll.scroll_vertical
 
 	ui.show_screen("Album", false)
 	await get_tree().process_frame
 	ui.show_screen("Menu", false)
+	await get_tree().process_frame
 	await get_tree().process_frame
 	await get_tree().process_frame
 	_expect(
@@ -47,7 +58,8 @@ func _run() -> void:
 		"switching management sections preserves the Menu page instance"
 	)
 	_expect(
-		ui.screen_scroll.scroll_vertical == 96,
+		saved_menu_scroll > 0
+		and ui.screen_scroll.scroll_vertical == saved_menu_scroll,
 		"switching away and back restores the saved scroll position"
 	)
 
@@ -138,11 +150,56 @@ func _run() -> void:
 	file.store_string(result)
 	file.close()
 
-	ui.queue_free()
-	await get_tree().process_frame
+	var exit_code := 0 if failures.is_empty() else 1
+	await _teardown_fixture(
+		ui,
+		original_state,
+		previous_writes_enabled,
+		orphan_baseline
+	)
+	# A SceneTreeTimer survives this test scene and targets SceneTree directly,
+	# so the test node and its script/resource dependencies can be destroyed
+	# before rendering-server shutdown begins.
+	var quit_timer := get_tree().create_timer(0.15)
+	quit_timer.timeout.connect(Callable(get_tree(), "quit").bind(exit_code))
+	queue_free()
+
+
+func _teardown_fixture(
+	ui: RestaurantUI,
+	original_state: Dictionary,
+	previous_writes_enabled: bool,
+	orphan_baseline: PackedInt64Array
+) -> void:
+	if is_instance_valid(ui):
+		ui.set_process(false)
+		# RestaurantUI owns a transient Theme and generated scaled icon cache.
+		# Detach the theme before freeing the tree so their RenderingServer RIDs
+		# can be reclaimed during the following idle frames.
+		if is_instance_valid(ui.root):
+			ui.root.theme = null
+		ui._theme = null
+		ui.queue_free()
+	for _frame: int in 4:
+		await get_tree().process_frame
+	_free_fixture_orphans(orphan_baseline)
+	GameIcons._scaled_cache = {}
+	GameFonts._medium = null
+	GameFonts._semibold = null
+	GameFonts._bold = null
 	GameState.deserialize(original_state)
 	SaveManager.writes_enabled = previous_writes_enabled
-	get_tree().quit(0 if failures.is_empty() else 1)
+	for _frame: int in 3:
+		await get_tree().process_frame
+
+
+func _free_fixture_orphans(orphan_baseline: PackedInt64Array) -> void:
+	for instance_id: int in Node.get_orphan_node_ids():
+		if instance_id in orphan_baseline:
+			continue
+		var object := instance_from_id(instance_id)
+		if is_instance_valid(object) and object is Node:
+			(object as Node).free()
 
 
 func _verify_target(ui: RestaurantUI, target: Vector2) -> void:
@@ -166,6 +223,13 @@ func _verify_target(ui: RestaurantUI, target: Vector2) -> void:
 			int(target.y),
 			expected_visible,
 			" plus Altro" if phone else "",
+		]
+	)
+	_expect(
+		ui.nav_row.get_combined_minimum_size().x <= target.x - 28.0,
+		"%dx%d navigation minimum width fits inside its panel" % [
+			int(target.x),
+			int(target.y),
 		]
 	)
 	if phone:
@@ -204,6 +268,26 @@ func _verify_target(ui: RestaurantUI, target: Vector2) -> void:
 				int(target.x),
 				int(target.y),
 				expected_columns,
+			]
+		)
+	var menu_page := ui.screen_page("Menu")
+	if menu_page != null:
+		var card_layout := menu_page.find_child("MenuCardLayout", true, false) as GridContainer
+		var controls_layout := menu_page.find_child(
+			"MenuCardControls",
+			true,
+			false
+		) as GridContainer
+		var expected_card_columns := 1 if phone else 2
+		_expect(
+			card_layout != null
+			and controls_layout != null
+			and card_layout.columns == expected_card_columns
+			and controls_layout.columns == expected_card_columns,
+			"%dx%d applies %d-column Menu card internals without horizontal clipping" % [
+				int(target.x),
+				int(target.y),
+				expected_card_columns,
 			]
 		)
 	var statistics_page := ui.screen_page("Statistiche")

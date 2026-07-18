@@ -59,6 +59,17 @@ static func apply_responsive_layout(content: Control, ui: RestaurantUI) -> void:
 				grid.columns = 2 if portrait else 4
 			"landscape_two":
 				grid.columns = 1 if portrait else 2
+			"menu_card":
+				grid.columns = 1 if phone else 2
+			"menu_controls":
+				grid.columns = 1 if phone else 2
+	for child: Node in content.find_children("*", "Control", true, false):
+		var control := child as Control
+		match String(control.get_meta("responsive_control", "")):
+			"menu_card":
+				control.custom_minimum_size.y = 0.0 if phone else 154.0
+			"menu_icon":
+				control.custom_minimum_size = Vector2(112, 104) if phone else Vector2(142, 132)
 	var operations := content.find_child(
 		"OperationalStatisticsScreen",
 		true,
@@ -124,6 +135,7 @@ static func _menu(content: VBoxContainer, ui: RestaurantUI) -> void:
 	var active_count := DataRegistry.active_recipes(GameState.menu).size()
 	var balance := Label.new()
 	balance.text = "%d/8 piatti attivi · %s" % [active_count, _menu_balance_text()]
+	balance.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	balance.add_theme_color_override("font_color", Color("3f8f5f") if "equilibrato" in balance.text else Color("b35d50"))
 	content.add_child(balance)
 	var grid := GridContainer.new()
@@ -138,16 +150,30 @@ static func _menu(content: VBoxContainer, ui: RestaurantUI) -> void:
 		var state: Dictionary = GameState.menu[recipe.id]
 		var card := ui.make_card()
 		card.custom_minimum_size.y = 154
-		var body := HBoxContainer.new()
-		body.add_theme_constant_override("separation", 12)
+		card.set_meta("responsive_control", "menu_card")
+		var body := GridContainer.new()
+		body.name = "MenuCardLayout"
+		body.set_meta("responsive_grid", "menu_card")
+		body.columns = 1 if ui.is_phone_layout() else 2
+		body.add_theme_constant_override("h_separation", 12)
+		body.add_theme_constant_override("v_separation", 8)
 		card.add_child(body)
 		var dish_icon := _new_icon(GameIcons.recipe_icon(recipe), Vector2(142, 132), not bool(state.unlocked))
+		dish_icon.name = "MenuDishIcon"
+		dish_icon.set_meta("responsive_control", "menu_icon")
+		if ui.is_phone_layout():
+			dish_icon.custom_minimum_size = Vector2(112, 104)
 		dish_icon.tooltip_text = String(recipe.name)
 		body.add_child(dish_icon)
 		var box := VBoxContainer.new()
 		box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		body.add_child(box)
-		var top := HBoxContainer.new()
+		var top := GridContainer.new()
+		top.name = "MenuCardControls"
+		top.set_meta("responsive_grid", "menu_controls")
+		top.columns = 1 if ui.is_phone_layout() else 2
+		top.add_theme_constant_override("h_separation", 8)
+		top.add_theme_constant_override("v_separation", 5)
 		var toggle := CheckBox.new()
 		toggle.text = String(recipe.name)
 		toggle.button_pressed = bool(state.active)
@@ -173,7 +199,10 @@ static func _menu(content: VBoxContainer, ui: RestaurantUI) -> void:
 		price.value = float(state.price)
 		price.suffix = " monete"
 		price.custom_minimum_size.x = 105
-		price.disabled = not bool(state.unlocked)
+		price.editable = bool(state.unlocked)
+		if not price.editable:
+			price.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			price.focus_mode = Control.FOCUS_NONE
 		price.value_changed.connect(func(value: float): GameState.set_recipe_price(recipe_id, int(value)))
 		top.add_child(price)
 		box.add_child(top)

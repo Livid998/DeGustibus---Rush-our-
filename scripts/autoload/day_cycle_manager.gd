@@ -261,10 +261,14 @@ func effective_spawn_interval(reputation: float, has_producible_recipe: bool = t
 	return maxf(configured_base / maxf(demand_multiplier, MINIMUM_POSITIVE_INTERVAL), MINIMUM_POSITIVE_INTERVAL)
 
 
-func group_cap(seat_count: int) -> int:
+func group_cap(table_group_slots: int) -> int:
+	# One physical table hosts one party regardless of how many chairs it has.
+	# The caller passes usable table slots, never raw seats.
+	if table_group_slots <= 0:
+		return 0
 	var queue_buffer := maxi(int(DataRegistry.balance_value("traffic.queue_buffer_groups", 0)), 0)
 	var absolute_cap := maxi(int(DataRegistry.balance_value("traffic.absolute_group_cap", 1)), 1)
-	return mini(maxi(seat_count, 0) + queue_buffer, absolute_cap)
+	return mini(maxi(table_group_slots, 0) + queue_buffer, absolute_cap)
 
 
 func lighting_profile_for_minute(minute_value: float) -> Dictionary:

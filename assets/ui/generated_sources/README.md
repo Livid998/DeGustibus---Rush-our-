@@ -14,6 +14,20 @@ Generation constraints:
 - flat `#ff00ff` chroma-key background;
 - no text, watermark, cell border, or icon overlap.
 
+Exact generation request retained for provenance:
+
+> Use `assets/ui/ingredient_icons.png` as the binding visual reference. Create
+> one coherent 5×4 sprite sheet containing, left-to-right and top-to-bottom:
+> sun, moon, rush-hour burst, room beauty, dirt, mouse, insect, delivery truck,
+> ambient-storage crate, refrigerated storage, chef, waiter, handyman,
+> profile/avatar, extractor hood, small portion, undercooked, overcooked,
+> burned food, and poor plating. Match the same soft low-poly 3D illustration,
+> rounded forms, very thick charcoal outline, simplified faceted shading, warm
+> top light, small highlights and saturated non-neon palette. Center and fully
+> contain every subject with 12–15% margin. No text, emoji, watermark, square
+> border, cell overlap or photorealism. Use a uniform `#ff00ff` chroma-key
+> background so every icon can be exported as transparent RGBA.
+
 Runtime processing:
 
 1. Chroma key removed with the imagegen skill's `remove_chroma_key.py`
@@ -25,5 +39,8 @@ Runtime processing:
    from those normalized icons. The larger
    `casual_system_icons.png` is the background-removed source-resolution sheet.
 
-The source is retained so the runtime crops can be regenerated without
-repeating image generation.
+The original batch sheet is the authoritative source rather than twenty
+duplicated source files: it preserves the exact generated pixels and their
+shared visual context. The individually named transparent exports are the
+stable runtime/source crops and can be regenerated deterministically from this
+sheet without repeating image generation.

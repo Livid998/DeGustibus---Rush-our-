@@ -144,7 +144,7 @@ func refresh_actions() -> void:
 		var preview_beauty := world.beauty_preview(build.current_definition, build.preview_cell, build.move_source)
 		var beauty_suffix := ""
 		if float(preview_beauty.get("item_beauty", 0.0)) > 0.0:
-			beauty_suffix = "  ·  Bellezza %.0f → %.0f (%+.1f)" % [
+			beauty_suffix = "  ·  Bellezza %.0f -> %.0f (%+.1f)" % [
 				float(preview_beauty.get("before", 0.0)),
 				float(preview_beauty.get("after", 0.0)),
 				float(preview_beauty.get("delta", 0.0)),

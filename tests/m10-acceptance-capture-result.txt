@@ -1,0 +1,1 @@
+M10 ACCEPTANCE CAPTURES: PASS | mode=headless-validation states=17 captures=0 checks=49 failures=0

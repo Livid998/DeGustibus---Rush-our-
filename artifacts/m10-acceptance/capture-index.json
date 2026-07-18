@@ -1,0 +1,119 @@
+{
+	"captures": [
+		{
+			"bytes": 708746,
+			"file": "01-day.png",
+			"height": 720,
+			"width": 1280
+		},
+		{
+			"bytes": 662163,
+			"file": "02-night.png",
+			"height": 720,
+			"width": 1280
+		},
+		{
+			"bytes": 715263,
+			"file": "03-pre-rush.png",
+			"height": 720,
+			"width": 1280
+		},
+		{
+			"bytes": 709599,
+			"file": "04-rush.png",
+			"height": 720,
+			"width": 1280
+		},
+		{
+			"bytes": 235850,
+			"file": "05-reviews.png",
+			"height": 768,
+			"width": 1366
+		},
+		{
+			"bytes": 325086,
+			"file": "06-album-quantities.png",
+			"height": 768,
+			"width": 1366
+		},
+		{
+			"bytes": 350838,
+			"file": "07-locked-recipe-costs.png",
+			"height": 768,
+			"width": 1366
+		},
+		{
+			"bytes": 237842,
+			"file": "08-warehouse-capacity.png",
+			"height": 768,
+			"width": 1366
+		},
+		{
+			"bytes": 666044,
+			"file": "09-warehouse-physical-crates.png",
+			"height": 720,
+			"width": 1280
+		},
+		{
+			"bytes": 239340,
+			"file": "10-incoming-delivery.png",
+			"height": 768,
+			"width": 1366
+		},
+		{
+			"bytes": 347241,
+			"file": "11-staff.png",
+			"height": 768,
+			"width": 1366
+		},
+		{
+			"bytes": 588353,
+			"file": "12-stove-with-hood.png",
+			"height": 720,
+			"width": 1280
+		},
+		{
+			"bytes": 547626,
+			"file": "13-stove-without-hood.png",
+			"height": 720,
+			"width": 1280
+		},
+		{
+			"bytes": 487022,
+			"file": "14-tabletop-icecream-machine.png",
+			"height": 720,
+			"width": 1280
+		},
+		{
+			"bytes": 623700,
+			"file": "15-dirty-restaurant-pest.png",
+			"height": 720,
+			"width": 1280
+		},
+		{
+			"bytes": 234339,
+			"file": "16-profile-avatar.png",
+			"height": 768,
+			"width": 1366
+		},
+		{
+			"bytes": 116445,
+			"file": "17-smartphone-portrait.png",
+			"height": 844,
+			"width": 390
+		}
+	],
+	"fixture_seed": 20260718,
+	"point_19": {
+		"item": "dessert",
+		"placement": "surface",
+		"scale": "1:1",
+		"support": "worktop",
+		"visual_size": [
+			2.0,
+			2.404,
+			2.03
+		]
+	},
+	"save_writes_enabled": false
+}

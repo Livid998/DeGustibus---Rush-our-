@@ -3,6 +3,7 @@ extends Node3D
 
 signal ambience_changed(snapshot: Dictionary)
 signal pest_warning_changed(active: bool, context: Dictionary)
+signal storage_fill_visuals_changed(snapshot: Dictionary)
 
 const GRID_SIZE := Vector2i(18, 14)
 const CELL_SIZE := 2.0
@@ -75,6 +76,7 @@ var _corridor_key_cache: Dictionary = {}
 var _traffic_epoch := 0
 var _path_cache_suspended := false
 var cleanup_root: Node3D
+var storage_fill_visualizer: StorageFillVisualizer
 var spill_records: Dictionary = {}
 var wash_batches: Dictionary = {}
 var ambience_system: RestaurantAmbienceSystem
@@ -95,6 +97,7 @@ func _ready() -> void:
 	_create_grid()
 	_create_floor_and_walls()
 	load_layout()
+	_setup_storage_fill_visuals()
 	spawn_staff()
 	SimulationManager.bind_world(self)
 	_setup_ambience()
@@ -141,10 +144,10 @@ func _process(delta: float) -> void:
 		_spawn_service_spill()
 	var has_producible_recipe := has_producible_active_recipe()
 	_traffic_recipe_warning = not has_producible_recipe
-	var maximum := customer_group_cap()
 	if _spawn_clock <= 0.0:
-		if maximum > 0 and SimulationManager.customers.size() < maximum:
-			spawn_customer_group()
+		var spawnable_group_size := _spawnable_customer_group_size()
+		if spawnable_group_size > 0:
+			spawn_customer_group(spawnable_group_size)
 		_spawn_clock = effective_customer_spawn_interval(has_producible_recipe)
 
 
@@ -534,6 +537,21 @@ func _create_roots() -> void:
 	configure_build_system()
 
 
+func _setup_storage_fill_visuals() -> void:
+	storage_fill_visualizer = StorageFillVisualizer.new()
+	add_child(storage_fill_visualizer)
+	storage_fill_visualizer.visuals_changed.connect(
+		func(snapshot: Dictionary): storage_fill_visuals_changed.emit(snapshot.duplicate(true))
+	)
+	storage_fill_visualizer.setup(self)
+
+
+func storage_fill_snapshot() -> Dictionary:
+	if storage_fill_visualizer == null:
+		return {}
+	return storage_fill_visualizer.snapshot()
+
+
 func _create_environment() -> void:
 	_world_environment = WorldEnvironment.new()
 	_world_environment.name = "WorldEnvironment"
@@ -768,6 +786,10 @@ func load_layout() -> void:
 	if ambience_system != null:
 		_refresh_ambience()
 		_restore_ambience_pest_visuals()
+	if storage_fill_visualizer != null:
+		# Direct layout reloads rebuild provider nodes without necessarily
+		# changing their aggregate capacity, so refresh their attached visuals.
+		storage_fill_visualizer.refresh()
 
 
 func instantiate_layout_object(uid: String, item_id: String, cell: Vector2i, rotation_steps: int, support_uid: String = "", attachment_slot: int = -1) -> PlacedObject:
@@ -2566,13 +2588,19 @@ func spawn_staff() -> void:
 		staff_agents[String(GameState.employees[index].id)] = agent
 
 
-func spawn_customer_group() -> void:
+func spawn_customer_group(requested_group_size: int = -1) -> bool:
 	if GameState.restaurant_state != "open":
-		return
+		return false
+	var group_size := requested_group_size
+	if group_size <= 0:
+		group_size = _spawnable_customer_group_size()
+	if group_size <= 0 or not can_accept_customer_group(group_size):
+		return false
 	var customer := CustomerAgent.new()
 	customer_root.add_child(customer)
 	customer.global_position = customer_spawn_position(customer)
-	customer.setup(self, _random_customer_group_size())
+	customer.setup(self, group_size)
+	return true
 
 
 func enqueue_customer(customer: Node) -> void:
@@ -2730,6 +2758,10 @@ func _random_customer_group_size() -> int:
 	return 4
 
 
+func _spawnable_customer_group_size() -> int:
+	return CustomerCapacityPlanner.spawnable_group_size(self)
+
+
 func request_table(customer: Node, group_size: int) -> Dictionary:
 	var candidates := _table_candidates(customer, group_size)
 	if candidates.is_empty():
@@ -2835,21 +2867,32 @@ func is_rush_active() -> bool:
 
 
 func customer_seat_count() -> int:
-	var result := 0
-	for table_uid: String in table_occupants:
-		var table_object := placed_objects.get(table_uid) as PlacedObject
-		if table_object != null and is_instance_valid(table_object):
-			result += _seat_assignments_for_table(table_object).size()
-	return result
+	return CustomerCapacityPlanner.seat_count(self)
+
+
+func customer_table_count() -> int:
+	return CustomerCapacityPlanner.table_count(self)
 
 
 func customer_group_cap() -> int:
 	var manager := day_cycle_manager()
 	if manager != null and manager.has_method("group_cap"):
-		return int(manager.call("group_cap", customer_seat_count()))
+		return int(manager.call("group_cap", customer_table_count()))
+	if customer_table_count() <= 0:
+		return 0
 	var queue_buffer := maxi(int(DataRegistry.balance_value("traffic.queue_buffer_groups", 0)), 0)
 	var configured_cap := maxi(int(DataRegistry.balance_value("traffic.absolute_group_cap", 1)), 1)
-	return mini(customer_seat_count() + queue_buffer, configured_cap)
+	return mini(customer_table_count() + queue_buffer, configured_cap)
+
+
+func can_accept_customer_group(group_size: int) -> bool:
+	if group_size <= 0:
+		return false
+	return bool(customer_capacity_snapshot(group_size).get("accepts_proposed", false))
+
+
+func customer_capacity_snapshot(proposed_group_size: int = 0) -> Dictionary:
+	return CustomerCapacityPlanner.snapshot(self, proposed_group_size)
 
 
 func effective_customer_spawn_interval(has_producible_recipe: bool = true) -> float:
@@ -2881,12 +2924,14 @@ func has_producible_active_recipe() -> bool:
 
 func traffic_flow_status() -> Dictionary:
 	var producible := has_producible_active_recipe()
+	var capacity := customer_capacity_snapshot()
 	return {
 		"has_producible_recipe": producible,
 		"warning": "Nessuna ricetta producibile: afflusso ridotto" if not producible else "",
 		"interval": effective_customer_spawn_interval(producible),
 		"group_cap": customer_group_cap(),
 		"active_groups": SimulationManager.customers.size(),
+		"capacity": capacity,
 	}
 
 
