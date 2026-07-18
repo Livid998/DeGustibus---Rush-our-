@@ -35,6 +35,9 @@ func setup(value: Dictionary, value_world: RestaurantWorld) -> void:
 	_create_task_prop_anchor()
 	_gesture_seed = float(abs(String(employee.id).hash() % 1000)) / 1000.0
 	_create_thought()
+	var preference_callback := Callable(self, "_on_staff_preference_changed")
+	if not GameState.staff_preferences_changed.is_connected(preference_callback):
+		GameState.staff_preferences_changed.connect(preference_callback)
 	validate_animations()
 
 
@@ -117,7 +120,13 @@ func _claim_task() -> void:
 		"handyman":
 			active_task = SimulationManager.claim_maintenance_task(employee, global_position)
 			if not active_task.is_empty():
-				_thought.text = {"wash_dishes":"LAVAGGIO", "clean_spill":"PULIZIA", "clean_floor":"PULIZIA"}.get(active_task.action, "MANUTENZIONE")
+				_thought.text = {
+					"wash_dishes":"LAVAGGIO",
+					"clean_spill":"PULIZIA",
+					"clean_floor":"PULIZIA",
+					"clean_kitchen":"CUCINA",
+					"remove_pest":"EMERGENZA",
+				}.get(active_task.action, "MANUTENZIONE")
 		_:
 			active_task = SimulationManager.claim_kitchen_task(employee, global_position)
 			if not active_task.is_empty():
@@ -357,6 +366,16 @@ func _begin_return_to_standby(force_refresh: bool = false) -> void:
 		play_animation("Idle")
 
 
+func _on_staff_preference_changed(employee_id: String, _preference: Variant) -> void:
+	if employee_id != String(employee.get("id", "")) or world == null:
+		return
+	# A busy worker keeps the current assignment. Clearing the old reservation
+	# is enough for the new preference to apply on the next idle return.
+	world.staff_standby_reservations.erase(get_instance_id())
+	if state in ["idle", "returning_idle"]:
+		_begin_return_to_standby(true)
+
+
 func _role_priority(active: bool) -> int:
 	if not active:
 		return 6
@@ -454,16 +473,16 @@ func _show_task_prop(working_tool: bool = false) -> void:
 		return
 	if model_path.is_empty():
 		match action:
-			"clean_spill", "clean_floor":
+			"clean_spill", "clean_floor", "remove_pest":
 				model_path = "res://assets/cleaning/Tool_Mop.glb"
-			"wash_dishes":
+			"wash_dishes", "clean_kitchen":
 				model_path = "res://assets/cleaning/Cleaning_Sponge.glb"
 	if model_path.is_empty() or not ResourceLoader.exists(model_path):
 		return
 	var scale_factor := 0.30 if working_tool else 1.0
-	if action == "wash_dishes":
+	if action in ["wash_dishes", "clean_kitchen"]:
 		scale_factor = 0.42
-	_task_prop_is_tool = working_tool or action in ["clean_spill", "clean_floor", "wash_dishes"]
+	_task_prop_is_tool = working_tool or action in ["clean_spill", "clean_floor", "wash_dishes", "clean_kitchen", "remove_pest"]
 	var prop_visual := ModelFactory.instantiate_model(model_path, scale_factor)
 	if _task_prop_is_tool:
 		_task_prop = Node3D.new()

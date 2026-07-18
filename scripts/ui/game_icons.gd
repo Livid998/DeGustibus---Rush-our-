@@ -15,6 +15,12 @@ const NEXT_TEXTURE: Texture2D = preload("res://assets/ui/control_next.svg")
 const PLAY_TEXTURE: Texture2D = preload("res://assets/ui/control_play.svg")
 const PAUSE_TEXTURE: Texture2D = preload("res://assets/ui/control_pause.svg")
 const PRIORITY_TEXTURE: Texture2D = preload("res://assets/ui/control_priority.svg")
+const MUSIC_TEXTURE: Texture2D = preload("res://assets/ui/food_icon_pack/ui/music.png")
+const ZOOM_IN_TEXTURE: Texture2D = preload("res://assets/ui/food_icon_pack/ui/zoom_in.png")
+const ZOOM_OUT_TEXTURE: Texture2D = preload("res://assets/ui/food_icon_pack/ui/zoom_out.png")
+const RESTAURANT_EDIT_TEXTURE: Texture2D = preload(
+	"res://assets/ui/food_icon_pack/ui/restaurant_edit_wrench_pencil.png"
+)
 const RARITY_TEXTURES := [
 	preload("res://assets/ui/food_icon_pack/ui/rarity_one_star.png"),
 	preload("res://assets/ui/food_icon_pack/ui/rarity_two_stars.png"),
@@ -27,6 +33,38 @@ const SPEED_TEXTURES := [
 	preload("res://assets/ui/food_icon_pack/ui/speed_2x.png"),
 	preload("res://assets/ui/food_icon_pack/ui/speed_4x.png")
 ]
+const CASUAL_SYSTEM_TEXTURES := {
+	"sun": preload("res://assets/ui/generated/casual_system/sun.png"),
+	"moon": preload("res://assets/ui/generated/casual_system/moon.png"),
+	"beauty": preload("res://assets/ui/generated/casual_system/beauty.png"),
+	"dirt": preload("res://assets/ui/generated/casual_system/dirt.png"),
+	"mouse": preload("res://assets/ui/generated/casual_system/mouse.png"),
+	"insect": preload("res://assets/ui/generated/casual_system/insect.png"),
+	"delivery_truck": preload("res://assets/ui/generated/casual_system/delivery_truck.png"),
+	"storage_ambient": preload("res://assets/ui/generated/casual_system/storage_ambient.png"),
+	"storage_refrigerated": preload(
+		"res://assets/ui/generated/casual_system/storage_refrigerated.png"
+	),
+	"rush": preload("res://assets/ui/generated/casual_system/rush.png"),
+	"role_chef": preload("res://assets/ui/generated/casual_system/role_chef.png"),
+	"role_waiter": preload("res://assets/ui/generated/casual_system/role_waiter.png"),
+	"role_handyman": preload("res://assets/ui/generated/casual_system/role_handyman.png"),
+	"profile_avatar": preload("res://assets/ui/generated/casual_system/profile_avatar.png"),
+	"extractor_hood": preload("res://assets/ui/generated/casual_system/extractor_hood.png"),
+	"defect_small_portion": preload(
+		"res://assets/ui/generated/casual_system/defect_small_portion.png"
+	),
+	"defect_undercooked": preload(
+		"res://assets/ui/generated/casual_system/defect_undercooked.png"
+	),
+	"defect_overcooked": preload(
+		"res://assets/ui/generated/casual_system/defect_overcooked.png"
+	),
+	"defect_burned": preload("res://assets/ui/generated/casual_system/defect_burned.png"),
+	"defect_poor_plating": preload(
+		"res://assets/ui/generated/casual_system/defect_poor_plating.png"
+	),
+}
 static var _scaled_cache: Dictionary = {}
 
 const NAVIGATION_INDICES := {
@@ -106,6 +144,26 @@ static func pause_icon() -> Texture2D:
 
 static func priority_icon() -> Texture2D:
 	return PRIORITY_TEXTURE
+
+
+static func music_icon() -> Texture2D:
+	return MUSIC_TEXTURE
+
+
+static func zoom_in_icon() -> Texture2D:
+	return ZOOM_IN_TEXTURE
+
+
+static func zoom_out_icon() -> Texture2D:
+	return ZOOM_OUT_TEXTURE
+
+
+static func restaurant_edit_icon() -> Texture2D:
+	return RESTAURANT_EDIT_TEXTURE
+
+
+static func casual_system_icon(icon_id: String) -> Texture2D:
+	return CASUAL_SYSTEM_TEXTURES.get(icon_id) as Texture2D
 
 
 static func rarity_icon(rarity: int) -> Texture2D:

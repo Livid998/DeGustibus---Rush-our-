@@ -14,7 +14,7 @@ func _ready() -> void:
 	add_child(ui)
 	ui.setup(world)
 	GameState.employees_changed.connect(world.spawn_staff)
-	get_window().min_size = Vector2i(800, 540)
+	get_window().min_size = Vector2i(320, 320) if OS.has_feature("web") else Vector2i(800, 540)
 
 
 func _notification(what: int) -> void:

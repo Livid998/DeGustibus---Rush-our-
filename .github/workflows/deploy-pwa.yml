@@ -89,10 +89,32 @@ jobs:
         run: |
           GODOT=".godot-bin/Godot_v${GODOT_VERSION}_linux.x86_64"
           "$GODOT" --headless --path . res://tests/test_runner.tscn
+          "$GODOT" --headless --path . res://tests/casual_state_migration.tscn
+          "$GODOT" --headless --path . res://tests/album_unlock_smoke.tscn
+          "$GODOT" --headless --path . res://tests/storage_delivery_reservation_smoke.tscn
+          "$GODOT" --headless --path . res://tests/day_cycle_smoke.tscn
+          "$GODOT" --headless --path . res://tests/review_quality_smoke.tscn
+          "$GODOT" --headless --path . res://tests/review_runtime_integration_smoke.tscn
+          "$GODOT" --headless --path . res://tests/reviews_screen_smoke.tscn
+          "$GODOT" --headless --path . res://tests/restaurant_ambience_smoke.tscn
+          "$GODOT" --headless --path . res://tests/ambience_runtime_smoke.tscn
+          "$GODOT" --headless --path . res://tests/staff_role_smoke.tscn
+          "$GODOT" --headless --path . res://tests/technical_builder_smoke.tscn
+          "$GODOT" --headless --path . res://tests/technical_layout_migration.tscn
+          "$GODOT" --headless --path . res://tests/profile_screen_smoke.tscn
+          "$GODOT" --headless --path . res://tests/responsive_ui_smoke.tscn
+          "$GODOT" --headless --path . res://tests/pwa_delivery_smoke.tscn
+          "$GODOT" --headless --path . res://tests/ui_glyph_audit.tscn
           "$GODOT" --headless --path . res://tests/asset_load_check.tscn
           "$GODOT" --headless --path . res://tests/service_smoke.tscn
           "$GODOT" --headless --path . res://tests/customer_flow_smoke.tscn
           "$GODOT" --headless --path . res://tests/maintenance_smoke.tscn
+          "$GODOT" --headless --path . res://tests/navigation_adversarial.tscn
+          "$GODOT" --headless --path . res://tests/customer_exit_flow.tscn
+          "$GODOT" --headless --path . res://tests/dish_visual_consistency.tscn
+          "$GODOT" --headless --path . res://tests/status_bubble-smoke.tscn
+          "$GODOT" --headless --path . res://tests/runtime_system_gaps_smoke.tscn
+          "$GODOT" --headless --path . res://tests/capture_m10_acceptance.tscn
           "$GODOT" --headless --path . res://tests/agent_stress.tscn
 
       - name: Esporta la PWA
@@ -106,14 +128,152 @@ jobs:
           import datetime
           import json
           import os
+          import pathlib
+          import re
+          import shutil
+          import struct
 
+          build = pathlib.Path("builds/pwa")
           info = {
               "built_at_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
               "commit": os.environ.get("GITHUB_SHA", ""),
+              "dirty": False,
+              "source_state": "clean",
               "mode": "release",
+              "offline_cache": "runtime-cache-after-first-controlled-load",
           }
-          with open("builds/pwa/build-info.json", "w", encoding="utf-8") as handle:
-              json.dump(info, handle, ensure_ascii=False, indent=2)
+          (build / "build-info.json").write_text(
+              json.dumps(info, ensure_ascii=False, indent=2),
+              encoding="utf-8",
+          )
+
+          shutil.copyfile("web/pwa_icon_192.png", build / "index.192x192.png")
+          manifest_path = build / "index.manifest.json"
+          manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+          manifest["orientation"] = "any"
+          manifest["id"] = "./"
+          manifest["scope"] = "./"
+          manifest["icons"] = [
+              icon for icon in manifest.get("icons", [])
+              if icon.get("sizes") != "192x192"
+          ]
+          manifest["icons"].append({
+              "sizes": "192x192",
+              "src": "index.192x192.png",
+              "type": "image/png",
+              "purpose": "any",
+          })
+          for icon in manifest["icons"]:
+              icon["purpose"] = "any"
+          manifest["icons"].sort(
+              key=lambda icon: int(icon["sizes"].split("x", maxsplit=1)[0])
+          )
+          manifest_path.write_text(
+              json.dumps(manifest, ensure_ascii=False, separators=(",", ":")),
+              encoding="utf-8",
+          )
+
+          worker_path = build / "index.service.worker.js"
+          worker = worker_path.read_text(encoding="utf-8")
+          if "cache.addAll(CACHED_FILES)" not in worker:
+              raise SystemExit("Service worker Godot non riconosciuto")
+          cached_match = re.search(
+              r"const CACHED_FILES = (?P<files>\[[^\r\n]*\]);",
+              worker,
+          )
+          cacheable_match = re.search(
+              r"const CACHEABLE_FILES = (?P<files>\[[^\r\n]*\]);",
+              worker,
+          )
+          if cached_match is None or cacheable_match is None:
+              raise SystemExit("Liste cache del service worker non trovate")
+          cached = json.loads(cached_match.group("files"))
+          cacheable = json.loads(cacheable_match.group("files"))
+          for asset in (
+              "index.manifest.json",
+              "index.144x144.png",
+              "index.180x180.png",
+              "index.192x192.png",
+              "index.512x512.png",
+              "build-info.json",
+          ):
+              if asset not in cached:
+                  cached.append(asset)
+          replacement = (
+              "const CACHED_FILES = "
+              + json.dumps(cached, separators=(",", ":"))
+              + ";"
+          )
+          worker = (
+              worker[:cached_match.start()]
+              + replacement
+              + worker[cached_match.end():]
+          )
+          bootstrap = """
+
+          // DeGustibus first-install control: claim the already-open page only when
+          // there is no previous active worker. Later updates keep waiting for the
+          // explicit "Aggiorna e riavvia" action.
+          self.addEventListener('install', (event) => {
+              if (!self.registration.active) {
+                  event.waitUntil(self.skipWaiting());
+              }
+          });
+          self.addEventListener('activate', (event) => {
+              event.waitUntil(self.clients.claim());
+          });
+          """
+          if "// DeGustibus first-install control" not in worker:
+              worker += bootstrap
+          worker_path.write_text(worker, encoding="utf-8")
+
+          required = (
+              "index.html",
+              "index.js",
+              "index.wasm",
+              "index.pck",
+              "index.service.worker.js",
+              "index.manifest.json",
+              "index.192x192.png",
+              "index.512x512.png",
+              "build-info.json",
+          )
+          missing = [name for name in required if not (build / name).is_file()]
+          if missing:
+              raise SystemExit(f"File PWA mancanti: {', '.join(missing)}")
+          if manifest["orientation"] != "any":
+              raise SystemExit("Il manifest forza ancora l'orientamento")
+          sizes = {icon["sizes"] for icon in manifest["icons"]}
+          if not {"192x192", "512x512"}.issubset(sizes):
+              raise SystemExit("Icone installazione 192/512 mancanti")
+          if not {"index.wasm", "index.pck"}.issubset(cacheable):
+              raise SystemExit("WASM/PCK non sono cache-on-demand")
+          for name, expected in (
+              ("index.192x192.png", (192, 192)),
+              ("index.512x512.png", (512, 512)),
+          ):
+              png = (build / name).read_bytes()
+              if png[:8] != b"\x89PNG\r\n\x1a\n":
+                  raise SystemExit(f"{name} non è un PNG")
+              dimensions = struct.unpack(">II", png[16:24])
+              if dimensions != expected:
+                  raise SystemExit(
+                      f"{name}: dimensioni {dimensions}, attese {expected}"
+                  )
+          total_bytes = sum(
+              path.stat().st_size for path in build.iterdir() if path.is_file()
+          )
+          print(f"PWA artifact verificato: {total_bytes / 1024 / 1024:.1f} MiB")
+          summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary:
+              with open(summary, "a", encoding="utf-8") as handle:
+                  handle.write(
+                      "### PWA\n"
+                      f"- Artifact: **{total_bytes / 1024 / 1024:.1f} MiB**\n"
+                      "- Manifest: orientamento libero, icone 192/512 verificate\n"
+                      "- Offline: shell precached; WASM/PCK cache-on-demand\n"
+                      f"- Commit: `{info['commit']}` (clean)\n"
+                  )
           PY
 
       - name: Configura GitHub Pages

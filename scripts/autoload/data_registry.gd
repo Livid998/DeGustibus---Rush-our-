@@ -1,7 +1,11 @@
 extends Node
 
 signal registry_loaded
+signal data_validation_failed(errors: Array)
 
+var gameplay_balance: Dictionary = {}
+var gameplay_balance_valid := false
+var balance_validation_errors: Array[String] = []
 var ingredients: Array = []
 var preparations: Array = []
 var food_visuals: Array = []
@@ -21,6 +25,7 @@ var build_by_id: Dictionary = {}
 
 
 func _ready() -> void:
+	gameplay_balance = _load_json_dictionary("res://data/gameplay_balance.json")
 	ingredients = _load_json_array("res://data/ingredients.json")
 	preparations = _load_json_array("res://data/preparations.json")
 	food_visuals = _load_json_array("res://data/food_visuals.json")
@@ -36,6 +41,9 @@ func _ready() -> void:
 	stations_by_id = _index(stations)
 	suppliers_by_id = _index(suppliers)
 	build_by_id = _index(build_catalog)
+	gameplay_balance_valid = _validate_gameplay_balance()
+	if not gameplay_balance_valid:
+		data_validation_failed.emit(balance_validation_errors.duplicate())
 	registry_loaded.emit()
 
 
@@ -98,3 +106,147 @@ func required_station_ids(recipe: Dictionary) -> Array[String]:
 		if not result.has(station_id):
 			result.append(station_id)
 	return result
+
+
+func balance_value(path: String, fallback: Variant = null) -> Variant:
+	var current: Variant = gameplay_balance
+	for key: String in path.split("."):
+		if not current is Dictionary or not (current as Dictionary).has(key):
+			return fallback
+		current = (current as Dictionary)[key]
+	return current
+
+
+func balance_section(section_id: String) -> Dictionary:
+	var value: Variant = balance_value(section_id, {})
+	return (value as Dictionary).duplicate(true) if value is Dictionary else {}
+
+
+func album_starter_inventory() -> Dictionary:
+	var configured: Variant = balance_value("album.starter_inventory", {})
+	var result: Dictionary = {}
+	if not configured is Dictionary:
+		return result
+	for ingredient_id: String in configured:
+		if ingredients_by_id.has(ingredient_id):
+			result[ingredient_id] = maxi(int(configured[ingredient_id]), 0)
+	return result
+
+
+func storage_metadata_for_ingredient(ingredient_or_id: Variant) -> Dictionary:
+	var ingredient: Dictionary = {}
+	if ingredient_or_id is Dictionary:
+		ingredient = ingredient_or_id
+	else:
+		ingredient = ingredients_by_id.get(String(ingredient_or_id), {})
+	var default_type := String(balance_value("storage.default_type", "ambient"))
+	var storage_type := String(ingredient.get("storage_type", default_type))
+	var allowed: Variant = balance_value("storage.allowed_types", ["ambient", "refrigerated"])
+	if not allowed is Array or not (allowed as Array).has(storage_type):
+		storage_type = default_type
+	return {
+		"storage_type": storage_type,
+		"storage_units": maxi(int(ingredient.get("storage_units", balance_value("storage.default_units", 1))), 1)
+	}
+
+
+func recipe_raw_requirements(recipe_or_id: Variant) -> Dictionary:
+	var recipe: Dictionary = {}
+	if recipe_or_id is Dictionary:
+		recipe = recipe_or_id
+	else:
+		recipe = recipes_by_id.get(String(recipe_or_id), {})
+	var requirements: Dictionary = {}
+	for step: Dictionary in recipe.get("steps", []):
+		for ingredient_id: String in step.get("inputs", {}):
+			requirements[ingredient_id] = int(requirements.get(ingredient_id, 0)) + maxi(int(step.inputs[ingredient_id]), 0)
+	return requirements
+
+
+func _validate_gameplay_balance() -> bool:
+	balance_validation_errors.clear()
+	_require_balance_number("schema_version", 1.0)
+	_require_balance_number("save.autosave_debounce_seconds", 0.05)
+	_require_balance_number("day_cycle.real_seconds_at_1x", 1.0)
+	_require_balance_number("day_cycle.start_minute", 0.0, 1439.0)
+	_require_balance_number("day_cycle.rush_warning_seconds", 0.0)
+	_require_balance_number("traffic.base_spawn_interval", 0.1)
+	_require_balance_number("traffic.reputation_multiplier_min", 0.01)
+	_require_balance_number("traffic.reputation_multiplier_max", 0.01)
+	_require_balance_number("traffic.night_multiplier", 0.0)
+	_require_balance_number("traffic.queue_buffer_groups", 0.0)
+	_require_balance_number("traffic.absolute_group_cap", 1.0)
+	_require_balance_number("delivery.batch_interval_seconds", 1.0)
+	_require_balance_number("delivery.urgent_delivery_seconds", 1.0)
+	_require_balance_number("reviews.history_limit", 1.0)
+	_require_balance_number("reviews.reputation_ema_alpha", 0.0001, 1.0)
+	_require_balance_number("reviews.positive_reviews_for_album_reward", 1.0)
+	_require_balance_number("cleanliness.dirty_threshold", 0.0, 100.0)
+	_require_balance_number("cleanliness.very_dirty_threshold", 0.0, 100.0)
+	_require_balance_number("cleanliness.pest_threshold", 0.0, 100.0)
+	_require_balance_number("cleanliness.pest_delay_seconds", 0.0)
+	_require_balance_number("album.reward_quantity_min", 1.0)
+	_require_balance_number("album.reward_quantity_max", 1.0)
+	_require_balance_number("album.pity_interval", 1.0)
+	_require_balance_number("album.positive_reviews_per_reward", 1.0)
+	_require_balance_number("album.five_star_gift_chance", 0.0, 1.0)
+	_require_balance_number("album.reputation_threshold_reward", 0.0)
+	_require_balance_number("album.day_completion_reward", 0.0)
+	if float(balance_value("traffic.reputation_multiplier_min", 0.0)) > float(balance_value("traffic.reputation_multiplier_max", 0.0)):
+		balance_validation_errors.append("traffic reputation multiplier min cannot exceed max")
+	if (
+		float(balance_value("cleanliness.pest_threshold", 0.0)) > float(balance_value("cleanliness.very_dirty_threshold", 0.0))
+		or float(balance_value("cleanliness.very_dirty_threshold", 0.0)) > float(balance_value("cleanliness.dirty_threshold", 0.0))
+	):
+		balance_validation_errors.append("cleanliness thresholds must be ordered pest <= very_dirty <= dirty")
+	if int(balance_value("album.reward_quantity_min", 1)) > int(balance_value("album.reward_quantity_max", 1)):
+		balance_validation_errors.append("album reward quantity min cannot exceed max")
+	var rush_windows: Variant = balance_value("day_cycle.rush_windows", null)
+	if not rush_windows is Array or (rush_windows as Array).is_empty():
+		balance_validation_errors.append("day_cycle.rush_windows must be a non-empty array")
+	else:
+		for index: int in (rush_windows as Array).size():
+			var window: Variant = (rush_windows as Array)[index]
+			if not window is Dictionary:
+				balance_validation_errors.append("day_cycle.rush_windows[%d] must be an object" % index)
+				continue
+			for field: String in ["start", "end", "traffic_multiplier"]:
+				if not (window as Dictionary).has(field) or not ((window as Dictionary)[field] is int or (window as Dictionary)[field] is float):
+					balance_validation_errors.append("day_cycle.rush_windows[%d].%s must be numeric" % [index, field])
+			var start := float((window as Dictionary).get("start", 0.0))
+			var end := float((window as Dictionary).get("end", 0.0))
+			if start < 0.0 or end > 1440.0:
+				balance_validation_errors.append("day_cycle.rush_windows[%d] must stay inside the day" % index)
+			if start >= end:
+				balance_validation_errors.append("day_cycle.rush_windows[%d] must end after it starts" % index)
+			if float((window as Dictionary).get("traffic_multiplier", 0.0)) <= 0.0:
+				balance_validation_errors.append("day_cycle.rush_windows[%d].traffic_multiplier must be positive" % index)
+	var allowed_types: Variant = balance_value("storage.allowed_types", null)
+	if not allowed_types is Array or not (allowed_types as Array).has("ambient") or not (allowed_types as Array).has("refrigerated"):
+		balance_validation_errors.append("storage.allowed_types must include ambient and refrigerated")
+	for ingredient: Dictionary in ingredients:
+		var metadata := storage_metadata_for_ingredient(ingredient)
+		if int(metadata.storage_units) <= 0:
+			balance_validation_errors.append("ingredient %s has invalid storage_units" % ingredient.get("id", ""))
+	var starter: Variant = balance_value("album.starter_inventory", {})
+	if not starter is Dictionary:
+		balance_validation_errors.append("album.starter_inventory must be an object")
+	else:
+		for ingredient_id: String in starter:
+			if not ingredients_by_id.has(ingredient_id):
+				balance_validation_errors.append("album starter references unknown ingredient %s" % ingredient_id)
+			elif int(starter[ingredient_id]) < 0:
+				balance_validation_errors.append("album starter amount cannot be negative for %s" % ingredient_id)
+	for error: String in balance_validation_errors:
+		push_error("Gameplay balance validation: %s" % error)
+	return balance_validation_errors.is_empty()
+
+
+func _require_balance_number(path: String, minimum: float, maximum: float = INF) -> void:
+	var value: Variant = balance_value(path, null)
+	if not (value is int or value is float):
+		balance_validation_errors.append("%s must be numeric" % path)
+		return
+	var numeric := float(value)
+	if numeric < minimum or numeric > maximum:
+		balance_validation_errors.append("%s must be in %.3f..%.3f" % [path, minimum, maximum])

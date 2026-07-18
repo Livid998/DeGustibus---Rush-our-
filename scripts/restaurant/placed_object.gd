@@ -14,6 +14,7 @@ var current_task: Dictionary = {}
 var visual_model: Node3D
 
 var _status_label: Label3D
+var _operational_warning_label: Label3D
 var _food_anchor: Node3D
 var _food_model: Node3D
 var _food_models: Array[Node3D] = []
@@ -54,6 +55,8 @@ func setup(value_uid: String, item: Dictionary, cell: Vector2i, rotation_value: 
 	_create_invisible_collision()
 	if not station_id.is_empty():
 		_create_station_feedback()
+	if bool(definition.get("ventilation_required", false)):
+		_create_operational_warning()
 	if station_id in ["stove", "multi_stove", "oven", "pizza_oven"]:
 		_create_heat_particles()
 
@@ -75,6 +78,26 @@ func register_station() -> void:
 		return
 	var station: Dictionary = DataRegistry.stations_by_id.get(station_id, {})
 	SimulationManager.register_station(station_id, self, int(station.get("capacity", 1)))
+
+
+func is_operational() -> bool:
+	var restaurant_world := _restaurant_world()
+	return true if restaurant_world == null else restaurant_world.station_is_operational(self)
+
+
+func refresh_operational_feedback() -> void:
+	if _operational_warning_label == null:
+		return
+	_operational_warning_label.visible = not is_operational()
+
+
+func _restaurant_world() -> RestaurantWorld:
+	var ancestor: Node = get_parent()
+	while ancestor != null:
+		if ancestor is RestaurantWorld:
+			return ancestor as RestaurantWorld
+		ancestor = ancestor.get_parent()
+	return null
 
 
 func get_interaction_position() -> Vector3:
@@ -321,7 +344,7 @@ func _create_invisible_collision() -> void:
 		var bounds := ModelFactory.calculate_visual_bounds(visual_model, true)
 		box.size = Vector3(maxf(bounds.size.x * 0.96, 0.5), maxf(bounds.size.y, 1.0), maxf(bounds.size.z, 0.85))
 		shape.position = bounds.get_center()
-	elif placement in ["seat", "surface", "wall_mount"]:
+	elif placement in ["seat", "surface", "wall_mount", "overhead"]:
 		var bounds := ModelFactory.calculate_visual_bounds(visual_model, true)
 		box.size = Vector3(maxf(bounds.size.x * 0.9, 0.45), maxf(bounds.size.y, 0.35), maxf(bounds.size.z * 0.9, 0.45))
 		shape.position = bounds.get_center()
@@ -359,6 +382,22 @@ func _create_station_feedback() -> void:
 	_status_label.no_depth_test = true
 	_status_label.visible = false
 	add_child(_status_label)
+
+
+func _create_operational_warning() -> void:
+	var bounds := ModelFactory.calculate_visual_bounds(visual_model, true)
+	_operational_warning_label = Label3D.new()
+	_operational_warning_label.name = "OperationalWarning"
+	_operational_warning_label.text = "CAPPA MANCANTE"
+	_operational_warning_label.font = GameFonts.bold()
+	_operational_warning_label.position = Vector3(0.0, maxf(bounds.end.y + 0.44, 1.58), 0.0)
+	_operational_warning_label.font_size = 25
+	_operational_warning_label.outline_size = 9
+	_operational_warning_label.modulate = Color("ff5a67")
+	_operational_warning_label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+	_operational_warning_label.no_depth_test = true
+	_operational_warning_label.visible = false
+	add_child(_operational_warning_label)
 
 
 func _create_heat_particles() -> void:

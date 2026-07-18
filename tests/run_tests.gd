@@ -376,9 +376,25 @@ func _test_builder_and_seating(world: RestaurantWorld) -> void:
 	build.preview_cell = Vector2i(6, 7)
 	build.rotation_steps = 0
 	var west_segment := build._edge_screen_segment(Vector2i(6, 7), 1)
-	var near_west_corner := west_segment[0] + (west_segment[1] - west_segment[0]).normalized() * 6.0
+	var west_segment_length := west_segment[0].distance_to(west_segment[1])
+	# Projected cell length varies with the physical viewport now that the UI is
+	# pixel-native. Keep the probe close to the corner, but always inside the
+	# intended segment instead of crossing into the adjacent edge on tiny views.
+	var edge_probe_distance := minf(6.0, west_segment_length * 0.35)
+	var near_west_corner := west_segment[0] + (west_segment[1] - west_segment[0]).normalized() * edge_probe_distance
 	var inactive_edge_target := build._nearest_edge_target(near_west_corner, null)
-	_expect(world.edge_key(Vector2i(inactive_edge_target.cell), int(inactive_edge_target.rotation)) == world.edge_key(Vector2i(6, 7), 1), "inactive edge selection ignores stale placement hysteresis and chooses the geometrically closest side")
+	var inactive_edge_key := world.edge_key(Vector2i(inactive_edge_target.cell), int(inactive_edge_target.rotation))
+	var expected_west_edge_key := world.edge_key(Vector2i(6, 7), 1)
+	_expect(
+		inactive_edge_key == expected_west_edge_key,
+		"inactive edge selection ignores stale placement hysteresis and chooses the geometrically closest side (got %s at %.2fpx, expected %s; segment %.2fpx)"
+			% [
+				inactive_edge_key,
+				float(inactive_edge_target.get("distance", -1.0)),
+				expected_west_edge_key,
+				west_segment_length
+			]
+	)
 	_expect(build._edge_target_is_within_selection_range({"key":"h:6:7", "distance":BuildSystem.EDGE_SELECTION_FALLBACK_RADIUS_PX - 1.0}) and not build._edge_target_is_within_selection_range({"key":"h:6:7", "distance":BuildSystem.EDGE_SELECTION_FALLBACK_RADIUS_PX + 1.0}), "edge fallback only selects structural pieces within a bounded screen-space radius")
 	build.start_place("plant")
 	var pinned_cell := build.preview_cell

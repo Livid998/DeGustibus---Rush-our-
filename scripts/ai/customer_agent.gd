@@ -27,6 +27,7 @@ var served_order_ids: Dictionary = {}
 var group_models: Array[Node3D] = []
 var people: Array[CustomerPersonAgent] = []
 var dish_models: Dictionary = {}
+var group_experience: Dictionary = {}
 
 var _thought: Label3D
 var _registered := false
@@ -58,6 +59,12 @@ var _departed_members: Dictionary = {}
 var _exit_sequence_elapsed := 0.0
 var _exit_crossed_count := 0
 var _exit_departure_times: Dictionary = {}
+var _review_finalized := false
+var _food_wait_recorded := false
+var _quality_scores: Array[float] = []
+var _service_scores: Array[float] = []
+var _ambience_poll_clock := 0.0
+var _seen_pest_incidents: Dictionary = {}
 
 const CUSTOMER_APPEARANCES: Array[String] = [
 	"Casual_Male", "Casual_Female", "Casual2_Male", "Casual2_Female", "Casual3_Male", "Casual3_Female",
@@ -77,6 +84,11 @@ func setup(value_world: RestaurantWorld, size: int) -> void:
 	customer_type = ["lavoratore", "famiglia", "studente", "gourmet", "abituale"].pick_random()
 	patience = randf_range(58.0, 82.0)
 	budget = randi_range(22, 48)
+	group_experience = SimulationManager.begin_group_experience(name, {
+		"customer_type": customer_type,
+		"created_at": GameState.service_seconds,
+		"stage": "arrived",
+	})
 	world.enqueue_customer(self)
 	_build_people()
 	_create_thought()
@@ -109,6 +121,11 @@ func _process(delta: float) -> void:
 		if is_instance_valid(person):
 			person.tick_motion(scaled)
 	_update_controller_anchor()
+	if _seated and state in ["waiting_order", "waiting_food", "eating", "waiting_payment", "change_order"]:
+		_ambience_poll_clock -= scaled
+		if _ambience_poll_clock <= 0.0:
+			_ambience_poll_clock = 0.5
+			_update_visible_pest_experience()
 	if GameState.restaurant_state == "closing" and state in ["queueing", "waiting_table", "admitting"] and not _seated:
 		_leave_for_closing()
 	if state in ["queueing", "waiting_table", "waiting_order", "waiting_food", "eating", "waiting_payment"]:
@@ -132,6 +149,10 @@ func _process(delta: float) -> void:
 			_set_people_mode("conversation", false)
 			if state_elapsed > patience * 1.8:
 				_leave_lost("CONTO IN RITARDO")
+		"change_order":
+			_set_people_mode("conversation", false)
+			if state_elapsed > patience * 1.2:
+				_leave_lost("CAMBIO ORDINE IN RITARDO")
 		"waiting_exit_door":
 			if world.try_begin_customer_exit(self):
 				_begin_exit_sequence()
@@ -315,11 +336,22 @@ func _return_to_queue() -> void:
 	_refresh_queue_targets(true)
 
 
+func order_requires_change(order_id: String, _reason: String = "") -> void:
+	if _local_order(order_id).is_empty() or state in ["standing_to_leave", "waiting_exit_door", "leaving"]:
+		return
+	_set_state("change_order")
+	_set_people_mode("conversation", false)
+	_thought.text = "CAMBIO ORDINE"
+	_thought.visible = true
+
+
 func service_completed(action: String, payload: Dictionary) -> void:
+	_record_service_score(payload)
 	match action:
 		"take_order":
 			if state != "waiting_order" or not _seated or _take_order_committed or not _owns_reserved_table():
 				return
+			SimulationManager.record_group_wait(group_experience, "order", state_elapsed)
 			_take_order_committed = true
 			orders.clear()
 			served_order_ids.clear()
@@ -327,13 +359,19 @@ func service_completed(action: String, payload: Dictionary) -> void:
 			_diner_eat_total.clear()
 			_diner_finished.clear()
 			for guest_index: int in group_size:
-				var recipe := _choose_recipe()
-				if recipe.is_empty():
-					continue
-				var order := SimulationManager.create_order(recipe.id, String(table.get("uid", "")), self)
-				if not order.is_empty():
-					order.diner_index = guest_index
-					orders.append(order)
+				var excluded: Dictionary = {}
+				while excluded.size() < DataRegistry.recipes.size():
+					var recipe := _choose_recipe(excluded)
+					if recipe.is_empty():
+						break
+					var order := SimulationManager.create_order(recipe.id, String(table.get("uid", "")), self)
+					if not order.is_empty():
+						order.diner_index = guest_index
+						order.customer_budget = budget
+						orders.append(order)
+						SimulationManager.add_group_recipe(group_experience, String(recipe.id))
+						break
+					excluded[String(recipe.id)] = true
 			if orders.size() != group_size:
 				_leave_lost("MENU NON DISPONIBILE")
 				return
@@ -346,7 +384,11 @@ func service_completed(action: String, payload: Dictionary) -> void:
 			var order := _local_order(order_id)
 			if order.is_empty() or served_order_ids.has(order_id) or not _order_is_ready_to_serve(order_id):
 				return
+			if not _food_wait_recorded:
+				_food_wait_recorded = true
+				SimulationManager.record_group_wait(group_experience, "food", state_elapsed)
 			served_order_ids[order_id] = true
+			_record_order_quality(order)
 			_show_dish(order)
 			var diner_index := int(order.get("diner_index", 0))
 			# Keep dining readable without holding a table artificially long: the
@@ -361,15 +403,54 @@ func service_completed(action: String, payload: Dictionary) -> void:
 			if state != "waiting_payment" or orders.is_empty() or _payment_committed or served_order_ids.size() != orders.size():
 				return
 			_payment_committed = true
-			var total := 0
-			for order: Dictionary in orders:
-				if SimulationManager.orders.has(String(order.id)):
-					SimulationManager.complete_order_payment(String(order.id), satisfaction)
-				total += int(GameState.menu.get(String(order.recipe_id), {}).get("price", 0))
+			SimulationManager.record_group_wait(group_experience, "bill", state_elapsed)
+			if not _quality_scores.is_empty():
+				SimulationManager.record_group_food_quality(group_experience, _average_float(_quality_scores))
+			if not _service_scores.is_empty():
+				SimulationManager.record_group_service(group_experience, _average_float(_service_scores))
+			SimulationManager.record_group_ambience(group_experience)
+			var order_ids: Array = orders.map(func(entry: Dictionary): return String(entry.id))
+			var service_score := _average_float(_service_scores) if not _service_scores.is_empty() else 70.0
+			var completion := SimulationManager.complete_group_payment(self, group_experience, order_ids, {
+				"customer_type": customer_type,
+				"service_tip_modifier": clampf((service_score - 50.0) / 50.0 * 0.02, -0.02, 0.02),
+			})
+			if not bool(completion.get("accepted", false)):
+				_payment_committed = false
+				_thought.text = "CONTO IN ATTESA"
+				_thought.visible = true
+				return
+			_review_finalized = true
+			var review: Dictionary = completion.get("review", {})
+			var total := int(round(float(review.get("group_total", 0.0)))) + int(review.get("tip", 0))
+			satisfaction = clampf(float(review.get("satisfaction", 70.0)) / 100.0, 0.0, 1.0)
 			_thought.text = "+%d" % total
 			_thought.visible = true
 			AudioManager.play_feedback("income")
 			_begin_leaving(false)
+		"change_order":
+			if state != "change_order" or not _seated or not _owns_reserved_table():
+				return
+			var order_id := String(payload.get("order_id", ""))
+			var changed_order: Dictionary = SimulationManager.orders.get(order_id, {})
+			if changed_order.is_empty() or String(changed_order.get("state", "")) != "change_order":
+				return
+			var alternatives := SimulationManager.order_change_alternatives(order_id, budget)
+			if alternatives.is_empty():
+				SimulationManager.cancel_order(order_id, "no_affordable_alternative")
+				_leave_lost("NESSUNA ALTERNATIVA")
+				return
+			var delay := maxf(GameState.service_seconds - float(changed_order.get("change_requested_at", GameState.service_seconds)), 0.0)
+			var replacement: Dictionary = SimulationManager.complete_order_change(order_id, String(alternatives[0].id), delay)
+			if replacement.is_empty():
+				SimulationManager.cancel_order(order_id, "replacement_reservation_failed")
+				_leave_lost("NESSUNA ALTERNATIVA")
+				return
+			satisfaction = maxf(satisfaction - float(replacement.get("last_change_penalty", 0.0)), 0.25)
+			SimulationManager.record_group_change_order(group_experience, delay, true)
+			_thought.text = "CAMBIO ORDINE"
+			_thought.visible = true
+			_set_state("eating" if not served_order_ids.is_empty() else "waiting_food")
 
 
 func _update_dining(delta: float) -> void:
@@ -407,6 +488,9 @@ func accepts_service_action(action: String, payload: Dictionary = {}) -> bool:
 			var order_id := String(payload.get("order_id", ""))
 			return state in ["waiting_food", "eating"] and _seated and _owns_reserved_table() and not served_order_ids.has(order_id) and not _local_order(order_id).is_empty() and _order_is_ready_to_serve(order_id)
 		"payment": return state == "waiting_payment" and _seated and not _payment_committed and served_order_ids.size() == orders.size() and not orders.is_empty()
+		"change_order":
+			var order_id := String(payload.get("order_id", ""))
+			return state == "change_order" and _seated and _owns_reserved_table() and not _local_order(order_id).is_empty() and String(SimulationManager.orders.get(order_id, {}).get("state", "")) == "change_order"
 	return false
 
 
@@ -421,12 +505,14 @@ func _request_service_once(action: String, payload: Dictionary = {}) -> void:
 		_service_request_ids[action] = String(task.id)
 
 
-func _choose_recipe() -> Dictionary:
+func _choose_recipe(excluded: Dictionary = {}) -> Dictionary:
 	var candidates: Array = []
 	var weights: Array[float] = []
 	for recipe: Dictionary in DataRegistry.active_recipes(GameState.menu):
+		if excluded.has(String(recipe.id)):
+			continue
 		var price := int(GameState.menu[recipe.id].price)
-		if price > budget or bool(GameState.menu[recipe.id].sold_out):
+		if price > budget or GameState.is_recipe_sold_out(String(recipe.id)):
 			continue
 		candidates.append(recipe)
 		var weight := float(recipe.get("popularity", 1.0))
@@ -453,6 +539,7 @@ func _leave_lost(message: String) -> void:
 		return
 	_thought.text = message
 	_thought.visible = true
+	_finalize_abandoned_review()
 	SimulationManager.cancel_customer_work(self)
 	_begin_leaving(true)
 
@@ -893,6 +980,125 @@ func _set_state(value: String, reset_elapsed: bool = true) -> void:
 	if state == value and not reset_elapsed: return
 	state = value
 	if reset_elapsed: state_elapsed = 0.0
+	if not group_experience.is_empty():
+		var experience_stage: String = {
+			"queueing": "arrived",
+			"waiting_table": "arrived",
+			"waiting_order": "seated",
+			"waiting_food": "ordered",
+			"change_order": "ordered",
+			"eating": "eating",
+			"waiting_payment": "paying",
+		}.get(value, "")
+		if not String(experience_stage).is_empty():
+			SimulationManager.set_group_experience_stage(group_experience, String(experience_stage))
+
+
+func _record_service_score(payload: Dictionary) -> void:
+	var employee_id := String(payload.get("employee_id", ""))
+	if employee_id.is_empty():
+		return
+	for employee: Dictionary in GameState.employees:
+		if String(employee.get("id", "")) != employee_id:
+			continue
+		var service_skill := float(employee.get("skills", {}).get("service", 0.70))
+		var precision := float(employee.get("precision", 0.80))
+		var response_seconds := maxf(float(payload.get("response_seconds", 0.0)), 0.0)
+		var responsiveness := lerpf(100.0, 55.0, clampf(response_seconds / 45.0, 0.0, 1.0))
+		_service_scores.append(clampf((service_skill * 100.0 + precision * 100.0 + responsiveness) / 3.0, 0.0, 100.0))
+		return
+
+
+func _record_order_quality(order: Dictionary) -> void:
+	_quality_scores.append(clampf(float(order.get("quality_score", 70.0)), 0.0, 100.0))
+	var seen: Dictionary = {}
+	var all_events: Array = []
+	all_events.append_array(order.get("quality_event_history", []))
+	all_events.append_array(order.get("quality_events", []))
+	for event_value: Variant in all_events:
+		if not event_value is Dictionary:
+			continue
+		var event := event_value as Dictionary
+		var event_id := String(event.get("id", ""))
+		if event_id.is_empty() or seen.has(event_id):
+			continue
+		seen[event_id] = true
+		SimulationManager.record_group_quality_event(group_experience, event)
+	if int(order.get("remake_attempts", 0)) > 0:
+		SimulationManager.record_group_incident_resolution(
+			group_experience,
+			"remake_%s" % String(order.get("id", "")),
+			maxf(GameState.service_seconds - float(order.get("created_at", GameState.service_seconds)), 0.0)
+		)
+
+
+func _update_visible_pest_experience() -> void:
+	if world == null or group_experience.is_empty() or not world.has_method("visible_pest_incidents"):
+		return
+	var active_ids: Dictionary = {}
+	var active_records: Array = world.call("visible_pest_incidents")
+	for record_value: Variant in active_records:
+		if not record_value is Dictionary:
+			continue
+		var record := record_value as Dictionary
+		var incident_id := String(record.get("id", ""))
+		var kind := String(record.get("kind", "insect"))
+		if incident_id.is_empty():
+			continue
+		active_ids[incident_id] = true
+		if _seen_pest_incidents.has(incident_id):
+			continue
+		_seen_pest_incidents[incident_id] = {
+			"kind": kind,
+			"seen_at": GameState.service_seconds,
+			"resolved": false,
+		}
+		SimulationManager.record_group_visible_pest(group_experience, kind)
+	for incident_id: String in _seen_pest_incidents.keys():
+		var seen: Dictionary = _seen_pest_incidents[incident_id]
+		if bool(seen.get("resolved", false)) or active_ids.has(incident_id):
+			continue
+		seen.resolved = true
+		var response_seconds := maxf(
+			GameState.service_seconds - float(seen.get("seen_at", GameState.service_seconds)),
+			0.0
+		)
+		SimulationManager.record_group_incident_resolution(
+			group_experience,
+			"pest_%s" % incident_id,
+			response_seconds
+		)
+
+
+func _finalize_abandoned_review() -> void:
+	if _review_finalized or group_experience.is_empty():
+		return
+	if state == "waiting_order":
+		SimulationManager.record_group_wait(group_experience, "order", state_elapsed)
+	elif state in ["waiting_food", "eating", "change_order"]:
+		if not _food_wait_recorded:
+			SimulationManager.record_group_wait(group_experience, "food", state_elapsed)
+	elif state == "waiting_payment":
+		SimulationManager.record_group_wait(group_experience, "bill", state_elapsed)
+	if not _quality_scores.is_empty():
+		SimulationManager.record_group_food_quality(group_experience, _average_float(_quality_scores))
+	if not _service_scores.is_empty():
+		SimulationManager.record_group_service(group_experience, _average_float(_service_scores))
+	SimulationManager.record_group_ambience(group_experience)
+	var outcome := "abandoned" if _seated or not orders.is_empty() else "queue_abandoned"
+	var completion := SimulationManager.complete_group_abandonment(group_experience, outcome, {
+		"customer_type": customer_type,
+	})
+	_review_finalized = bool(completion.get("accepted", false)) or String(completion.get("reason", "")) in ["not_eligible", "duplicate_review"]
+
+
+func _average_float(values: Array[float]) -> float:
+	if values.is_empty():
+		return 0.0
+	var total := 0.0
+	for value: float in values:
+		total += value
+	return total / float(values.size())
 
 
 func get_avoidance_points() -> Array[Vector3]:

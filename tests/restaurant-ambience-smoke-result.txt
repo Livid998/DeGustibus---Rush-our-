@@ -1,0 +1,1 @@
+RESTAURANT AMBIENCE SMOKE: PASS | checks=42 failures=0

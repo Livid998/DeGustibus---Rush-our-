@@ -71,8 +71,13 @@ res://assets/environment/chair_A.gltf | exists=true | packed_scene=true
 res://assets/environment/chair_stool.gltf | exists=true | packed_scene=true
 res://assets/decor/lamp_standing.gltf | exists=true | packed_scene=true
 res://assets/decor/monstera_plant_medium_potted.gltf | exists=true | packed_scene=true
+res://assets/decor/sansevieria_plant_medium_potted.gltf | exists=true | packed_scene=true
+res://assets/decor/rug_rectangle_stripes_A.gltf | exists=true | packed_scene=true
+res://assets/decor/cabinet_medium_decorated.gltf | exists=true | packed_scene=true
+res://assets/equipment/crate.gltf | exists=true | packed_scene=true
 res://assets/equipment/bowl.gltf | exists=true | packed_scene=true
 res://assets/equipment/cuttingboard.gltf | exists=true | packed_scene=true
+res://assets/equipment/extractor_hood.glb | exists=true | packed_scene=true
 res://assets/equipment/rollingpin.gltf | exists=true | packed_scene=true
 res://assets/exterior/nature/Tree_2_A_Color1.gltf | exists=true | packed_scene=true
 res://assets/exterior/nature/Bush_4_A_Color1.gltf | exists=true | packed_scene=true
@@ -101,4 +106,4 @@ res://assets/characters/Doctor_Male_Young.gltf | exists=true | packed_scene=true
 res://assets/characters/Doctor_Female_Young.gltf | exists=true | packed_scene=true
 res://assets/characters/Doctor_Male_Old.gltf | exists=true | packed_scene=true
 res://assets/characters/Doctor_Female_Old.gltf | exists=true | packed_scene=true
-ASSET CHECK: 103 unique paths, 0 failures
+ASSET CHECK: 108 unique paths, 0 failures

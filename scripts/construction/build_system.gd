@@ -44,7 +44,7 @@ func _process(delta: float) -> void:
 	# Edge pieces must communicate one exact grid segment. Interpolating a wall
 	# between two sides made the cursor feel imprecise and the selected edge
 	# visually ambiguous, especially on touch screens.
-	if world.is_edge_placement(current_definition) or String(current_definition.get("placement", "cell")) == "wall_mount":
+	if world.is_edge_placement(current_definition) or String(current_definition.get("placement", "cell")) in ["wall_mount", "overhead"]:
 		preview.position = _preview_target_position
 		preview.rotation.y = _preview_target_rotation
 		return
@@ -179,6 +179,10 @@ func rotate_preview() -> void:
 		var support := world.placed_objects.get(preview_support_uid) as PlacedObject
 		if support != null:
 			rotation_steps = world.seat_rotation_for_slot(preview_attachment_slot, support.rotation_steps)
+	elif String(current_definition.get("placement", "cell")) == "overhead" and not preview_support_uid.is_empty():
+		var support := world.placed_objects.get(preview_support_uid) as PlacedObject
+		if support != null:
+			rotation_steps = support.rotation_steps
 	else:
 		rotation_steps = (rotation_steps + 1) % 4
 		_sync_wall_mount_support_for_edge()
@@ -193,6 +197,10 @@ func rotate_preview_back() -> void:
 		var support := world.placed_objects.get(preview_support_uid) as PlacedObject
 		if support != null:
 			rotation_steps = world.seat_rotation_for_slot(preview_attachment_slot, support.rotation_steps)
+	elif String(current_definition.get("placement", "cell")) == "overhead" and not preview_support_uid.is_empty():
+		var support := world.placed_objects.get(preview_support_uid) as PlacedObject
+		if support != null:
+			rotation_steps = support.rotation_steps
 	else:
 		rotation_steps = posmod(rotation_steps - 1, 4)
 		_sync_wall_mount_support_for_edge()
@@ -270,7 +278,7 @@ func _screen_to_placement_target(screen_position: Vector2) -> Dictionary:
 	if hit == null:
 		return {"cell": Vector2i(-1, -1), "rotation": rotation_steps, "support_uid": "", "attachment_slot": -1}
 	var world_hit := Vector3(hit)
-	if String(current_definition.get("placement", "cell")) in ["seat", "surface"]:
+	if String(current_definition.get("placement", "cell")) in ["seat", "surface", "overhead"]:
 		var ray_hit := _raycast_screen(screen_position)
 		if not ray_hit.is_empty():
 			world_hit = Vector3(ray_hit.get("position", world_hit))
@@ -528,7 +536,7 @@ func _sync_preview_transform() -> void:
 		return
 	_preview_target_position = world.placement_world_position(current_definition, preview_cell, rotation_steps, preview_support_uid, preview_attachment_slot)
 	_preview_target_rotation = -rotation_steps * PI * 0.5
-	var exact_edge_snap := world.is_edge_placement(current_definition) or String(current_definition.get("placement", "cell")) == "wall_mount"
+	var exact_edge_snap := world.is_edge_placement(current_definition) or String(current_definition.get("placement", "cell")) in ["wall_mount", "overhead"]
 	if not _preview_transform_initialized or exact_edge_snap:
 		preview.position = _preview_target_position
 		preview.rotation.y = _preview_target_rotation

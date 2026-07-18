@@ -1,6 +1,10 @@
 class_name RestaurantWorld
 extends Node3D
 
+signal ambience_changed(snapshot: Dictionary)
+signal pest_warning_changed(active: bool, context: Dictionary)
+signal storage_fill_visuals_changed(snapshot: Dictionary)
+
 const GRID_SIZE := Vector2i(18, 14)
 const CELL_SIZE := 2.0
 ## The legacy dining-room transform deliberately keeps using GRID_SIZE.  The
@@ -39,11 +43,23 @@ var object_root: Node3D
 var preview_root: Node3D
 var build_system: BuildSystem
 var camera_rig: RestaurantCamera
-var rush_mode := false
 var show_grid := false
 var show_paths := false
 var show_station_queues := false
 var _spawn_clock := 0.0
+var _day_cycle_manager: Node
+var _world_environment: WorldEnvironment
+var _sun_light: DirectionalLight3D
+var _last_lighting_minute := -1
+var _traffic_recipe_warning := false
+var _debug_force_rush_fallback := false
+## Legacy/debug compatibility for smoke tests and old call sites.  Natural rush
+## scheduling still comes exclusively from DayCycleManager.
+var rush_mode: bool:
+	get:
+		return is_rush_active()
+	set(enabled):
+		set_rush_mode(enabled)
 var floor_root: Node3D
 var floor_tiles: Dictionary = {}
 var floor_batches: Dictionary = {}
@@ -60,10 +76,16 @@ var _corridor_key_cache: Dictionary = {}
 var _traffic_epoch := 0
 var _path_cache_suspended := false
 var cleanup_root: Node3D
+var storage_fill_visualizer: StorageFillVisualizer
 var spill_records: Dictionary = {}
 var wash_batches: Dictionary = {}
+var ambience_system: RestaurantAmbienceSystem
+var kitchen_dirt := 0.0
+var kitchen_dirt_visuals: Array[Node3D] = []
+var pest_visuals: Dictionary = {}
 var _spill_serial := 0
 var _spill_clock := 18.0
+var _ambience_tick_accumulator := 0.0
 var reduced_walls := false
 
 
@@ -75,10 +97,15 @@ func _ready() -> void:
 	_create_grid()
 	_create_floor_and_walls()
 	load_layout()
+	_setup_storage_fill_visuals()
 	spawn_staff()
 	SimulationManager.bind_world(self)
+	_setup_ambience()
+	_bind_day_cycle()
 	if not GameState.layout_changed.is_connected(refresh_shell_cutaway):
 		GameState.layout_changed.connect(refresh_shell_cutaway)
+	if not GameState.layout_changed.is_connected(_on_ambience_layout_changed):
+		GameState.layout_changed.connect(_on_ambience_layout_changed)
 	if not WebPlatformProfile.quality_changed.is_connected(apply_graphics_quality):
 		WebPlatformProfile.quality_changed.connect(apply_graphics_quality)
 
@@ -97,6 +124,16 @@ func _process(delta: float) -> void:
 		if _debug_refresh_clock <= 0.0:
 			_debug_refresh_clock = 0.25
 			_update_station_queue_labels()
+	if GameState.restaurant_state in ["open", "closing"] and ambience_system != null:
+		var ambience_scaled := delta * SimulationManager.simulation_speed
+		_ambience_tick_accumulator += ambience_scaled
+		var ambience_ticks := 0
+		while _ambience_tick_accumulator >= 0.5 and ambience_ticks < 4:
+			ambience_system.advance_pest_risk(0.5)
+			_ambience_tick_accumulator -= 0.5
+			ambience_ticks += 1
+		if ambience_ticks == 4:
+			_ambience_tick_accumulator = minf(_ambience_tick_accumulator, 0.5)
 	if GameState.restaurant_state != "open":
 		return
 	var scaled := delta * SimulationManager.simulation_speed
@@ -105,10 +142,334 @@ func _process(delta: float) -> void:
 	if _spill_clock <= 0.0:
 		_spill_clock = randf_range(22.0, 34.0)
 		_spawn_service_spill()
-	var maximum := 8 if rush_mode else 5
-	if _spawn_clock <= 0.0 and SimulationManager.customers.size() < maximum:
-		spawn_customer_group()
-		_spawn_clock = randf_range(1.8, 3.2) if rush_mode else randf_range(4.2, 6.5)
+	var has_producible_recipe := has_producible_active_recipe()
+	_traffic_recipe_warning = not has_producible_recipe
+	if _spawn_clock <= 0.0:
+		var spawnable_group_size := _spawnable_customer_group_size()
+		if spawnable_group_size > 0:
+			spawn_customer_group(spawnable_group_size)
+		_spawn_clock = effective_customer_spawn_interval(has_producible_recipe)
+
+
+func _setup_ambience() -> void:
+	kitchen_dirt = maxf(float(GameState.cleanliness_state.get("kitchen_dirt", 0.0)), 0.0)
+	ambience_system = RestaurantAmbienceSystem.new()
+	ambience_system.name = "RestaurantAmbienceSystem"
+	add_child(ambience_system)
+	ambience_system.ambience_changed.connect(_on_ambience_changed)
+	ambience_system.pest_warning_changed.connect(_on_pest_warning_changed)
+	ambience_system.pest_spawn_requested.connect(_on_pest_spawn_requested)
+	ambience_system.pest_resolved.connect(_on_pest_resolved)
+	ambience_system.configure(self, {}, true)
+	ambience_system.refresh_from_world()
+	_restore_ambience_pest_visuals()
+	_refresh_kitchen_dirt_visuals()
+	_ensure_kitchen_cleaning_task()
+
+
+func ambience_snapshot() -> Dictionary:
+	if ambience_system == null:
+		return {
+			"beauty_score": 0.0,
+			"cleanliness_score": float(GameState.cleanliness_state.get("score", 100.0)),
+			"cleanliness_level": "clean",
+			"pest": {"active": [], "visible_kinds": []},
+		}
+	return ambience_system.current_snapshot()
+
+
+func visible_pest_incidents() -> Array:
+	var snapshot := ambience_snapshot()
+	var pest: Dictionary = snapshot.get("pest", {})
+	var result: Array = []
+	for value: Variant in pest.get("active", []):
+		if value is Dictionary and bool((value as Dictionary).get("visible", true)):
+			result.append((value as Dictionary).duplicate(true))
+	return result
+
+
+func beauty_preview(
+	definition: Dictionary,
+	cell: Vector2i,
+	move_source: PlacedObject = null
+) -> Dictionary:
+	var current := ambience_snapshot()
+	var current_score := float(current.get("beauty_score", 0.0))
+	if ambience_system == null or definition.is_empty():
+		return {"before": current_score, "after": current_score, "delta": 0.0, "item_beauty": 0.0}
+	var entries: Array = []
+	for object: PlacedObject in placed_objects.values():
+		if not is_instance_valid(object) or object == move_source:
+			continue
+		entries.append(object)
+	entries.append({"definition": definition, "cell": [cell.x, cell.y]})
+	var context := ambience_system.dining_context_from_world(self)
+	var calculated := ambience_system.calculate_beauty(entries, context)
+	var multiplier := float(current.get("beauty_cleanliness_multiplier", 1.0))
+	var after_score := clampf(float(calculated.get("base_score", 0.0)) * multiplier, 0.0, 100.0)
+	return {
+		"before": current_score,
+		"after": after_score,
+		"delta": after_score - current_score,
+		"item_beauty": float(definition.get("beauty", 0.0)),
+	}
+
+
+func register_kitchen_work_dirt(task: Dictionary = {}) -> void:
+	if task.is_empty():
+		return
+	var station := String(task.get("station", ""))
+	if station.is_empty() or station in ["pass", "sink"]:
+		return
+	var addition := float(DataRegistry.balance_value("cleanliness.kitchen_dirt_per_task", 0.45))
+	kitchen_dirt = clampf(kitchen_dirt + maxf(addition, 0.0), 0.0, 100.0)
+	_refresh_kitchen_dirt_visuals()
+	_refresh_ambience()
+	_ensure_kitchen_cleaning_task()
+
+
+func _refresh_ambience() -> void:
+	if ambience_system == null:
+		return
+	ambience_system.refresh_from_world()
+
+
+func _on_ambience_layout_changed() -> void:
+	_refresh_ambience()
+
+
+func _on_ambience_changed(snapshot: Dictionary) -> void:
+	ambience_changed.emit(snapshot.duplicate(true))
+
+
+func _on_pest_warning_changed(active: bool, context: Dictionary) -> void:
+	pest_warning_changed.emit(active, context.duplicate(true))
+	if not active or GameState.restaurant_state not in ["open", "closing"]:
+		return
+	var message := String(context.get("message", "Rischio infestazione: intervieni sulla pulizia."))
+	GameState.toast_requested.emit(message, "warning")
+
+
+func _on_pest_spawn_requested(kind: String, context: Dictionary) -> void:
+	var incident_id := String(context.get("incident_id", ""))
+	if incident_id.is_empty() or pest_visuals.has(incident_id):
+		return
+	if _spawn_pest_incident(kind, incident_id, false):
+		GameState.toast_requested.emit(
+			"%s visibile: priorità emergenza al tuttofare." % ("Topo" if kind == "mouse" else "Insetti"),
+			"warning"
+		)
+
+
+func _restore_ambience_pest_visuals() -> void:
+	if ambience_system == null:
+		return
+	for record_value: Variant in visible_pest_incidents():
+		if not record_value is Dictionary:
+			continue
+		var record := record_value as Dictionary
+		var incident_id := String(record.get("id", ""))
+		var kind := String(record.get("kind", "insect"))
+		if not incident_id.is_empty() and not pest_visuals.has(incident_id):
+			_spawn_pest_incident(kind, incident_id, true)
+
+
+func _spawn_pest_incident(kind: String, incident_id: String, already_confirmed: bool) -> bool:
+	if cleanup_root == null:
+		return false
+	var spawn_cell := _pest_spawn_cell(kind, incident_id)
+	var visual := _create_pest_visual(kind, incident_id)
+	cleanup_root.add_child(visual)
+	visual.global_position = cell_to_world(spawn_cell) + Vector3.UP * 0.04
+	pest_visuals[incident_id] = {
+		"id": incident_id,
+		"kind": kind,
+		"cell": spawn_cell,
+		"node": visual,
+		"state": "visible",
+	}
+	var task := SimulationManager.request_maintenance_task(self, "remove_pest", visual.global_position, {
+		"incident_id": incident_id,
+		"incident_kind": kind,
+		"pest_type": kind,
+		"reservation_key": "pest:%s" % incident_id,
+		"maintenance_category": "emergency",
+		"animation": "PickUp",
+	}, 5, 2.4 if kind == "insect" else 3.2, "res://assets/cleaning/Tool_Mop.glb")
+	if task.is_empty():
+		visual.queue_free()
+		pest_visuals.erase(incident_id)
+		return false
+	pest_visuals[incident_id].task_id = String(task.get("id", ""))
+	if not already_confirmed:
+		ambience_system.confirm_pest_spawn(kind, incident_id)
+	return true
+
+
+func _pest_spawn_cell(kind: String, incident_id: String) -> Vector2i:
+	var candidates: Array[Vector2i] = []
+	for cell: Vector2i in floor_tiles:
+		var floor_style := String(floor_tiles.get(cell, ""))
+		if floor_style not in ["floor_dining", "floor_kitchen"]:
+			continue
+		if kind == "mouse" and floor_style != "floor_kitchen":
+			continue
+		if not astar.is_in_boundsv(cell) or astar.is_point_solid(cell):
+			continue
+		if cell.distance_to(entrance_cell) < 2.0:
+			continue
+		candidates.append(cell)
+	if candidates.is_empty() and kind == "mouse":
+		return _pest_spawn_cell("insect", incident_id)
+	if candidates.is_empty():
+		return _nearest_open_cell(Vector2i(10, 9))
+	candidates.sort_custom(func(a: Vector2i, b: Vector2i):
+		var a_key: int = absi(a.x * 31 + a.y * 17 + incident_id.hash())
+		var b_key: int = absi(b.x * 31 + b.y * 17 + incident_id.hash())
+		return a_key < b_key
+	)
+	return candidates[0]
+
+
+func _create_pest_visual(kind: String, incident_id: String) -> Node3D:
+	var root := Node3D.new()
+	root.name = "Pest_%s" % incident_id
+	var dark := StandardMaterial3D.new()
+	dark.albedo_color = Color("302925")
+	dark.roughness = 0.82
+	var accent := StandardMaterial3D.new()
+	accent.albedo_color = Color("76594a") if kind == "mouse" else Color("8d493d")
+	accent.roughness = 0.78
+	if kind == "mouse":
+		var body := MeshInstance3D.new()
+		var body_mesh := SphereMesh.new()
+		body_mesh.radius = 0.25
+		body_mesh.height = 0.42
+		body_mesh.radial_segments = 8
+		body_mesh.rings = 4
+		body_mesh.material = accent
+		body.mesh = body_mesh
+		body.scale = Vector3(1.0, 0.72, 1.35)
+		body.position = Vector3(0.0, 0.22, 0.0)
+		body.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		root.add_child(body)
+		var head := MeshInstance3D.new()
+		var head_mesh := SphereMesh.new()
+		head_mesh.radius = 0.16
+		head_mesh.height = 0.28
+		head_mesh.radial_segments = 8
+		head_mesh.rings = 4
+		head_mesh.material = dark
+		head.mesh = head_mesh
+		head.position = Vector3(0.0, 0.23, -0.31)
+		head.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		root.add_child(head)
+		for x_offset: float in [-0.11, 0.11]:
+			var ear := MeshInstance3D.new()
+			var ear_mesh := SphereMesh.new()
+			ear_mesh.radius = 0.07
+			ear_mesh.height = 0.06
+			ear_mesh.radial_segments = 7
+			ear_mesh.rings = 3
+			ear_mesh.material = accent
+			ear.mesh = ear_mesh
+			ear.position = Vector3(x_offset, 0.36, -0.28)
+			ear.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+			root.add_child(ear)
+		var tail := MeshInstance3D.new()
+		var tail_mesh := CylinderMesh.new()
+		tail_mesh.top_radius = 0.025
+		tail_mesh.bottom_radius = 0.025
+		tail_mesh.height = 0.42
+		tail_mesh.radial_segments = 6
+		tail_mesh.material = dark
+		tail.mesh = tail_mesh
+		tail.rotation_degrees.x = 76.0
+		tail.position = Vector3(0.0, 0.11, 0.40)
+		tail.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		root.add_child(tail)
+	else:
+		var body := MeshInstance3D.new()
+		var body_mesh := SphereMesh.new()
+		body_mesh.radius = 0.15
+		body_mesh.height = 0.28
+		body_mesh.radial_segments = 8
+		body_mesh.rings = 4
+		body_mesh.material = accent
+		body.mesh = body_mesh
+		body.scale = Vector3(0.78, 0.48, 1.35)
+		body.position.y = 0.10
+		body.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		root.add_child(body)
+		for leg_index: int in 3:
+			var legs := MeshInstance3D.new()
+			var leg_mesh := BoxMesh.new()
+			leg_mesh.size = Vector3(0.54, 0.025, 0.035)
+			leg_mesh.material = dark
+			legs.mesh = leg_mesh
+			legs.position = Vector3(0.0, 0.08, -0.11 + float(leg_index) * 0.11)
+			legs.rotation_degrees.y = -18.0 + float(leg_index) * 18.0
+			legs.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+			root.add_child(legs)
+	root.rotation.y = float(posmod(incident_id.hash(), 360)) * PI / 180.0
+	return root
+
+
+func _on_pest_resolved(_kind: String, context: Dictionary) -> void:
+	var incident_id := String(context.get("id", ""))
+	if not pest_visuals.has(incident_id):
+		return
+	var visual := pest_visuals[incident_id].get("node") as Node3D
+	if visual != null and is_instance_valid(visual):
+		visual.queue_free()
+	pest_visuals.erase(incident_id)
+	_refresh_ambience()
+
+
+func _ensure_kitchen_cleaning_task() -> void:
+	var threshold := float(DataRegistry.balance_value("cleanliness.kitchen_clean_task_threshold", 8.0))
+	if kitchen_dirt < threshold:
+		return
+	var target := _sink_interaction_position()
+	SimulationManager.request_maintenance_task(self, "clean_kitchen", target, {
+		"reservation_key": "clean:kitchen",
+		"maintenance_category": "kitchen",
+		"animation": "PickUp",
+	}, 2 if kitchen_dirt >= threshold * 2.0 else 1, 2.8, "res://assets/cleaning/Cleaning_Sponge.glb")
+
+
+func _refresh_kitchen_dirt_visuals() -> void:
+	if cleanup_root == null:
+		return
+	var units_per_mark := maxf(float(DataRegistry.balance_value("cleanliness.kitchen_dirt_visual_step", 6.0)), 0.1)
+	var desired := clampi(floori(kitchen_dirt / units_per_mark), 0, 5)
+	while kitchen_dirt_visuals.size() > desired:
+		var removed: Node3D = kitchen_dirt_visuals.pop_back() as Node3D
+		if removed != null and is_instance_valid(removed):
+			removed.queue_free()
+	while kitchen_dirt_visuals.size() < desired:
+		var index := kitchen_dirt_visuals.size()
+		var visual := _create_spill_visual("KitchenGrime_%02d" % index)
+		visual.name = "KitchenGrime_%02d" % index
+		visual.scale = Vector3.ONE * 0.72
+		cleanup_root.add_child(visual)
+		visual.global_position = cell_to_world(_kitchen_grime_cell(index)) + Vector3.UP * 0.025
+		kitchen_dirt_visuals.append(visual)
+
+
+func _kitchen_grime_cell(index: int) -> Vector2i:
+	var candidates: Array[Vector2i] = []
+	for cell: Vector2i in floor_tiles:
+		if String(floor_tiles.get(cell, "")) != "floor_kitchen":
+			continue
+		if astar.is_in_boundsv(cell) and not astar.is_point_solid(cell):
+			candidates.append(cell)
+	candidates.sort_custom(func(a: Vector2i, b: Vector2i):
+		var a_key: int = absi(a.x * 19 + a.y * 29)
+		var b_key: int = absi(b.x * 19 + b.y * 29)
+		return a_key < b_key
+	)
+	return candidates[index % candidates.size()] if not candidates.is_empty() else _nearest_open_cell(Vector2i(9, 10))
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -176,9 +537,24 @@ func _create_roots() -> void:
 	configure_build_system()
 
 
+func _setup_storage_fill_visuals() -> void:
+	storage_fill_visualizer = StorageFillVisualizer.new()
+	add_child(storage_fill_visualizer)
+	storage_fill_visualizer.visuals_changed.connect(
+		func(snapshot: Dictionary): storage_fill_visuals_changed.emit(snapshot.duplicate(true))
+	)
+	storage_fill_visualizer.setup(self)
+
+
+func storage_fill_snapshot() -> Dictionary:
+	if storage_fill_visualizer == null:
+		return {}
+	return storage_fill_visualizer.snapshot()
+
+
 func _create_environment() -> void:
-	var world_environment := WorldEnvironment.new()
-	world_environment.name = "WorldEnvironment"
+	_world_environment = WorldEnvironment.new()
+	_world_environment.name = "WorldEnvironment"
 	var environment := Environment.new()
 	environment.background_mode = Environment.BG_COLOR
 	environment.background_color = Color("91bdc1")
@@ -187,23 +563,75 @@ func _create_environment() -> void:
 	environment.ambient_light_energy = 0.38
 	environment.tonemap_mode = Environment.TONE_MAPPER_LINEAR
 	environment.fog_enabled = false
-	world_environment.environment = environment
-	add_child(world_environment)
-	var sun := DirectionalLight3D.new()
-	sun.name = "Sun"
-	sun.rotation_degrees = Vector3(-58, -35, 0)
-	sun.light_color = Color("fff7e8")
-	sun.light_energy = 0.84
-	sun.shadow_enabled = WebPlatformProfile.shadows_enabled()
-	sun.directional_shadow_max_distance = WebPlatformProfile.shadow_distance()
-	add_child(sun)
+	_world_environment.environment = environment
+	add_child(_world_environment)
+	_sun_light = DirectionalLight3D.new()
+	_sun_light.name = "Sun"
+	_sun_light.rotation_degrees = Vector3(-58, -35, 0)
+	_sun_light.light_color = Color("fff7e8")
+	_sun_light.light_energy = 0.84
+	_sun_light.shadow_enabled = WebPlatformProfile.shadows_enabled()
+	_sun_light.directional_shadow_max_distance = WebPlatformProfile.shadow_distance()
+	add_child(_sun_light)
 
 
 func apply_graphics_quality(_preset: String = "auto") -> void:
-	var sun := get_node_or_null("Sun") as DirectionalLight3D
+	var sun := _sun_light if _sun_light != null else get_node_or_null("Sun") as DirectionalLight3D
 	if sun != null:
 		sun.shadow_enabled = WebPlatformProfile.shadows_enabled()
 		sun.directional_shadow_max_distance = WebPlatformProfile.shadow_distance()
+
+
+func _bind_day_cycle() -> void:
+	_day_cycle_manager = get_tree().root.get_node_or_null("DayCycleManager")
+	if _day_cycle_manager != null and _day_cycle_manager.has_signal("minute_changed"):
+		var callback := Callable(self, "_on_day_cycle_minute_changed")
+		if not _day_cycle_manager.is_connected("minute_changed", callback):
+			_day_cycle_manager.connect("minute_changed", callback)
+	_apply_day_cycle_lighting()
+
+
+func _on_day_cycle_minute_changed(_day: int, current_minute: int) -> void:
+	if current_minute == _last_lighting_minute:
+		return
+	_last_lighting_minute = current_minute
+	_apply_day_cycle_lighting()
+
+
+func _apply_day_cycle_lighting() -> void:
+	if _day_cycle_manager == null or not _day_cycle_manager.has_method("lighting_profile_for_minute"):
+		return
+	var profile: Dictionary = _day_cycle_manager.call("lighting_profile_for_minute", float(_day_cycle_manager.get("minute")))
+	if _world_environment != null and _world_environment.environment != null:
+		_world_environment.environment.background_color = Color(profile.get("background_color", Color("91bdc1")))
+		_world_environment.environment.ambient_light_color = Color(profile.get("ambient_color", Color("dce3e2")))
+		_world_environment.environment.ambient_light_energy = float(profile.get("ambient_energy", 0.38))
+	if _sun_light != null:
+		_sun_light.light_color = Color(profile.get("sun_color", Color("fff7e8")))
+		_sun_light.light_energy = float(profile.get("sun_energy", 0.84))
+	var lamp_energy := float(profile.get("lamp_energy", 0.0))
+	for lamp_node: Node in get_tree().get_nodes_in_group("day_cycle_lamp"):
+		if lamp_node is Light3D:
+			var lamp := lamp_node as Light3D
+			lamp.visible = lamp_energy > 0.02
+			lamp.light_energy = lamp_energy
+
+
+func _attach_day_cycle_lamp(object: PlacedObject) -> void:
+	if object == null or object.item_id != "exterior_streetlight" or object.get_node_or_null("NightLight") != null:
+		return
+	var lamp := OmniLight3D.new()
+	lamp.name = "NightLight"
+	lamp.position = Vector3(0.0, 3.3, 0.0)
+	lamp.light_color = Color("ffd598")
+	lamp.light_energy = 0.0
+	lamp.omni_range = 6.0
+	lamp.shadow_enabled = false
+	lamp.distance_fade_enabled = true
+	lamp.distance_fade_begin = 18.0
+	lamp.distance_fade_length = 8.0
+	lamp.add_to_group("day_cycle_lamp")
+	object.add_child(lamp)
 
 
 func _on_camera_view_changed(_quadrant: int) -> void:
@@ -352,8 +780,16 @@ func load_layout() -> void:
 	_loading_layout = false
 	_rebuild_floor_batches()
 	_refresh_all_attachments()
+	_refresh_operational_stations()
 	_rebuild_astar()
 	refresh_shell_cutaway()
+	if ambience_system != null:
+		_refresh_ambience()
+		_restore_ambience_pest_visuals()
+	if storage_fill_visualizer != null:
+		# Direct layout reloads rebuild provider nodes without necessarily
+		# changing their aggregate capacity, so refresh their attached visuals.
+		storage_fill_visualizer.refresh()
 
 
 func instantiate_layout_object(uid: String, item_id: String, cell: Vector2i, rotation_steps: int, support_uid: String = "", attachment_slot: int = -1) -> PlacedObject:
@@ -371,6 +807,8 @@ func instantiate_layout_object(uid: String, item_id: String, cell: Vector2i, rot
 	placed_objects[uid] = object
 	set_object_occupancy(object, true)
 	object.register_station()
+	object.refresh_operational_feedback()
+	_attach_day_cycle_lamp(object)
 	if item_id.begins_with("table"):
 		table_occupants[uid] = null
 	return object
@@ -395,6 +833,7 @@ func add_layout_object(item_id: String, cell: Vector2i, rotation_steps: int, sup
 	GameState.layout.append(record)
 	var object := instantiate_layout_object(uid, item_id, cell, rotation_steps, support_uid, attachment_slot)
 	_refresh_attachment(object)
+	_refresh_operational_stations()
 	_rebuild_astar()
 	GameState.layout_changed.emit()
 	return object
@@ -412,6 +851,7 @@ func remove_placed_object(object: PlacedObject, remove_record: bool = true) -> v
 				GameState.layout.erase(record)
 				break
 	object.queue_free()
+	_refresh_operational_stations()
 	_rebuild_astar()
 	GameState.layout_changed.emit()
 
@@ -425,13 +865,18 @@ func move_layout_object(object: PlacedObject, cell: Vector2i, rotation_steps: in
 	object.position = placement_world_position(object.definition, cell, rotation_steps, support_uid, attachment_slot)
 	set_object_occupancy(object, true)
 	_update_layout_record(object)
+	SimulationManager.refresh_station(object)
 	for attached: PlacedObject in attached_objects(object.uid):
 		var child_rotation := posmod(attached.rotation_steps + rotation_delta, 4)
-		if String(attached.definition.get("placement", "cell")) == "seat":
+		var child_placement := String(attached.definition.get("placement", "cell"))
+		if child_placement == "seat":
 			child_rotation = seat_rotation_for_slot(attached.attachment_slot, rotation_steps)
+		elif child_placement == "overhead":
+			child_rotation = rotation_steps
 		attached.set_layout_state(cell, child_rotation, object.uid, attached.attachment_slot)
 		_refresh_attachment(attached)
 		_update_layout_record(attached)
+	_refresh_operational_stations()
 	_rebuild_astar()
 	GameState.layout_changed.emit()
 
@@ -506,7 +951,7 @@ func is_edge_placement(definition: Dictionary) -> bool:
 
 
 func is_attachment_placement(definition: Dictionary) -> bool:
-	return String(definition.get("placement", "cell")) in ["seat", "surface", "wall_mount"]
+	return String(definition.get("placement", "cell")) in ["seat", "surface", "wall_mount", "overhead"]
 
 
 func attachment_world_position(definition: Dictionary, support: PlacedObject, attachment_slot: int, rotation_steps: int = 0) -> Vector3:
@@ -534,6 +979,8 @@ func attachment_world_position(definition: Dictionary, support: PlacedObject, at
 		var result := cell_to_world(support.grid_cell) + wall_mount_offset(definition, support.rotation_steps)
 		result.y = float(definition.get("mount_height", 1.25))
 		return result
+	if placement == "overhead":
+		return support.position + Vector3.UP * float(definition.get("overhead_height", 1.55))
 	return support.position
 
 
@@ -587,6 +1034,9 @@ func attachment_target_at(definition: Dictionary, world_hit: Vector3, requested_
 		else:
 			slot = 0 if nz < 0.0 else 2
 		rotation = seat_rotation_for_slot(slot, best_support.rotation_steps)
+	elif String(definition.get("placement", "cell")) == "overhead":
+		slot = 0
+		rotation = best_support.rotation_steps
 	else:
 		var width := maxi(int(raw[0]), 1)
 		var height := maxi(int(raw[1]), 1)
@@ -658,11 +1108,54 @@ func _refresh_attachment(object: PlacedObject) -> void:
 	var placement := String(object.definition.get("placement", "cell"))
 	if placement == "seat":
 		rotation = seat_rotation_for_slot(object.attachment_slot, support.rotation_steps)
-	elif placement == "wall_mount":
+	elif placement in ["wall_mount", "overhead"]:
 		rotation = support.rotation_steps
 	object.set_layout_state(support.grid_cell, rotation, support.uid, object.attachment_slot)
 	object.position = attachment_world_position(object.definition, support, object.attachment_slot, object.rotation_steps)
 	_update_layout_record(object)
+	SimulationManager.refresh_station(object)
+
+
+func ventilation_hood_for(station: PlacedObject) -> PlacedObject:
+	if station == null or not is_instance_valid(station):
+		return null
+	var required_kind := String(station.definition.get("support_kind", ""))
+	for candidate: PlacedObject in attached_objects(station.uid):
+		if String(candidate.definition.get("placement", "cell")) != "overhead":
+			continue
+		if bool(candidate.definition.get("provides_ventilation", false)) and String(candidate.definition.get("requires_support", "")) == required_kind:
+			return candidate
+	return null
+
+
+func station_is_operational(station: PlacedObject) -> bool:
+	if station == null or not is_instance_valid(station):
+		return false
+	if not bool(station.definition.get("ventilation_required", false)):
+		return true
+	return ventilation_hood_for(station) != null
+
+
+func unventilated_heat_stations() -> Array[PlacedObject]:
+	var result: Array[PlacedObject] = []
+	for object: PlacedObject in placed_objects.values():
+		if is_instance_valid(object) and bool(object.definition.get("ventilation_required", false)) and not station_is_operational(object):
+			result.append(object)
+	result.sort_custom(func(a: PlacedObject, b: PlacedObject): return a.uid < b.uid)
+	return result
+
+
+func restaurant_opening_blockers() -> Array[String]:
+	var result: Array[String] = []
+	for station: PlacedObject in unventilated_heat_stations():
+		result.append("%s in cella %d,%d: manca una cappa aspirante" % [String(station.definition.get("name", station.item_id)), station.grid_cell.x, station.grid_cell.y])
+	return result
+
+
+func _refresh_operational_stations() -> void:
+	for object: PlacedObject in placed_objects.values():
+		if is_instance_valid(object):
+			object.refresh_operational_feedback()
 
 
 func station_interaction_position(object: PlacedObject) -> Vector3:
@@ -727,6 +1220,8 @@ func validate_placement(definition: Dictionary, cell: Vector2i, rotation_steps: 
 					return {"valid": false, "reason": "Porta la sedia sopra un tavolo e scegli uno dei quattro lati"}
 				"surface":
 					return {"valid": false, "reason": "Questa attrezzatura deve essere appoggiata su un banco da lavoro"}
+				"overhead":
+					return {"valid": false, "reason": "La cappa deve essere agganciata sopra un fornello compatibile"}
 				_:
 					return {"valid": false, "reason": "La mensola deve essere agganciata a un muro pieno"}
 		if placement == "wall_mount":
@@ -748,6 +1243,8 @@ func validate_placement(definition: Dictionary, cell: Vector2i, rotation_steps: 
 					return {"valid": false, "reason": "Questo punto di aggancio è già occupato"}
 		if placement == "seat" and rotation_steps != seat_rotation_for_slot(attachment_slot, support.rotation_steps):
 			return {"valid": false, "reason": "La sedia deve essere rivolta verso il tavolo"}
+		if placement == "overhead" and rotation_steps != support.rotation_steps:
+			return {"valid": false, "reason": "La cappa deve essere allineata al fornello"}
 		if not String(definition.get("station", "")).is_empty():
 			var access_error := _new_station_access_error(definition, cell, rotation_steps, support.uid, attachment_slot)
 			if not access_error.is_empty():
@@ -1894,6 +2391,17 @@ func staff_standby_position(agent: AnimatedAgent, role: String, force_refresh: b
 	var service_cells := _staff_service_cells()
 	var best_cell := _nearest_open_cell(world_to_cell(agent.global_position))
 	var best_score := INF
+	var employee_record: Dictionary = {}
+	if agent is EmployeeAgent:
+		employee_record = (agent as EmployeeAgent).employee
+	var employee_id := String(employee_record.get("id", ""))
+	var preference := StaffPreferences.for_employee_id(employee_id, role, employee_record)
+	var waiter_zone := (
+		String(preference.get("standby_zone", "automatic"))
+		if role == "waiter"
+		else "automatic"
+	)
+	var target_cell := _staff_standby_target(agent, role, waiter_zone)
 	# First prefer open room cells. If the player's layout is extremely dense,
 	# allow a two-neighbour cell but never a one-cell doorway/dead end.
 	for minimum_neighbors: int in [3, 2]:
@@ -1902,7 +2410,11 @@ func staff_standby_position(agent: AnimatedAgent, role: String, force_refresh: b
 				var cell := Vector2i(x, y)
 				if astar.is_point_solid(cell) or _open_neighbor_count(cell) < minimum_neighbors:
 					continue
-				if cell.distance_to(entrance_cell) < 3.0 or _grid_path(world_to_cell(agent.global_position), cell).is_empty():
+				var entrance_clearance := 2.5 if waiter_zone == "entrance" else 3.0
+				if (
+					cell.distance_to(entrance_cell) < entrance_clearance
+					or _grid_path(world_to_cell(agent.global_position), cell).is_empty()
+				):
 					continue
 				var too_close_to_work := false
 				for service_cell: Vector2i in service_cells:
@@ -1918,15 +2430,22 @@ func staff_standby_position(agent: AnimatedAgent, role: String, force_refresh: b
 						break
 				if reserved:
 					continue
-				var zone_y := 5.0 if role == "waiter" else 11.0
-				var wrong_zone := (role == "waiter" and y >= 8) or (role != "waiter" and y < 8)
-				var score := absf(float(y) - zone_y) * 2.0 + cell.distance_to(world_to_cell(agent.global_position)) * 0.12
+				var wrong_zone := false
+				if role == "waiter" and waiter_zone != "pass":
+					wrong_zone = y >= 8
+				elif role != "waiter":
+					wrong_zone = y < 8
+				var score := (
+					cell.distance_to(target_cell) * 2.0
+					+ cell.distance_to(world_to_cell(agent.global_position)) * 0.12
+				)
 				if wrong_zone:
 					score += 30.0
 				# Stable per-worker horizontal preference spreads the brigade instead
 				# of selecting the first equally good tile for everyone.
-				var preferred_x := 2 + posmod(String(agent.name).hash(), GRID_SIZE.x - 4)
-				score += absf(float(x - preferred_x)) * 0.18
+				if waiter_zone in ["automatic", "dining"] or role != "waiter":
+					var preferred_x := 2 + posmod(String(agent.name).hash(), GRID_SIZE.x - 4)
+					score += absf(float(x - preferred_x)) * 0.18
 				if score < best_score:
 					best_score = score
 					best_cell = cell
@@ -1934,6 +2453,26 @@ func staff_standby_position(agent: AnimatedAgent, role: String, force_refresh: b
 			break
 	staff_standby_reservations[key] = best_cell
 	return cell_to_world(best_cell)
+
+
+func _staff_standby_target(
+	agent: AnimatedAgent,
+	role: String,
+	waiter_zone: String = "automatic"
+) -> Vector2i:
+	var stable_x := 2 + posmod(String(agent.name).hash(), GRID_SIZE.x - 4)
+	if role != "waiter":
+		return Vector2i(stable_x, 11)
+	match waiter_zone:
+		"entrance":
+			return Vector2i(entrance_cell.x, mini(entrance_cell.y + 3, GRID_SIZE.y - 2))
+		"pass":
+			for object: PlacedObject in placed_objects.values():
+				if is_instance_valid(object) and object.station_id == "pass":
+					return object.grid_cell
+			return Vector2i(stable_x, 7)
+		_:
+			return Vector2i(stable_x, 5)
 
 
 func _staff_service_cells() -> Array[Vector2i]:
@@ -2049,13 +2588,19 @@ func spawn_staff() -> void:
 		staff_agents[String(GameState.employees[index].id)] = agent
 
 
-func spawn_customer_group() -> void:
+func spawn_customer_group(requested_group_size: int = -1) -> bool:
 	if GameState.restaurant_state != "open":
-		return
+		return false
+	var group_size := requested_group_size
+	if group_size <= 0:
+		group_size = _spawnable_customer_group_size()
+	if group_size <= 0 or not can_accept_customer_group(group_size):
+		return false
 	var customer := CustomerAgent.new()
 	customer_root.add_child(customer)
 	customer.global_position = customer_spawn_position(customer)
-	customer.setup(self, _random_customer_group_size())
+	customer.setup(self, group_size)
+	return true
 
 
 func enqueue_customer(customer: Node) -> void:
@@ -2213,6 +2758,10 @@ func _random_customer_group_size() -> int:
 	return 4
 
 
+func _spawnable_customer_group_size() -> int:
+	return CustomerCapacityPlanner.spawnable_group_size(self)
+
+
 func request_table(customer: Node, group_size: int) -> Dictionary:
 	var candidates := _table_candidates(customer, group_size)
 	if candidates.is_empty():
@@ -2293,10 +2842,97 @@ func release_table(customer: Node) -> void:
 	release_waiting_position(customer)
 
 
+func day_cycle_manager() -> Node:
+	if _day_cycle_manager == null or not is_instance_valid(_day_cycle_manager):
+		_day_cycle_manager = get_tree().root.get_node_or_null("DayCycleManager")
+	return _day_cycle_manager
+
+
 func set_rush_mode(enabled: bool) -> void:
-	rush_mode = enabled
+	# Backward-compatible debug entry point. Normal rush state is exclusively
+	# derived from the configured world clock.
+	_debug_force_rush_fallback = enabled
+	var manager := day_cycle_manager()
+	if manager != null and manager.has_method("force_rush_debug"):
+		manager.call("force_rush_debug", enabled)
 	if enabled:
 		_spawn_clock = 0.0
+
+
+func is_rush_active() -> bool:
+	var manager := day_cycle_manager()
+	if manager != null:
+		return bool(manager.get("rush_active"))
+	return _debug_force_rush_fallback
+
+
+func customer_seat_count() -> int:
+	return CustomerCapacityPlanner.seat_count(self)
+
+
+func customer_table_count() -> int:
+	return CustomerCapacityPlanner.table_count(self)
+
+
+func customer_group_cap() -> int:
+	var manager := day_cycle_manager()
+	if manager != null and manager.has_method("group_cap"):
+		return int(manager.call("group_cap", customer_table_count()))
+	if customer_table_count() <= 0:
+		return 0
+	var queue_buffer := maxi(int(DataRegistry.balance_value("traffic.queue_buffer_groups", 0)), 0)
+	var configured_cap := maxi(int(DataRegistry.balance_value("traffic.absolute_group_cap", 1)), 1)
+	return mini(customer_table_count() + queue_buffer, configured_cap)
+
+
+func can_accept_customer_group(group_size: int) -> bool:
+	if group_size <= 0:
+		return false
+	return bool(customer_capacity_snapshot(group_size).get("accepts_proposed", false))
+
+
+func customer_capacity_snapshot(proposed_group_size: int = 0) -> Dictionary:
+	return CustomerCapacityPlanner.snapshot(self, proposed_group_size)
+
+
+func effective_customer_spawn_interval(has_producible_recipe: bool = true) -> float:
+	var manager := day_cycle_manager()
+	if manager != null and manager.has_method("effective_spawn_interval"):
+		return maxf(float(manager.call("effective_spawn_interval", GameState.reputation, has_producible_recipe, -1.0)), 0.05)
+	return maxf(float(DataRegistry.balance_value("traffic.base_spawn_interval", 1.0)), 0.05)
+
+
+func has_producible_active_recipe() -> bool:
+	for recipe: Dictionary in DataRegistry.active_recipes(GameState.menu):
+		var recipe_id := String(recipe.get("id", ""))
+		if GameState.is_recipe_sold_out(recipe_id):
+			continue
+		var requirements := DataRegistry.recipe_raw_requirements(recipe)
+		var available := true
+		for ingredient_id: String in requirements:
+			if not GameState.stock.has(ingredient_id):
+				continue
+			var stock_entry: Dictionary = GameState.stock.get(ingredient_id, {})
+			var free_amount := int(stock_entry.get("amount", 0)) - int(stock_entry.get("reserved", 0))
+			if free_amount < int(requirements[ingredient_id]):
+				available = false
+				break
+		if available:
+			return true
+	return false
+
+
+func traffic_flow_status() -> Dictionary:
+	var producible := has_producible_active_recipe()
+	var capacity := customer_capacity_snapshot()
+	return {
+		"has_producible_recipe": producible,
+		"warning": "Nessuna ricetta producibile: afflusso ridotto" if not producible else "",
+		"interval": effective_customer_spawn_interval(producible),
+		"group_cap": customer_group_cap(),
+		"active_groups": SimulationManager.customers.size(),
+		"capacity": capacity,
+	}
 
 
 func waiting_position(customer: Node) -> Vector3:
@@ -2412,6 +3048,7 @@ func adopt_dirty_table(_customer: Node, table_uid: String, source_dishes: Array)
 	})
 	if not task.is_empty():
 		table_dirty_records[table_uid].task_id = String(task.id)
+	_refresh_ambience()
 
 
 func accepts_service_action(action: String, payload: Dictionary = {}) -> bool:
@@ -2447,7 +3084,11 @@ func service_completed(action: String, payload: Dictionary) -> void:
 		if is_instance_valid(node):
 			node.queue_free()
 	table_dirty_records.erase(table_uid)
-	wash_batches[table_uid] = true
+	wash_batches[table_uid] = {
+		"table_uid": table_uid,
+		"dish_count": maxi((record.get("container_kinds", []) as Array).size(), 1),
+		"state": "waiting",
+	}
 	var station_available := SimulationManager.stations.has("sink") and not (SimulationManager.stations.get("sink", []) as Array).is_empty()
 	SimulationManager.request_maintenance_task(self, "wash_dishes", _sink_interaction_position(), {
 		"table_uid": table_uid,
@@ -2455,6 +3096,7 @@ func service_completed(action: String, payload: Dictionary) -> void:
 		"station_id": "sink" if station_available else "",
 		"animation": "PickUp"
 	}, 2, 2.4, "res://assets/cleaning/Cleaning_Sponge.glb")
+	_refresh_ambience()
 
 
 func _sink_interaction_position() -> Vector3:
@@ -2498,6 +3140,7 @@ func _spawn_service_spill() -> void:
 	}, 2, 1.8, "res://assets/cleaning/Tool_Mop.glb")
 	if not task.is_empty():
 		spill_records[spill_id].task_id = String(task.id)
+	_refresh_ambience()
 
 
 func _create_spill_visual(spill_id: String) -> Node3D:
@@ -2530,6 +3173,11 @@ func accepts_maintenance_action(action: String, payload: Dictionary = {}) -> boo
 			return spill_records.has(spill_id) and String(spill_records[spill_id].get("state", "")) != "clean"
 		"wash_dishes":
 			return wash_batches.has(String(payload.get("table_uid", "")))
+		"clean_kitchen":
+			return kitchen_dirt > 0.01
+		"remove_pest":
+			var incident_id := String(payload.get("incident_id", ""))
+			return pest_visuals.has(incident_id) and String(pest_visuals[incident_id].get("state", "visible")) != "resolved"
 	return false
 
 
@@ -2538,6 +3186,10 @@ func maintenance_started(action: String, payload: Dictionary, _employee_id: Stri
 		var spill_id := String(payload.get("spill_id", ""))
 		if spill_records.has(spill_id):
 			spill_records[spill_id].state = "cleaning"
+	elif action == "remove_pest":
+		var incident_id := String(payload.get("incident_id", ""))
+		if pest_visuals.has(incident_id):
+			pest_visuals[incident_id].state = "cleaning"
 
 
 func maintenance_completed(action: String, payload: Dictionary) -> void:
@@ -2551,6 +3203,21 @@ func maintenance_completed(action: String, payload: Dictionary) -> void:
 				spill_records.erase(spill_id)
 		"wash_dishes":
 			wash_batches.erase(String(payload.get("table_uid", "")))
+		"clean_kitchen":
+			var cleaning_amount := float(DataRegistry.balance_value("cleanliness.kitchen_clean_amount", 18.0))
+			kitchen_dirt = maxf(kitchen_dirt - maxf(cleaning_amount, 0.0), 0.0)
+			_refresh_kitchen_dirt_visuals()
+			_ensure_kitchen_cleaning_task()
+		"remove_pest":
+			var incident_id := String(payload.get("incident_id", ""))
+			if pest_visuals.has(incident_id):
+				var pest_node := pest_visuals[incident_id].get("node") as Node3D
+				if pest_node != null and is_instance_valid(pest_node):
+					pest_node.queue_free()
+				pest_visuals.erase(incident_id)
+			if ambience_system != null:
+				ambience_system.resolve_pest(incident_id, "removed_by_handyman")
+	_refresh_ambience()
 
 
 func set_floor_style(cell: Vector2i, item_id: String) -> void:

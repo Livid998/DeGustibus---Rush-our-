@@ -8,8 +8,18 @@ signal menu_changed
 signal employees_changed
 signal layout_changed
 signal toast_requested(message: String, tone: String)
+signal album_inventory_changed(ingredient_id: String, amount: int)
+signal album_discovered_changed(ingredient_id: String, discovered: bool)
+signal reviews_changed
+signal review_reward_progress_changed(value: int)
+signal world_clock_changed(value: Dictionary)
+signal restaurant_profile_changed(value: Dictionary)
+signal pending_delivery_batch_changed(value: Dictionary)
+signal cleanliness_state_changed(value: Dictionary)
+signal pest_state_changed(value: Dictionary)
+signal staff_preferences_changed(employee_id: String, preference: Variant)
 
-const SAVE_VERSION := 9
+const SAVE_VERSION := 11
 
 var money: int = 10000
 var reputation: float = 1.0
@@ -25,6 +35,17 @@ var purchased_preparations: Dictionary = {}
 var progress: Dictionary = {"customers_served": 0, "desserts_served": 0, "services_started": 0}
 var settings: Dictionary = {"music": true, "sound": true, "camera_zoom": 24.0, "camera_quadrant": 0, "graphics_quality": "auto"}
 var tutorial: Dictionary = {"step": 0, "skipped": false, "complete": false}
+var album_inventory: Dictionary = {}
+var album_discovered: Dictionary = {}
+var reviews: Array = []
+var review_reward_progress: int = 0
+var reputation_weight: float = 0.0
+var world_clock: Dictionary = {"day": 1, "minute": 540.0}
+var restaurant_profile: Dictionary = {}
+var pending_delivery_batch: Dictionary = {}
+var cleanliness_state: Dictionary = {}
+var pest_state: Dictionary = {}
+var staff_preferences: Dictionary = {}
 
 
 func _ready() -> void:
@@ -38,23 +59,15 @@ func reset_to_defaults(emit_signals: bool = true) -> void:
 	service_seconds = 0.0
 	stock.clear()
 	for ingredient: Dictionary in DataRegistry.ingredients:
-		stock[ingredient.id] = {
-			"amount": int(ingredient.get("stock", 0)),
-			"unlocked": bool(ingredient.get("unlocked", false)),
-			"average_cost": float(ingredient.get("cost", 0.0)),
-			"supplier": String(ingredient.get("supplier", "wholesale")),
-			"auto_reorder": false,
-			"threshold": int(ingredient.get("reorder_threshold", 10)),
-			"target": int(ingredient.get("stock_target", 30)),
-			"lot": int(ingredient.get("lot", 10)),
-			"quality": int(ingredient.get("quality", 2))
-		}
+		stock[ingredient.id] = _default_stock_entry(ingredient)
 	menu.clear()
 	for recipe: Dictionary in DataRegistry.recipes:
 		menu[recipe.id] = {
 			"active": bool(recipe.get("active", false)),
 			"unlocked": bool(recipe.get("unlocked", false)),
 			"price": int(recipe.get("price", 10)),
+			"manual_paused": false,
+			"auto_sold_out": false,
 			"sold_out": false
 		}
 	employees = DataRegistry.employee_data.get("hired", []).duplicate(true)
@@ -65,8 +78,99 @@ func reset_to_defaults(emit_signals: bool = true) -> void:
 	progress = {"customers_served": 0, "desserts_served": 0, "services_started": 0}
 	settings = {"music": true, "sound": true, "camera_zoom": 24.0, "camera_quadrant": 0, "graphics_quality": "auto"}
 	tutorial = {"step": 0, "skipped": false, "complete": false}
+	album_inventory = _default_album_inventory()
+	album_discovered = _default_album_discovered()
+	reviews = []
+	review_reward_progress = 0
+	reputation_weight = 0.0
+	world_clock = _default_world_clock()
+	restaurant_profile = _default_restaurant_profile()
+	pending_delivery_batch = _default_pending_delivery_batch()
+	cleanliness_state = _default_cleanliness_state()
+	pest_state = _default_pest_state()
+	staff_preferences = {}
 	if emit_signals:
 		_emit_all()
+
+
+func _default_stock_entry(ingredient: Dictionary) -> Dictionary:
+	var storage := DataRegistry.storage_metadata_for_ingredient(ingredient)
+	return {
+		"amount": int(ingredient.get("stock", 0)),
+		"reserved": 0,
+		"storage_type": String(storage.storage_type),
+		"storage_units": int(storage.storage_units),
+		"unlocked": bool(ingredient.get("unlocked", false)),
+		"average_cost": float(ingredient.get("cost", 0.0)),
+		"supplier": String(ingredient.get("supplier", "wholesale")),
+		"auto_reorder": false,
+		"threshold": int(ingredient.get("reorder_threshold", 10)),
+		"target": int(ingredient.get("stock_target", 30)),
+		"lot": int(ingredient.get("lot", 10)),
+		"quality": int(ingredient.get("quality", 2))
+	}
+
+
+func _default_album_inventory() -> Dictionary:
+	var result: Dictionary = {}
+	for ingredient: Dictionary in DataRegistry.ingredients:
+		result[String(ingredient.id)] = 0
+	var starter := DataRegistry.album_starter_inventory()
+	for ingredient_id: String in starter:
+		result[ingredient_id] = int(starter[ingredient_id])
+	return result
+
+
+func _default_album_discovered() -> Dictionary:
+	var result: Dictionary = {}
+	for ingredient: Dictionary in DataRegistry.ingredients:
+		result[String(ingredient.id)] = bool(ingredient.get("unlocked", false))
+	return result
+
+
+func _default_world_clock() -> Dictionary:
+	return {
+		"day": 1,
+		"minute": float(DataRegistry.balance_value("day_cycle.start_minute", 540.0))
+	}
+
+
+func _default_restaurant_profile() -> Dictionary:
+	return {
+		"player_name": "",
+		"restaurant_name": String(DataRegistry.balance_value("restaurant_profile.default_restaurant_name", "DeGustibus")),
+		"avatar_appearance": String(DataRegistry.balance_value("restaurant_profile.default_avatar_appearance", "Chef_Female")),
+		"badge_id": String(DataRegistry.balance_value("restaurant_profile.default_badge_id", "starter")),
+		"uniform_variant": int(DataRegistry.balance_value("restaurant_profile.default_uniform_variant", 0))
+	}
+
+
+func _default_pending_delivery_batch() -> Dictionary:
+	return {
+		"id": "",
+		"items": {},
+		"remaining": float(DataRegistry.balance_value("delivery.batch_interval_seconds", 300.0)),
+		"paid": false
+	}
+
+
+func _default_cleanliness_state() -> Dictionary:
+	return {
+		"score": float(DataRegistry.balance_value("cleanliness.clean_score", 100.0)),
+		"dirty_tables": 0,
+		"dirty_dishes": 0,
+		"spills": 0,
+		"kitchen_dirt": 0.0,
+		"below_pest_threshold_seconds": 0.0
+	}
+
+
+func _default_pest_state() -> Dictionary:
+	return {
+		"warning": false,
+		"active": [],
+		"last_spawn_day": 0
+	}
 
 
 func _default_layout() -> Array:
@@ -91,7 +195,9 @@ func _default_layout() -> Array:
 		{"uid":"support_cut_2","item":"prep_counter","cell":[14,9],"rotation":0},
 		{"uid":"cut_2","item":"cutting_board","cell":[14,9],"rotation":0,"support_uid":"support_cut_2","attachment_slot":0},
 		{"uid":"stove_1","item":"stove","cell":[11,9],"rotation":0},
+		{"uid":"hood_stove_1","item":"extractor_hood","cell":[11,9],"rotation":0,"support_uid":"stove_1","attachment_slot":0},
 		{"uid":"multi_1","item":"multi_stove","cell":[13,9],"rotation":0},
+		{"uid":"hood_multi_1","item":"extractor_hood","cell":[13,9],"rotation":0,"support_uid":"multi_1","attachment_slot":0},
 		{"uid":"support_pizza_1","item":"prep_counter","cell":[2,12],"rotation":2},
 		{"uid":"pizza_1","item":"pizza_oven","cell":[2,12],"rotation":2,"support_uid":"support_pizza_1","attachment_slot":0},
 		{"uid":"support_oven_1","item":"worktable","cell":[5,12],"rotation":2},
@@ -101,7 +207,8 @@ func _default_layout() -> Array:
 		{"uid":"rack_1","item":"dish_rack","cell":[9,12],"rotation":2,"support_uid":"support_rack_1","attachment_slot":0},
 		{"uid":"pass_1","item":"pass","cell":[11,12],"rotation":2},
 		{"uid":"pass_tray_1","item":"pass_tray","cell":[11,12],"rotation":2,"support_uid":"pass_1","attachment_slot":0},
-		{"uid":"dessert_1","item":"dessert","cell":[14,12],"rotation":2},
+		{"uid":"support_dessert_1","item":"worktable","cell":[14,12],"rotation":2},
+		{"uid":"dessert_1","item":"dessert","cell":[14,12],"rotation":2,"support_uid":"support_dessert_1","attachment_slot":0},
 		{"uid":"support_dough_1","item":"worktable","cell":[16,12],"rotation":2},
 		{"uid":"dough_1","item":"dough","cell":[16,12],"rotation":2,"support_uid":"support_dough_1","attachment_slot":0},
 		{"uid":"plant_1","item":"plant","cell":[15,3],"rotation":0}
@@ -120,16 +227,30 @@ func spend(amount: int, reason: String = "") -> bool:
 		return false
 	money -= amount
 	money_changed.emit(money)
+	if amount > 0:
+		mark_save_dirty()
 	if not reason.is_empty():
 		toast_requested.emit("-%d · %s" % [amount, reason], "cost")
 	return true
 
 
 func earn(amount: int, reason: String = "") -> void:
-	money += max(amount, 0)
+	var earned := maxi(amount, 0)
+	money += earned
 	money_changed.emit(money)
+	if earned > 0:
+		mark_save_dirty()
 	if not reason.is_empty():
 		toast_requested.emit("+%d · %s" % [amount, reason], "income")
+
+
+func set_reputation_value(value: float) -> void:
+	var normalized := clampf(value, 1.0, 5.0)
+	if is_equal_approx(reputation, normalized):
+		return
+	reputation = normalized
+	reputation_changed.emit(reputation)
+	mark_save_dirty()
 
 
 func consume_stock(requirements: Dictionary) -> bool:
@@ -139,6 +260,8 @@ func consume_stock(requirements: Dictionary) -> bool:
 	for ingredient_id: String in requirements:
 		stock[ingredient_id].amount -= int(requirements[ingredient_id])
 		stock_changed.emit(ingredient_id, stock[ingredient_id].amount)
+	if not requirements.is_empty():
+		mark_save_dirty()
 	return true
 
 
@@ -151,6 +274,185 @@ func add_stock(ingredient_id: String, amount: int, unit_cost: float = -1.0) -> v
 		entry.average_cost = ((float(entry.average_cost) * old_amount) + unit_cost * amount) / float(old_amount + amount)
 	entry.amount = max(old_amount + amount, 0)
 	stock_changed.emit(ingredient_id, int(entry.amount))
+	if int(entry.amount) != old_amount:
+		mark_save_dirty()
+
+
+func set_recipe_price(recipe_id: String, value: int) -> bool:
+	if not menu.has(recipe_id):
+		return false
+	var normalized := maxi(value, 0)
+	if int(menu[recipe_id].get("price", 0)) != normalized:
+		menu[recipe_id].price = normalized
+		menu_changed.emit()
+		mark_save_dirty()
+	return true
+
+
+func set_recipe_active(recipe_id: String, active: bool) -> bool:
+	if not menu.has(recipe_id):
+		return false
+	if bool(menu[recipe_id].get("active", false)) != active:
+		menu[recipe_id].active = active
+		menu_changed.emit()
+		mark_save_dirty()
+	return true
+
+
+func set_recipe_unlocked(recipe_id: String, unlocked: bool = true) -> bool:
+	if not menu.has(recipe_id):
+		return false
+	if bool(menu[recipe_id].get("unlocked", false)) != unlocked:
+		menu[recipe_id].unlocked = unlocked
+		menu_changed.emit()
+		mark_save_dirty()
+	return true
+
+
+func set_recipe_manual_paused(recipe_id: String, paused: bool) -> bool:
+	if not menu.has(recipe_id):
+		return false
+	var entry: Dictionary = menu[recipe_id]
+	if bool(entry.get("manual_paused", false)) != paused:
+		entry.manual_paused = paused
+		_sync_menu_sold_out_entry(entry)
+		menu_changed.emit()
+		mark_save_dirty()
+	return true
+
+
+func set_recipe_auto_sold_out(recipe_id: String, sold_out: bool) -> bool:
+	if not menu.has(recipe_id):
+		return false
+	var entry: Dictionary = menu[recipe_id]
+	if bool(entry.get("auto_sold_out", false)) != sold_out:
+		entry.auto_sold_out = sold_out
+		_sync_menu_sold_out_entry(entry)
+		menu_changed.emit()
+		mark_save_dirty()
+	return true
+
+
+func is_recipe_sold_out(recipe_id: String) -> bool:
+	var entry: Dictionary = menu.get(recipe_id, {})
+	return bool(entry.get("manual_paused", entry.get("sold_out", false))) or bool(entry.get("auto_sold_out", false))
+
+
+func set_album_ingredient_amount(ingredient_id: String, amount: int) -> bool:
+	if not DataRegistry.ingredients_by_id.has(ingredient_id):
+		return false
+	var normalized := maxi(amount, 0)
+	if int(album_inventory.get(ingredient_id, 0)) != normalized:
+		album_inventory[ingredient_id] = normalized
+		album_inventory_changed.emit(ingredient_id, normalized)
+		mark_save_dirty()
+	return true
+
+
+func add_album_ingredient(ingredient_id: String, delta: int) -> bool:
+	if not DataRegistry.ingredients_by_id.has(ingredient_id):
+		return false
+	return set_album_ingredient_amount(ingredient_id, int(album_inventory.get(ingredient_id, 0)) + delta)
+
+
+func set_album_discovered(ingredient_id: String, discovered: bool = true) -> bool:
+	if not DataRegistry.ingredients_by_id.has(ingredient_id):
+		return false
+	if bool(album_discovered.get(ingredient_id, false)) != discovered:
+		album_discovered[ingredient_id] = discovered
+		album_discovered_changed.emit(ingredient_id, discovered)
+		mark_save_dirty()
+	return true
+
+
+func append_review(review: Dictionary) -> bool:
+	if review.is_empty():
+		return false
+	reviews.append(review.duplicate(true))
+	var history_limit := maxi(int(DataRegistry.balance_value("reviews.history_limit", 100)), 1)
+	while reviews.size() > history_limit:
+		reviews.pop_front()
+	reviews_changed.emit()
+	mark_save_dirty()
+	return true
+
+
+func set_review_reward_progress(value: int) -> void:
+	var normalized := maxi(value, 0)
+	if review_reward_progress == normalized:
+		return
+	review_reward_progress = normalized
+	review_reward_progress_changed.emit(review_reward_progress)
+	mark_save_dirty()
+
+
+func set_world_clock(value: Dictionary) -> void:
+	var normalized := _normalize_world_clock(value)
+	if world_clock == normalized:
+		return
+	world_clock = normalized
+	world_clock_changed.emit(world_clock.duplicate(true))
+	mark_save_dirty()
+
+
+func set_restaurant_profile(value: Dictionary) -> void:
+	var normalized := _default_restaurant_profile()
+	normalized.merge(value, true)
+	if restaurant_profile == normalized:
+		return
+	restaurant_profile = normalized
+	restaurant_profile_changed.emit(restaurant_profile.duplicate(true))
+	mark_save_dirty()
+
+
+func set_pending_delivery_batch(value: Dictionary) -> void:
+	var normalized := _normalize_pending_delivery_batch(value)
+	if pending_delivery_batch == normalized:
+		return
+	pending_delivery_batch = normalized
+	pending_delivery_batch_changed.emit(pending_delivery_batch.duplicate(true))
+	mark_save_dirty()
+
+
+func set_cleanliness_state(value: Dictionary) -> void:
+	var normalized := _default_cleanliness_state()
+	normalized.merge(value, true)
+	if cleanliness_state == normalized:
+		return
+	cleanliness_state = normalized
+	cleanliness_state_changed.emit(cleanliness_state.duplicate(true))
+	mark_save_dirty()
+
+
+func set_pest_state(value: Dictionary) -> void:
+	var normalized := _default_pest_state()
+	normalized.merge(value, true)
+	if pest_state == normalized:
+		return
+	pest_state = normalized
+	pest_state_changed.emit(pest_state.duplicate(true))
+	mark_save_dirty()
+
+
+func set_staff_preference(employee_id: String, preference: Variant) -> bool:
+	if employee_id.is_empty():
+		return false
+	if staff_preferences.get(employee_id) == preference:
+		return true
+	staff_preferences[employee_id] = preference
+	staff_preferences_changed.emit(employee_id, preference)
+	mark_save_dirty()
+	return true
+
+
+func mark_save_dirty() -> void:
+	var save_manager := get_node_or_null("/root/SaveManager")
+	if save_manager != null and save_manager.has_method("request_autosave"):
+		save_manager.request_autosave()
+
+
+func _sync_menu_sold_out_entry(entry: Dictionary) -> void:
+	entry.sold_out = bool(entry.get("manual_paused", false)) or bool(entry.get("auto_sold_out", false))
 
 
 func set_restaurant_state(value: String) -> void:
@@ -165,27 +467,35 @@ func add_reputation(amount: float) -> void:
 	reputation = clampf(reputation + maxf(amount, 0.0), 1.0, 5.0)
 	if not is_equal_approx(previous, reputation):
 		reputation_changed.emit(reputation)
+		mark_save_dirty()
 
 
 func unlock_ingredient(ingredient_id: String, reason: String = "", persist: bool = true) -> bool:
 	if not stock.has(ingredient_id) or bool(stock[ingredient_id].unlocked):
 		return false
 	stock[ingredient_id].unlocked = true
+	album_discovered[ingredient_id] = true
 	stock_changed.emit(ingredient_id, int(stock[ingredient_id].amount))
+	album_discovered_changed.emit(ingredient_id, true)
 	var definition: Dictionary = DataRegistry.ingredients_by_id.get(ingredient_id, {})
 	toast_requested.emit("Nuovo ingrediente: %s%s" % [definition.get("name", ingredient_id), " · " + reason if not reason.is_empty() else ""], "income")
 	_sync_recipe_unlocks()
 	if persist:
 		SaveManager.save_game()
+	else:
+		mark_save_dirty()
 	return true
 
 
-func record_completed_order(recipe_id: String, satisfaction: float) -> void:
+func record_completed_order(recipe_id: String, _satisfaction: float) -> void:
 	progress.customers_served = int(progress.get("customers_served", 0)) + 1
 	if recipe_id in ["icecream_cone", "mixed_sundae"]:
 		progress.desserts_served = int(progress.get("desserts_served", 0)) + 1
-	add_reputation(0.04 * clampf(satisfaction, 0.45, 1.0))
+	# Reputation is exclusively driven by completed group reviews.  Keep this
+	# method focused on counters/unlocks so an order cannot reward reputation a
+	# second time.
 	check_progression()
+	mark_save_dirty()
 
 
 func check_progression(persist: bool = true) -> Array[String]:
@@ -232,6 +542,7 @@ func _sync_recipe_unlocks() -> void:
 			changed = true
 	if changed:
 		menu_changed.emit()
+		mark_save_dirty()
 
 
 func serialize() -> Dictionary:
@@ -239,15 +550,26 @@ func serialize() -> Dictionary:
 		"save_version": SAVE_VERSION,
 		"money": money,
 		"reputation": reputation,
-		"stock": stock,
-		"menu": menu,
-		"employees": employees,
-		"candidates": candidates,
-		"layout": layout,
-		"settings": settings,
-		"tutorial": tutorial,
-		"purchased_preparations": purchased_preparations,
-		"progress": progress
+		"stock": _serialize_stock(),
+		"menu": _serialize_menu(),
+		"employees": employees.duplicate(true),
+		"candidates": candidates.duplicate(true),
+		"layout": layout.duplicate(true),
+		"settings": settings.duplicate(true),
+		"tutorial": tutorial.duplicate(true),
+		"purchased_preparations": purchased_preparations.duplicate(true),
+		"progress": progress.duplicate(true),
+		"album_inventory": album_inventory.duplicate(true),
+		"album_discovered": album_discovered.duplicate(true),
+		"reviews": reviews.duplicate(true),
+		"review_reward_progress": review_reward_progress,
+		"reputation_weight": reputation_weight,
+		"world_clock": world_clock.duplicate(true),
+		"restaurant_profile": restaurant_profile.duplicate(true),
+		"pending_delivery_batch": pending_delivery_batch.duplicate(true),
+		"cleanliness_state": cleanliness_state.duplicate(true),
+		"pest_state": pest_state.duplicate(true),
+		"staff_preferences": staff_preferences.duplicate(true)
 	}
 
 
@@ -255,13 +577,17 @@ func deserialize(data: Dictionary) -> void:
 	var loaded_version := int(data.get("save_version", 0))
 	if loaded_version > SAVE_VERSION:
 		push_warning("Save file is from a newer version; loading known fields")
+	reset_to_defaults(false)
 	money = int(data.get("money", money))
-	reputation = float(data.get("reputation", reputation))
-	stock.merge(data.get("stock", {}), true)
-	menu.merge(data.get("menu", {}), true)
-	employees = data.get("employees", employees).duplicate(true)
-	candidates = data.get("candidates", candidates).duplicate(true)
-	layout = data.get("layout", layout).duplicate(true)
+	reputation = clampf(float(data.get("reputation", reputation)), 1.0, 5.0)
+	stock = _normalize_stock_state(data.get("stock", {}))
+	menu = _normalize_menu_state(data.get("menu", {}), loaded_version)
+	if data.get("employees") is Array:
+		employees = (data.employees as Array).duplicate(true)
+	if data.get("candidates") is Array:
+		candidates = (data.candidates as Array).duplicate(true)
+	if data.get("layout") is Array:
+		layout = (data.layout as Array).duplicate(true)
 	if loaded_version < 2:
 		_migrate_seating_v2()
 	if loaded_version < 3:
@@ -278,13 +604,192 @@ func deserialize(data: Dictionary) -> void:
 		_migrate_exterior_v8()
 	if loaded_version < 9:
 		_migrate_complete_shell_v9()
-	settings.merge(data.get("settings", {}), true)
-	tutorial.merge(data.get("tutorial", {}), true)
-	purchased_preparations.merge(data.get("purchased_preparations", {}), true)
-	progress.merge(data.get("progress", {}), true)
+	if loaded_version < 11:
+		_migrate_technical_kitchen_v11()
+	if data.get("settings") is Dictionary:
+		settings.merge(data.settings, true)
+	if data.get("tutorial") is Dictionary:
+		tutorial.merge(data.tutorial, true)
+	if data.get("purchased_preparations") is Dictionary:
+		purchased_preparations.merge(data.purchased_preparations, true)
+	if data.get("progress") is Dictionary:
+		progress.merge(data.progress, true)
+	if loaded_version < 10:
+		_migrate_casual_state_v10(data)
+	else:
+		_load_casual_state_v10(data)
 	_sync_recipe_unlocks()
 	set_restaurant_state("closed")
 	_emit_all()
+
+
+func _serialize_stock() -> Dictionary:
+	var result: Dictionary = {}
+	for ingredient_id: String in stock:
+		var entry: Variant = stock[ingredient_id]
+		if not entry is Dictionary:
+			continue
+		var clean: Dictionary = (entry as Dictionary).duplicate(true)
+		# Reservations belong to non-persisted orders and are always runtime-only.
+		clean.reserved = 0
+		result[ingredient_id] = clean
+	return result
+
+
+func _serialize_menu() -> Dictionary:
+	var result: Dictionary = {}
+	for recipe_id: String in menu:
+		var entry: Variant = menu[recipe_id]
+		if not entry is Dictionary:
+			continue
+		var clean: Dictionary = (entry as Dictionary).duplicate(true)
+		_sync_menu_sold_out_entry(clean)
+		result[recipe_id] = clean
+	return result
+
+
+func _normalize_stock_state(value: Variant) -> Dictionary:
+	var source: Dictionary = value if value is Dictionary else {}
+	var result: Dictionary = {}
+	for ingredient: Dictionary in DataRegistry.ingredients:
+		var ingredient_id := String(ingredient.id)
+		var entry := _default_stock_entry(ingredient)
+		var saved: Variant = source.get(ingredient_id, {})
+		if saved is Dictionary:
+			entry.merge(saved, true)
+		var metadata := DataRegistry.storage_metadata_for_ingredient(ingredient)
+		entry.amount = maxi(int(entry.get("amount", 0)), 0)
+		entry.reserved = 0
+		entry.storage_type = String(metadata.storage_type)
+		entry.storage_units = int(metadata.storage_units)
+		entry.unlocked = bool(entry.get("unlocked", false))
+		result[ingredient_id] = entry
+	for ingredient_id: String in source:
+		if result.has(ingredient_id) or not source[ingredient_id] is Dictionary:
+			continue
+		var legacy_entry: Dictionary = (source[ingredient_id] as Dictionary).duplicate(true)
+		legacy_entry.amount = maxi(int(legacy_entry.get("amount", 0)), 0)
+		legacy_entry.reserved = 0
+		legacy_entry.storage_type = String(legacy_entry.get("storage_type", DataRegistry.balance_value("storage.default_type", "ambient")))
+		legacy_entry.storage_units = maxi(int(legacy_entry.get("storage_units", DataRegistry.balance_value("storage.default_units", 1))), 1)
+		result[ingredient_id] = legacy_entry
+	return result
+
+
+func _normalize_menu_state(value: Variant, loaded_version: int) -> Dictionary:
+	var source: Dictionary = value if value is Dictionary else {}
+	var result: Dictionary = {}
+	for recipe: Dictionary in DataRegistry.recipes:
+		var recipe_id := String(recipe.id)
+		var entry := {
+			"active": bool(recipe.get("active", false)),
+			"unlocked": bool(recipe.get("unlocked", false)),
+			"price": int(recipe.get("price", 10)),
+			"manual_paused": false,
+			"auto_sold_out": false,
+			"sold_out": false
+		}
+		var saved: Variant = source.get(recipe_id, {})
+		if saved is Dictionary:
+			entry.merge(saved, true)
+		if loaded_version < 10:
+			entry.manual_paused = bool(entry.get("sold_out", false))
+			entry.auto_sold_out = false
+		else:
+			entry.manual_paused = bool(entry.get("manual_paused", entry.get("sold_out", false)))
+			entry.auto_sold_out = bool(entry.get("auto_sold_out", false))
+		_sync_menu_sold_out_entry(entry)
+		result[recipe_id] = entry
+	for recipe_id: String in source:
+		if result.has(recipe_id) or not source[recipe_id] is Dictionary:
+			continue
+		var legacy_entry: Dictionary = (source[recipe_id] as Dictionary).duplicate(true)
+		legacy_entry.manual_paused = bool(legacy_entry.get("sold_out", false)) if loaded_version < 10 else bool(legacy_entry.get("manual_paused", legacy_entry.get("sold_out", false)))
+		legacy_entry.auto_sold_out = false if loaded_version < 10 else bool(legacy_entry.get("auto_sold_out", false))
+		_sync_menu_sold_out_entry(legacy_entry)
+		result[recipe_id] = legacy_entry
+	return result
+
+
+func _migrate_casual_state_v10(data: Dictionary) -> void:
+	# v9 used stock.amount as the Album badge. The new collection starts only
+	# from the configured starter pack (or explicit pre-release album data),
+	# never by copying physical stock quantities.
+	_load_casual_state_v10(data)
+	for ingredient_id: String in stock:
+		if bool(stock[ingredient_id].get("unlocked", false)):
+			album_discovered[ingredient_id] = true
+
+
+func _load_casual_state_v10(data: Dictionary) -> void:
+	album_inventory = _normalize_album_inventory(data.get("album_inventory", {}))
+	album_discovered = _normalize_album_discovered(data.get("album_discovered", {}))
+	reviews = _normalize_reviews(data.get("reviews", []))
+	review_reward_progress = maxi(int(data.get("review_reward_progress", 0)), 0)
+	reputation_weight = maxf(float(data.get("reputation_weight", 0.0)), 0.0)
+	world_clock = _normalize_world_clock(data.get("world_clock", {}))
+	restaurant_profile = _default_restaurant_profile()
+	if data.get("restaurant_profile") is Dictionary:
+		restaurant_profile.merge(data.restaurant_profile, true)
+	pending_delivery_batch = _normalize_pending_delivery_batch(data.get("pending_delivery_batch", {}))
+	cleanliness_state = _default_cleanliness_state()
+	if data.get("cleanliness_state") is Dictionary:
+		cleanliness_state.merge(data.cleanliness_state, true)
+	pest_state = _default_pest_state()
+	if data.get("pest_state") is Dictionary:
+		pest_state.merge(data.pest_state, true)
+	staff_preferences = (data.staff_preferences as Dictionary).duplicate(true) if data.get("staff_preferences") is Dictionary else {}
+	for ingredient_id: String in stock:
+		if bool(stock[ingredient_id].get("unlocked", false)):
+			album_discovered[ingredient_id] = true
+
+
+func _normalize_album_inventory(value: Variant) -> Dictionary:
+	var result := _default_album_inventory()
+	if value is Dictionary:
+		for ingredient_id: String in value:
+			result[ingredient_id] = maxi(int(value[ingredient_id]), 0)
+	return result
+
+
+func _normalize_album_discovered(value: Variant) -> Dictionary:
+	var result := _default_album_discovered()
+	if value is Dictionary:
+		for ingredient_id: String in value:
+			result[ingredient_id] = bool(value[ingredient_id])
+	return result
+
+
+func _normalize_reviews(value: Variant) -> Array:
+	var result: Array = []
+	if value is Array:
+		for review: Variant in value:
+			if review is Dictionary:
+				result.append((review as Dictionary).duplicate(true))
+	var history_limit := maxi(int(DataRegistry.balance_value("reviews.history_limit", 100)), 1)
+	while result.size() > history_limit:
+		result.pop_front()
+	return result
+
+
+func _normalize_world_clock(value: Variant) -> Dictionary:
+	var result := _default_world_clock()
+	if value is Dictionary:
+		result.merge(value, true)
+	result.day = maxi(int(result.get("day", 1)), 1)
+	result.minute = clampf(float(result.get("minute", 540.0)), 0.0, 1439.999)
+	return result
+
+
+func _normalize_pending_delivery_batch(value: Variant) -> Dictionary:
+	var result := _default_pending_delivery_batch()
+	if value is Dictionary:
+		result.merge(value, true)
+	result.id = String(result.get("id", ""))
+	result.items = (result.items as Dictionary).duplicate(true) if result.get("items") is Dictionary else {}
+	result.remaining = maxf(float(result.get("remaining", DataRegistry.balance_value("delivery.batch_interval_seconds", 300.0))), 0.0)
+	result.paid = bool(result.get("paid", false))
+	return result
 
 
 func _migrate_seating_v2() -> void:
@@ -608,6 +1113,72 @@ func _migrate_complete_shell_v9() -> void:
 		used_uids[uid] = true
 
 
+func _migrate_technical_kitchen_v11() -> void:
+	# Dessert changed from a blocking floor station to a surface attachment.
+	# Reuse the proven attachment repair pass: it keeps the machine UID and
+	# authored scale intact, creates a deterministic free worktop only when
+	# needed, and preserves the closest viable layout position.
+	_migrate_attachment_integrity_v7()
+
+	var used_uids: Dictionary = {}
+	for record: Dictionary in layout:
+		var uid := String(record.get("uid", ""))
+		if not uid.is_empty():
+			used_uids[uid] = true
+
+	var additions: Array[Dictionary] = []
+	for station: Dictionary in layout:
+		var station_definition: Dictionary = DataRegistry.build_by_id.get(
+			String(station.get("item", "")),
+			{}
+		)
+		if not bool(station_definition.get("ventilation_required", false)):
+			continue
+		var station_uid := String(station.get("uid", ""))
+		if station_uid.is_empty() or _layout_has_compatible_hood(station_uid):
+			continue
+		var station_cell: Array = station.get("cell", [0, 0])
+		var hood_uid := _deterministic_migration_uid(
+			"v11_hood_%s" % station_uid,
+			used_uids
+		)
+		additions.append({
+			"uid": hood_uid,
+			"item": "extractor_hood",
+			"cell": [int(station_cell[0]), int(station_cell[1])],
+			"rotation": int(station.get("rotation", 0)),
+			"support_uid": station_uid,
+			"attachment_slot": 0
+		})
+		used_uids[hood_uid] = true
+	layout.append_array(additions)
+
+
+func _layout_has_compatible_hood(station_uid: String) -> bool:
+	for record: Dictionary in layout:
+		if String(record.get("support_uid", "")) != station_uid:
+			continue
+		var definition: Dictionary = DataRegistry.build_by_id.get(
+			String(record.get("item", "")),
+			{}
+		)
+		if (
+			String(definition.get("placement", "cell")) == "overhead"
+			and String(definition.get("requires_support", "")) == "heat_station"
+		):
+			return true
+	return false
+
+
+func _deterministic_migration_uid(base_uid: String, used_uids: Dictionary) -> String:
+	if not used_uids.has(base_uid):
+		return base_uid
+	var suffix := 2
+	while used_uids.has("%s_%d" % [base_uid, suffix]):
+		suffix += 1
+	return "%s_%d" % [base_uid, suffix]
+
+
 func _layout_edge_key(record: Dictionary) -> String:
 	var cell_data: Array = record.get("cell", [0, 0])
 	var x := int(cell_data[0])
@@ -659,7 +1230,24 @@ func _initial_wall_records() -> Array:
 func _emit_all() -> void:
 	money_changed.emit(money)
 	reputation_changed.emit(reputation)
+	# The day-cycle manager keeps a runtime clock mirror and commits it when the
+	# restaurant state changes. Refresh that mirror first while deserializing,
+	# otherwise the following state signal can overwrite the just-loaded clock
+	# with its stale pre-load value.
+	world_clock_changed.emit(world_clock.duplicate(true))
 	restaurant_state_changed.emit(restaurant_state)
 	menu_changed.emit()
 	employees_changed.emit()
 	layout_changed.emit()
+	for ingredient_id: String in album_inventory:
+		album_inventory_changed.emit(ingredient_id, int(album_inventory[ingredient_id]))
+	for ingredient_id: String in album_discovered:
+		album_discovered_changed.emit(ingredient_id, bool(album_discovered[ingredient_id]))
+	reviews_changed.emit()
+	review_reward_progress_changed.emit(review_reward_progress)
+	restaurant_profile_changed.emit(restaurant_profile.duplicate(true))
+	pending_delivery_batch_changed.emit(pending_delivery_batch.duplicate(true))
+	cleanliness_state_changed.emit(cleanliness_state.duplicate(true))
+	pest_state_changed.emit(pest_state.duplicate(true))
+	for employee_id: String in staff_preferences:
+		staff_preferences_changed.emit(employee_id, staff_preferences[employee_id])

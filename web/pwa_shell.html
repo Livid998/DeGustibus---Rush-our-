@@ -146,6 +146,17 @@ body {
 	font: 700 14px system-ui, sans-serif;
 	cursor: pointer;
 }
+
+#pwa-update-button:focus-visible {
+	outline: 3px solid #fff8e8;
+	outline-offset: 3px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	#pwa-update {
+		transition: none;
+	}
+}
 		</style>
 		$GODOT_HEAD_INCLUDE
 	</head>
@@ -159,9 +170,9 @@ body {
 			<div id="status-notice"></div>
 		</div>
 
-		<div id="pwa-update" role="status" aria-live="polite">
+		<div id="pwa-update" role="status" aria-live="polite" aria-atomic="true" aria-hidden="true" inert>
 			<span id="pwa-update-message">È disponibile una nuova versione.</span>
-			<button id="pwa-update-button" type="button">Aggiorna e riavvia</button>
+			<button id="pwa-update-button" type="button" tabindex="-1">Aggiorna e riavvia</button>
 		</div>
 
 		<script src="$GODOT_URL"></script>
@@ -175,6 +186,14 @@ window.degustibusMobileProfile = appleMobile || (/Android/.test(navigator.userAg
 window.degustibusSafeMode = sessionStorage.getItem('degustibus-webgl-safe') === '1'
 	|| new URLSearchParams(window.location.search).get('safe') === '1';
 const engine = new Engine(GODOT_CONFIG);
+const pwaInstallPromise = (
+	GODOT_CONFIG.serviceWorker
+	&& !GODOT_CONFIG.ensureCrossOriginIsolationHeaders
+	&& 'serviceWorker' in navigator
+) ? engine.installServiceWorker().catch((error) => {
+	console.error('PWA service worker install failed:', error);
+	return null;
+}) : Promise.resolve(null);
 
 (function setupWebGlRecovery() {
 	const canvas = document.getElementById('canvas');
@@ -201,13 +220,40 @@ const engine = new Engine(GODOT_CONFIG);
 	const button = document.getElementById('pwa-update-button');
 	let registration = null;
 	let reloading = false;
+	let hideTimer = 0;
 
-	function show(text, actionable) {
-		message.textContent = text;
+	function hide() {
+		if (hideTimer) {
+			window.clearTimeout(hideTimer);
+			hideTimer = 0;
+		}
+		if (banner.contains(document.activeElement)) {
+			document.getElementById('canvas')?.focus({ preventScroll: true });
+		}
+		banner.classList.remove('visible');
+		banner.setAttribute('aria-hidden', 'true');
+		banner.setAttribute('inert', '');
+		button.tabIndex = -1;
+	}
+
+	function show(text, actionable, focusAction = false) {
+		if (hideTimer) {
+			window.clearTimeout(hideTimer);
+			hideTimer = 0;
+		}
 		button.style.display = actionable ? 'block' : 'none';
+		button.tabIndex = actionable ? 0 : -1;
+		button.disabled = false;
+		banner.removeAttribute('aria-busy');
+		banner.removeAttribute('inert');
+		banner.setAttribute('aria-hidden', 'false');
 		banner.classList.add('visible');
+		message.textContent = text;
+		if (actionable && focusAction) {
+			window.setTimeout(() => button.focus({ preventScroll: true }), 0);
+		}
 		if (!actionable) {
-			window.setTimeout(() => banner.classList.remove('visible'), 2600);
+			hideTimer = window.setTimeout(hide, 2600);
 		}
 	}
 
@@ -215,13 +261,14 @@ const engine = new Engine(GODOT_CONFIG);
 		if (!worker) return;
 		worker.addEventListener('statechange', () => {
 			if (worker.state === 'installed' && navigator.serviceWorker.controller) {
-				show('Nuova versione pronta.', true);
+				show('Nuova versione pronta.', true, false);
 			}
 		});
 	}
 
 	async function getRegistration() {
 		if (!('serviceWorker' in navigator)) return null;
+		await pwaInstallPromise;
 		registration = registration || await navigator.serviceWorker.getRegistration();
 		return registration;
 	}
@@ -236,7 +283,7 @@ const engine = new Engine(GODOT_CONFIG);
 			if (manual) show('Controllo aggiornamenti...', false);
 			await current.update();
 			if (current.waiting) {
-				show('Nuova versione pronta.', true);
+				show('Nuova versione pronta.', true, manual);
 				return 'Aggiornamento pronto';
 			}
 			return 'Controllo aggiornamenti avviato';
@@ -254,11 +301,19 @@ const engine = new Engine(GODOT_CONFIG);
 
 	button.addEventListener('click', async () => {
 		button.disabled = true;
+		banner.setAttribute('aria-busy', 'true');
+		message.textContent = 'Aggiornamento in corso...';
 		const current = await getRegistration();
 		if (current && current.waiting) {
 			current.waiting.postMessage('update');
 		} else {
 			window.location.reload();
+		}
+	});
+	banner.addEventListener('keydown', (event) => {
+		if (event.key === 'Escape') {
+			event.preventDefault();
+			hide();
 		}
 	});
 

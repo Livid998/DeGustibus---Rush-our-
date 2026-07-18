@@ -125,6 +125,8 @@ func _duration_for_text(text: String) -> float:
 func _customer_descriptor(text: String) -> Dictionary:
 	if text.begins_with("+"):
 		return {"key":"paid", "cell":Vector2i(2, 4)}
+	if _contains_any(text, ["CAMBIO ORDINE", "PIATTO ESAURITO", "NESSUNA ALTERNATIVA"]):
+		return {"key":"change_order", "cell":Vector2i(3, 3)}
 	if _contains_any(text, ["TROPPA", "NESSUN"]):
 		return {"key":"angry", "cell":Vector2i(3, 0)}
 	if _contains_any(text, ["RITARDO", "ATTESA TURNO", "ATTESA TAVOLO"]):
