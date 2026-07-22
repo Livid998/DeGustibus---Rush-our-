@@ -155,10 +155,12 @@ func _ready() -> void:
 	)
 	_expect(
 		"inputs.publish" in workflow and "inputs.ipad_evidence != ''" in workflow
-			and "github.event_name == 'workflow_dispatch'" in workflow
+			and "github.event_name == 'push'" in workflow
+			and "inputs.channel == 'test'" in workflow
+			and "inputs.channel == 'beta'" in workflow
 			and "upload-pages-artifact@v4" in workflow
-			and workflow.count("include-hidden-files: true") >= 3,
-		"Pages richiede dispatch, browser verdi ed evidence iPad manuale"
+			and workflow.count("include-hidden-files: true") >= 2,
+		"Pages pubblica test da main e mantiene evidence iPad per la beta"
 	)
 	_expect(
 		"Aggiungi alla schermata Home" in documentation

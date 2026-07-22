@@ -75,16 +75,22 @@ La mappa deve riaprirsi. Cambiare porta crea un'origine e una cache diverse.
 2. `export`: checkout pulito, export unico, metadati e budget hard;
 3. `reuse`: recupero opzionale di un artifact precedente per rollback;
 4. `browser-smoke`: stesso artifact in Chromium e WebKit;
-5. `deploy`: gate iPad manuale e pubblicazione Pages, senza re-export.
+5. `deploy`: pubblicazione test oppure gate iPad beta, senza re-export.
 
-Un push su `main` produce e conserva per 90 giorni artifact ed evidence, ma
-**non pubblica automaticamente**: manca ancora la prova fisica iPad. Per la
-release aprire `Actions > Verifica e pubblica PWA > Run workflow`, impostare:
+Un push su `main` produce e conserva per 90 giorni artifact ed evidence e, se
+tutti i gate automatici sono verdi, aggiorna Pages come **build di test**. La
+build di test non equivale a una closed beta approvata. Per pubblicare una beta
+ufficiale aprire `Actions > Verifica e pubblica PWA > Run workflow`, impostare:
 
 - `release`: versione della closed beta;
 - `publish`: attivo;
+- `channel`: `beta`;
 - `ipad_evidence`: link o ID dell'evidence del test fisico;
 - `rollback_run_id`: vuoto per una build nuova.
+
+Per ripubblicare manualmente una build di prova usare invece `channel: test`:
+in questo canale l'evidence iPad non viene richiesta e il riepilogo del run la
+identifica esplicitamente come build non promossa.
 
 Impostare `Settings > Pages > Source: GitHub Actions`. È consigliato aggiungere
 anche un reviewer obbligatorio all'environment `github-pages`: l'input evidence
@@ -94,7 +100,8 @@ non sostituisce la revisione umana.
 
 Gli artifact `pwa-release-ready` sono conservati per 90 giorni. Per ripubblicare
 una versione, avviare manualmente il workflow indicando il suo `run_id` in
-`rollback_run_id`, `publish=true` e l'evidence iPad relativa a quell'artifact.
+`rollback_run_id`, `publish=true`, `channel=beta` e l'evidence iPad relativa a
+quell'artifact.
 La pipeline non ricompila: rivalida budget/metadati, ripete Chromium/WebKit e
 pubblica gli stessi byte.
 

@@ -28,6 +28,14 @@ on:
         required: true
         default: false
         type: boolean
+      channel:
+        description: Canale di pubblicazione (test automatico o beta con gate iPad)
+        required: true
+        default: test
+        type: choice
+        options:
+          - test
+          - beta
       ipad_evidence:
         description: Link/ID evidence del test fisico iPad di 60 minuti
         required: false
@@ -289,9 +297,18 @@ jobs:
           retention-days: 90
 
   deploy:
-    name: 4 · Gate iPad e pubblicazione
+    name: 4 · Pubblicazione test / gate iPad beta
     needs: browser-smoke
-    if: github.event_name == 'workflow_dispatch' && inputs.publish && inputs.ipad_evidence != '' && needs.browser-smoke.result == 'success'
+    if: >-
+      needs.browser-smoke.result == 'success' &&
+      (
+        github.event_name == 'push' ||
+        (
+          github.event_name == 'workflow_dispatch' &&
+          inputs.publish &&
+          (inputs.channel == 'test' || (inputs.channel == 'beta' && inputs.ipad_evidence != ''))
+        )
+      )
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment:
@@ -299,9 +316,14 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
 
     steps:
-      - name: Registra il gate manuale iPad (non automatizzato)
+      - name: Registra il canale pubblicato
         run: |
-          echo "Evidence test fisico iPad 60 minuti: ${{ inputs.ipad_evidence }}" >> "$GITHUB_STEP_SUMMARY"
+          if [ "${{ github.event_name }}" = "push" ] || [ "${{ inputs.channel }}" = "test" ]; then
+            echo "Canale: test PWA (non promosso a closed beta)." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Canale: closed beta." >> "$GITHUB_STEP_SUMMARY"
+            echo "Evidence test fisico iPad 60 minuti: ${{ inputs.ipad_evidence }}" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Scarica strumenti di verifica
         uses: actions/checkout@v4
@@ -325,7 +347,6 @@ jobs:
         uses: actions/upload-pages-artifact@v4
         with:
           path: release/pwa
-          include-hidden-files: true
 
       - name: Pubblica su GitHub Pages
         id: deployment
