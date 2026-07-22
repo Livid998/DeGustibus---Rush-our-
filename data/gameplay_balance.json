@@ -3,8 +3,22 @@
   "save": {
     "autosave_debounce_seconds": 1.5
   },
+  "new_game": {
+    "money": 1200,
+    "employee_ids": ["e1", "e4", "e6"],
+    "active_recipe_ids": ["margherita", "mixed_salad"],
+    "target_cover_count": 12,
+    "stock_margin": 0.20,
+    "stock": {
+      "tomato": 22,
+      "carrot": 8,
+      "lettuce": 8,
+      "cheese": 8,
+      "dough": 8
+    }
+  },
   "day_cycle": {
-    "real_seconds_at_1x": 720,
+    "real_seconds_at_1x": 2880,
     "start_minute": 540,
     "rush_warning_seconds": 30,
     "rush_windows": [
@@ -21,6 +35,14 @@
         "traffic_multiplier": 1.9
       }
     ]
+  },
+  "onboarding_pacing": {
+    "schema_version": 1,
+    "first_review_target_seconds": 720,
+    "useful_purchase_target_seconds": 1200,
+    "first_loop_min_seconds": 1800,
+    "first_loop_max_seconds": 2700,
+    "recommendation_lot_cap": 8
   },
   "traffic": {
     "base_spawn_interval": 5.5,

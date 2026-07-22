@@ -2,9 +2,41 @@ class_name AnimatedAgent
 extends CharacterBody3D
 
 const CHARACTER_FOOT_LIFT := 0.08
-const TRAFFIC_REPATH_INTERVAL := 0.85
-const RECOVERY_PROBE_TIME := 1.65
-const HARD_NAVIGATION_TIMEOUT := 12.0
+const STALL_REPATH_TIMEOUT := AgentTrafficCoordinator.REPATH_SECONDS
+const TRAFFIC_REPATH_INTERVAL := AgentTrafficCoordinator.REPATH_SECONDS
+const RECOVERY_PROBE_TIME := AgentTrafficCoordinator.RECOVERY_SECONDS
+const HARD_NAVIGATION_TIMEOUT := AgentTrafficCoordinator.HARD_CANCEL_SECONDS
+
+## Logical animation names used by the simulation.  Resolution is deliberately
+## asset-pack agnostic: a specialised clip wins, otherwise the closest credible
+## supplied clip is used. The logical state remains unchanged for prop/state
+## synchronisation and diagnostics.
+const ANIMATION_ALIASES := {
+	"idle": ["Idle"],
+	"conversation": ["Conversation", "Talk", "Cheer", "Idle"],
+	"walk": ["Walk", "Run"],
+	"walk_carry": ["Walk_Carry", "Carry_Walk", "Walk"],
+	"carry": ["Carry", "Idle_Carry", "Idle"],
+	"pickup": ["PickUp", "Interact", "Idle"],
+	"putdown": ["PutDown", "PickUp", "Interact", "Idle"],
+	"chop": ["Chop", "PickUp", "Interact", "Idle"],
+	"mix": ["Mix", "PickUp", "Interact", "Idle"],
+	"oven": ["Oven", "PickUp", "Interact", "Idle"],
+	"plate": ["Plate", "PickUp", "Interact", "Idle"],
+	"serve": ["Serve", "PickUp", "Interact", "Idle"],
+	"payment": ["Payment", "PickUp", "Interact", "Idle"],
+	# Eating has a procedural seated overlay in CustomerPersonAgent; replaying
+	# SitDown as a fallback would visibly fold the diner into the table.
+	"eat": ["Eat", "Idle"],
+	"wash": ["Wash", "PickUp", "Interact", "Idle"],
+	"sitdown": ["SitDown", "Idle"],
+	"standup": ["StandUp", "Idle"],
+}
+const ANIMATION_CONTRACT: Array[String] = [
+	"Idle", "Conversation", "Walk", "Walk_Carry", "Carry", "PickUp",
+	"PutDown", "Chop", "Mix", "Oven", "Plate", "Serve", "Payment",
+	"Eat", "Wash", "SitDown", "StandUp"
+]
 
 static var _next_route_ticket := 1
 
@@ -35,6 +67,7 @@ var agent_radius := 0.40
 var arrival_tolerance := 0.16
 var animation_players: Array[AnimationPlayer] = []
 var current_animation := ""
+var rig_markers: Dictionary = {}
 var stuck_time := 0.0
 var total_stuck_time := 0.0
 var repath_cooldown := 0.0
@@ -92,6 +125,7 @@ func add_character_model(model_path: String, offset: Vector3 = Vector3.ZERO, ski
 	# controller on the navigation plane and lift only the rendered character.
 	model.position = offset + Vector3.UP * CHARACTER_FOOT_LIFT
 	add_child(model)
+	rig_markers = ModelFactory.ensure_rig_markers(model)
 	if skin_tone.a <= 0.0:
 		skin_tone = SKIN_TONES.pick_random()
 	_apply_character_palette(model, skin_tone)
@@ -249,13 +283,39 @@ func resolve_animation(player: AnimationPlayer, requested: String) -> StringName
 	var cache_key := "%d:%s" % [player.get_instance_id(), requested.to_lower()]
 	if _animation_resolution_cache.has(cache_key):
 		return StringName(_animation_resolution_cache[cache_key])
-	for animation_name: StringName in player.get_animation_list():
-		var simple := String(animation_name).get_slice("/", String(animation_name).get_slice_count("/") - 1)
-		if simple.to_lower() == requested.to_lower() or String(animation_name).to_lower() == requested.to_lower():
-			_animation_resolution_cache[cache_key] = animation_name
-			return animation_name
+	var candidates: Array = ANIMATION_ALIASES.get(requested.to_lower(), [requested])
+	for candidate: Variant in candidates:
+		for animation_name: StringName in player.get_animation_list():
+			var full := String(animation_name)
+			var simple := full.get_slice("/", full.get_slice_count("/") - 1)
+			if simple.to_lower() == String(candidate).to_lower() or full.to_lower() == String(candidate).to_lower():
+				_animation_resolution_cache[cache_key] = animation_name
+				return animation_name
 	_animation_resolution_cache[cache_key] = &""
 	return &""
+
+
+func rig_marker(marker_name: String) -> Node3D:
+	return rig_markers.get(marker_name) as Node3D
+
+
+func rig_contract_snapshot() -> Dictionary:
+	var markers: Dictionary = {}
+	for marker_name: StringName in ModelFactory.RIG_MARKER_NAMES:
+		var marker := rig_marker(String(marker_name))
+		markers[String(marker_name)] = {
+			"present": marker != null and is_instance_valid(marker),
+			"source": String(marker.get_meta("rig_marker_source", "unknown")) if marker != null else "missing",
+		}
+	var animations: Dictionary = {}
+	for logical_name: String in ANIMATION_CONTRACT:
+		var resolved := ""
+		for player: AnimationPlayer in animation_players:
+			resolved = String(resolve_animation(player, logical_name))
+			if not resolved.is_empty():
+				break
+		animations[logical_name] = resolved
+	return {"version": 1, "markers": markers, "animations": animations}
 
 
 func move_to(target: Vector3) -> bool:
@@ -292,6 +352,8 @@ func _repath() -> bool:
 	if world == null:
 		navigation_failed = true
 		return false
+	world.prepare_agent_repath(self)
+	RuntimeDiagnostics.record_repath()
 	path = world.find_path(global_position, destination, self)
 	path_index = 0
 	navigation_revision = world.navigation_revision
@@ -332,12 +394,14 @@ func advance_path(delta: float, carry: bool = false) -> bool:
 		_traffic_repath_clock += delta
 		var installed_detour := false
 		var already_holding_clear := _traffic_pullout_active and _flat_distance(global_position, _traffic_pullout_position) <= 0.38
-		if traffic_wait_time >= 0.65 and not already_holding_clear:
+		if traffic_wait_time >= RECOVERY_PROBE_TIME and not already_holding_clear:
 			installed_detour = _try_install_recovery_detour()
 		if not installed_detour and _traffic_repath_clock >= TRAFFIC_REPATH_INTERVAL and repath_cooldown <= 0.0:
 			_traffic_repath_clock = 0.0
 			repath_cooldown = 0.35
 			_repath()
+		if world.traffic_coordinator.should_hard_cancel(traffic_wait_time, world.agent_has_managed_traffic_wait(self)):
+			_fail_navigation_timeout("traffic_wait")
 		play_animation("Idle")
 		return false
 	traffic_wait_time = 0.0
@@ -381,19 +445,17 @@ func advance_path(delta: float, carry: bool = false) -> bool:
 		# previous slow decay could fail a perfectly healthy long route after a
 		# handful of unrelated, short waits.
 		total_stuck_time = maxf(total_stuck_time - delta * 4.0, 0.0)
-	if stuck_time >= 0.7 and repath_cooldown <= 0.0:
+	if stuck_time >= STALL_REPATH_TIMEOUT and repath_cooldown <= 0.0:
 		stuck_time = 0.0
 		repath_cooldown = 0.35
 		_repath()
 	if total_stuck_time >= RECOVERY_PROBE_TIME:
 		_try_install_recovery_detour()
-	if total_stuck_time >= HARD_NAVIGATION_TIMEOUT:
-		navigation_failed = true
-		navigation_active = false
-		velocity = Vector3.ZERO
-		if world != null:
-			world.finish_agent_navigation(self)
-		play_animation("Idle")
+	if world == null and total_stuck_time >= HARD_NAVIGATION_TIMEOUT:
+		_fail_navigation_timeout("no_progress")
+		return false
+	if world != null and world.traffic_coordinator.should_hard_cancel(total_stuck_time, world.agent_has_managed_traffic_wait(self)):
+		_fail_navigation_timeout("no_progress")
 		return false
 	if direction.length_squared() > 0.001:
 		var desired_rotation := atan2(direction.x, direction.z)
@@ -466,6 +528,23 @@ func _try_install_recovery_detour() -> bool:
 	repath_cooldown = 0.55
 	recovery_count += 1
 	return path_index < path.size()
+
+
+func _fail_navigation_timeout(reason: String) -> void:
+	navigation_failed = true
+	navigation_active = false
+	velocity = Vector3.ZERO
+	path.clear()
+	path_index = 0
+	if world != null:
+		world.cancel_agent_navigation(self)
+	RuntimeDiagnostics.record_navigation_timeout()
+	RuntimeDiagnostics.record_event("navigation_timeout", {
+		"agent": String(name),
+		"reason": reason,
+		"destination": [destination.x, destination.y, destination.z],
+	})
+	play_animation("Idle")
 
 
 func _skip_reached_waypoints() -> void:

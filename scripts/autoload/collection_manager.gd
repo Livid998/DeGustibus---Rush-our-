@@ -134,7 +134,13 @@ func grant_weighted_reward(source: String, quantity_override: int = -1) -> Dicti
 	var useful := needed_album_ingredients()
 	var pity_interval := maxi(int(_balance("album.pity_interval", 4)), 1)
 	var force_useful := not useful.is_empty() and _pity_progress >= pity_interval - 1
-	var candidates := useful if force_useful else all_candidates
+	var force_first_config_useful := false
+	var first_config_candidates: Array[String] = []
+	var pacing := get_node_or_null("/root/OnboardingPacingService")
+	if pacing != null and pacing.has_method("should_force_first_reward") and bool(pacing.call("should_force_first_reward", source)):
+		first_config_candidates = pacing.call("first_reward_candidates")
+		force_first_config_useful = not first_config_candidates.is_empty()
+	var candidates := first_config_candidates if force_first_config_useful else useful if force_useful else all_candidates
 	var ingredient_id := _pick_weighted(candidates, useful)
 	if ingredient_id.is_empty():
 		return {}
@@ -151,12 +157,17 @@ func grant_weighted_reward(source: String, quantity_override: int = -1) -> Dicti
 		_set_pity_progress(0)
 	else:
 		_set_pity_progress(_pity_progress + 1)
-	return {
+	var reward := {
 		"ingredient_id": ingredient_id,
 		"amount": quantity,
 		"source": source,
 		"pity_forced": force_useful,
+		"first_config_useful_forced": force_first_config_useful,
 	}
+	if force_first_config_useful and pacing != null:
+		pacing.call("mark_first_reward_complete")
+		pacing.call("notify_first_album_reward", reward)
+	return reward
 
 
 func needed_album_ingredients() -> Array[String]:

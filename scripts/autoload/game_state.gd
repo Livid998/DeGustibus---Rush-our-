@@ -20,8 +20,21 @@ signal pest_state_changed(value: Dictionary)
 signal staff_preferences_changed(employee_id: String, preference: Variant)
 
 const SAVE_VERSION := 12
+const DEFAULT_SETTINGS := {
+	"music": true,
+	"sound": true,
+	"music_volume": 0.60,
+	"ambience_volume": 0.72,
+	"sfx_volume": 0.82,
+	"ui_volume": 0.82,
+	"camera_zoom": 24.0,
+	"camera_quadrant": 0,
+	"graphics_quality": "auto",
+	"high_contrast": false,
+	"reduced_motion": false,
+}
 
-var money: int = 10000
+var money: int = 1200
 var reputation: float = 1.0
 var restaurant_state: String = "closed"
 var service_seconds: float = 0.0
@@ -32,8 +45,13 @@ var candidates: Array = []
 var layout: Array = []
 var deliveries: Array = []
 var purchased_preparations: Dictionary = {}
-var progress: Dictionary = {"customers_served": 0, "desserts_served": 0, "services_started": 0}
-var settings: Dictionary = {"music": true, "sound": true, "camera_zoom": 24.0, "camera_quadrant": 0, "graphics_quality": "auto"}
+var progress: Dictionary = {
+	"customers_served": 0,
+	"desserts_served": 0,
+	"services_started": 0,
+	"onboarding_pacing": {},
+}
+var settings: Dictionary = DEFAULT_SETTINGS.duplicate(true)
 var tutorial: Dictionary = {
 	"version": 2,
 	"current_step_id": "table_moved",
@@ -60,7 +78,7 @@ func _ready() -> void:
 
 
 func reset_to_defaults(emit_signals: bool = true) -> void:
-	money = 10000
+	money = maxi(int(DataRegistry.balance_value("new_game.money", 1200)), 0)
 	reputation = 1.0
 	restaurant_state = "closed"
 	service_seconds = 0.0
@@ -68,22 +86,28 @@ func reset_to_defaults(emit_signals: bool = true) -> void:
 	for ingredient: Dictionary in DataRegistry.ingredients:
 		stock[ingredient.id] = _default_stock_entry(ingredient)
 	menu.clear()
+	var starter_recipes := _configured_string_array("new_game.active_recipe_ids")
 	for recipe: Dictionary in DataRegistry.recipes:
 		menu[recipe.id] = {
-			"active": bool(recipe.get("active", false)),
+			"active": starter_recipes.has(String(recipe.id)),
 			"unlocked": bool(recipe.get("unlocked", false)),
 			"price": int(recipe.get("price", 10)),
 			"manual_paused": false,
 			"auto_sold_out": false,
 			"sold_out": false
 		}
-	employees = DataRegistry.employee_data.get("hired", []).duplicate(true)
+	employees = _default_employees()
 	candidates = DataRegistry.employee_data.get("candidates", []).duplicate(true)
 	layout = _default_layout()
 	deliveries.clear()
 	purchased_preparations.clear()
-	progress = {"customers_served": 0, "desserts_served": 0, "services_started": 0}
-	settings = {"music": true, "sound": true, "camera_zoom": 24.0, "camera_quadrant": 0, "graphics_quality": "auto"}
+	progress = {
+		"customers_served": 0,
+		"desserts_served": 0,
+		"services_started": 0,
+		"onboarding_pacing": _default_onboarding_pacing_state(),
+	}
+	settings = DEFAULT_SETTINGS.duplicate(true)
 	tutorial = _default_tutorial_state()
 	album_inventory = _default_album_inventory()
 	album_discovered = _default_album_discovered()
@@ -102,8 +126,9 @@ func reset_to_defaults(emit_signals: bool = true) -> void:
 
 func _default_stock_entry(ingredient: Dictionary) -> Dictionary:
 	var storage := DataRegistry.storage_metadata_for_ingredient(ingredient)
+	var ingredient_id := String(ingredient.get("id", ""))
 	return {
-		"amount": int(ingredient.get("stock", 0)),
+		"amount": maxi(int(DataRegistry.balance_value("new_game.stock.%s" % ingredient_id, 0)), 0),
 		"reserved": 0,
 		"storage_type": String(storage.storage_type),
 		"storage_units": int(storage.storage_units),
@@ -116,6 +141,30 @@ func _default_stock_entry(ingredient: Dictionary) -> Dictionary:
 		"lot": int(ingredient.get("lot", 10)),
 		"quality": int(ingredient.get("quality", 2))
 	}
+
+
+func _configured_string_array(path: String) -> Array[String]:
+	var result: Array[String] = []
+	var configured: Variant = DataRegistry.balance_value(path, [])
+	if not configured is Array:
+		return result
+	for value: Variant in configured:
+		var normalized := String(value)
+		if not normalized.is_empty() and not result.has(normalized):
+			result.append(normalized)
+	return result
+
+
+func _default_employees() -> Array:
+	var available: Array = DataRegistry.employee_data.get("hired", [])
+	var selected_ids := _configured_string_array("new_game.employee_ids")
+	var result: Array = []
+	for employee_id: String in selected_ids:
+		for employee: Dictionary in available:
+			if String(employee.get("id", "")) == employee_id:
+				result.append(employee.duplicate(true))
+				break
+	return result
 
 
 func _default_album_inventory() -> Dictionary:
@@ -140,6 +189,29 @@ func _default_world_clock() -> Dictionary:
 		"day": 1,
 		"minute": float(DataRegistry.balance_value("day_cycle.start_minute", 540.0))
 	}
+
+
+func _default_onboarding_pacing_state() -> Dictionary:
+	return {
+		"version": maxi(int(DataRegistry.balance_value("onboarding_pacing.schema_version", 1)), 1),
+		"legacy_bypassed": false,
+		"elapsed_unpaused_seconds": 0.0,
+		"milestones": {},
+		"current_recommendation": {},
+		"last_day_summary": {},
+		"first_album_reward_pending": true,
+		"first_album_reward_complete": false,
+		"complete": false,
+	}
+
+
+func _legacy_onboarding_pacing_state() -> Dictionary:
+	var state := _default_onboarding_pacing_state()
+	state.legacy_bypassed = true
+	state.first_album_reward_pending = false
+	state.first_album_reward_complete = true
+	state.complete = true
+	return state
 
 
 func _default_tutorial_state() -> Dictionary:
@@ -194,42 +266,22 @@ func _default_pest_state() -> Dictionary:
 func _default_layout() -> Array:
 	var result := [
 		{"uid":"door_1","item":"door","cell":[8,0],"rotation":0},
-		{"uid":"table_1","item":"table_medium","cell":[3,3],"rotation":0},
-		{"uid":"chair_1","item":"chair","cell":[3,3],"rotation":3,"support_uid":"table_1","attachment_slot":1},
-		{"uid":"chair_2","item":"chair","cell":[3,3],"rotation":1,"support_uid":"table_1","attachment_slot":3},
-		{"uid":"chair_5","item":"chair","cell":[3,3],"rotation":0,"support_uid":"table_1","attachment_slot":0},
-		{"uid":"chair_6","item":"chair","cell":[3,3],"rotation":2,"support_uid":"table_1","attachment_slot":2},
-		{"uid":"table_2","item":"table_cloth","cell":[10,3],"rotation":0},
-		{"uid":"chair_3","item":"chair","cell":[10,3],"rotation":3,"support_uid":"table_2","attachment_slot":1},
-		{"uid":"chair_4","item":"chair","cell":[10,3],"rotation":1,"support_uid":"table_2","attachment_slot":3},
-		{"uid":"chair_7","item":"chair","cell":[10,3],"rotation":0,"support_uid":"table_2","attachment_slot":0},
-		{"uid":"chair_8","item":"chair","cell":[10,3],"rotation":2,"support_uid":"table_2","attachment_slot":2},
-		{"uid":"fridge_1","item":"fridge","cell":[2,9],"rotation":0},
-		{"uid":"storage_1","item":"storage","cell":[4,8],"rotation":0,"support_uid":"wall_divider_4","attachment_slot":0},
-		{"uid":"prep_1","item":"prep_counter","cell":[6,9],"rotation":0},
-		{"uid":"prep_bowl_1","item":"prep_bowl","cell":[6,9],"rotation":0,"support_uid":"prep_1","attachment_slot":0},
-		{"uid":"support_cut_1","item":"prep_counter","cell":[9,9],"rotation":0},
-		{"uid":"cut_1","item":"cutting_board","cell":[9,9],"rotation":0,"support_uid":"support_cut_1","attachment_slot":0},
-		{"uid":"support_cut_2","item":"prep_counter","cell":[14,9],"rotation":0},
-		{"uid":"cut_2","item":"cutting_board","cell":[14,9],"rotation":0,"support_uid":"support_cut_2","attachment_slot":0},
-		{"uid":"stove_1","item":"stove","cell":[11,9],"rotation":0},
-		{"uid":"hood_stove_1","item":"extractor_hood","cell":[11,9],"rotation":0,"support_uid":"stove_1","attachment_slot":0},
-		{"uid":"multi_1","item":"multi_stove","cell":[13,9],"rotation":0},
-		{"uid":"hood_multi_1","item":"extractor_hood","cell":[13,9],"rotation":0,"support_uid":"multi_1","attachment_slot":0},
-		{"uid":"support_pizza_1","item":"prep_counter","cell":[2,12],"rotation":2},
-		{"uid":"pizza_1","item":"pizza_oven","cell":[2,12],"rotation":2,"support_uid":"support_pizza_1","attachment_slot":0},
-		{"uid":"support_oven_1","item":"worktable","cell":[5,12],"rotation":2},
-		{"uid":"oven_1","item":"oven","cell":[5,12],"rotation":2,"support_uid":"support_oven_1","attachment_slot":0},
-		{"uid":"sink_1","item":"sink","cell":[7,12],"rotation":2},
-		{"uid":"support_rack_1","item":"worktable","cell":[9,12],"rotation":2},
-		{"uid":"rack_1","item":"dish_rack","cell":[9,12],"rotation":2,"support_uid":"support_rack_1","attachment_slot":0},
-		{"uid":"pass_1","item":"pass","cell":[11,12],"rotation":2},
-		{"uid":"pass_tray_1","item":"pass_tray","cell":[11,12],"rotation":2,"support_uid":"pass_1","attachment_slot":0},
-		{"uid":"support_dessert_1","item":"worktable","cell":[14,12],"rotation":2},
-		{"uid":"dessert_1","item":"dessert","cell":[14,12],"rotation":2,"support_uid":"support_dessert_1","attachment_slot":0},
-		{"uid":"support_dough_1","item":"worktable","cell":[16,12],"rotation":2},
-		{"uid":"dough_1","item":"dough","cell":[16,12],"rotation":2,"support_uid":"support_dough_1","attachment_slot":0},
-		{"uid":"plant_1","item":"plant","cell":[15,3],"rotation":0}
+		{"uid":"table_1","item":"table_small","cell":[4,4],"rotation":0},
+		{"uid":"chair_1","item":"chair","cell":[4,4],"rotation":0,"support_uid":"table_1","attachment_slot":0},
+		{"uid":"chair_2","item":"chair","cell":[4,4],"rotation":2,"support_uid":"table_1","attachment_slot":2},
+		{"uid":"fridge_1","item":"fridge","cell":[3,9],"rotation":0},
+		{"uid":"storage_1","item":"storage","cell":[1,8],"rotation":0,"support_uid":"wall_divider_1","attachment_slot":0},
+		{"uid":"prep_1","item":"prep_counter","cell":[5,9],"rotation":0},
+		{"uid":"prep_bowl_1","item":"prep_bowl","cell":[5,9],"rotation":0,"support_uid":"prep_1","attachment_slot":0},
+		{"uid":"support_cut_1","item":"prep_counter","cell":[8,9],"rotation":0},
+		{"uid":"cut_1","item":"cutting_board","cell":[8,9],"rotation":0,"support_uid":"support_cut_1","attachment_slot":0},
+		{"uid":"support_pizza_1","item":"prep_counter","cell":[12,9],"rotation":0},
+		{"uid":"pizza_1","item":"pizza_oven","cell":[12,9],"rotation":0,"support_uid":"support_pizza_1","attachment_slot":0},
+		{"uid":"support_dough_1","item":"worktable","cell":[15,9],"rotation":0},
+		{"uid":"dough_1","item":"dough","cell":[15,9],"rotation":0,"support_uid":"support_dough_1","attachment_slot":0},
+		{"uid":"sink_1","item":"sink","cell":[3,12],"rotation":2},
+		{"uid":"pass_1","item":"pass","cell":[6,12],"rotation":2},
+		{"uid":"pass_tray_1","item":"pass_tray","cell":[6,12],"rotation":2,"support_uid":"pass_1","attachment_slot":0}
 	]
 	result.append_array(_initial_wall_records())
 	result.append_array(_initial_exterior_records())
@@ -683,6 +735,7 @@ func deserialize(data: Dictionary) -> void:
 		_migrate_technical_kitchen_v11()
 	if data.get("settings") is Dictionary:
 		settings.merge(data.settings, true)
+	_normalize_settings()
 	if data.get("tutorial") is Dictionary:
 		var loaded_tutorial: Dictionary = (data.tutorial as Dictionary).duplicate(true)
 		# Preserve the original legacy shape until TutorialManager can translate
@@ -698,7 +751,15 @@ func deserialize(data: Dictionary) -> void:
 	else:
 		purchased_preparations = DataRegistry.sanitize_purchased_preparations(purchased_preparations, false).kept
 	if data.get("progress") is Dictionary:
-		progress.merge(data.progress, true)
+		var loaded_progress: Dictionary = data.progress
+		progress.merge(loaded_progress, true)
+		# M2 pacing is intentionally new-save-only. A v12 save created before this
+		# subsystem has no marker, so it is preserved verbatim and bypasses the
+		# introductory forcing/recommendations instead of being re-onboarded.
+		if not loaded_progress.has("onboarding_pacing"):
+			progress.onboarding_pacing = _legacy_onboarding_pacing_state()
+	else:
+		progress.onboarding_pacing = _legacy_onboarding_pacing_state()
 	if loaded_version < 10:
 		_migrate_casual_state_v10(data)
 	else:
@@ -711,6 +772,27 @@ func deserialize(data: Dictionary) -> void:
 	_emit_all()
 	if progression_refund > 0:
 		toast_requested.emit("Rimborso semilavorati non utilizzabili: +%d" % progression_refund, "income")
+
+
+func _normalize_settings() -> void:
+	for key: String in DEFAULT_SETTINGS:
+		if not settings.has(key):
+			settings[key] = DEFAULT_SETTINGS[key]
+	var quality := String(settings.get("graphics_quality", "auto"))
+	# Compatibility aliases from the pre-beta five-level selector.
+	if quality == "balanced":
+		quality = "medium"
+	elif quality == "ultra":
+		quality = "high"
+	if quality not in ["auto", "low", "medium", "high"]:
+		quality = "auto"
+	settings.graphics_quality = quality
+	settings.music = bool(settings.get("music", true))
+	settings.sound = bool(settings.get("sound", true))
+	settings.high_contrast = bool(settings.get("high_contrast", false))
+	settings.reduced_motion = bool(settings.get("reduced_motion", false))
+	for volume_key: String in ["music_volume", "ambience_volume", "sfx_volume", "ui_volume"]:
+		settings[volume_key] = clampf(float(settings.get(volume_key, DEFAULT_SETTINGS[volume_key])), 0.0, 1.0)
 
 
 func _serialize_stock() -> Dictionary:

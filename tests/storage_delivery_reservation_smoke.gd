@@ -16,7 +16,9 @@ func _ready() -> void:
 	_test_aggregate_batches()
 	_test_partial_delivery_disposal_and_cancellation()
 	_test_auto_reorder_capacity_clamp()
+	_test_recovery_guard_and_atomicity()
 	_test_storage_removal_guard_and_recovery()
+	_test_paused_recipe_recovery()
 	_test_reservation_race_and_release()
 	_test_auto_sold_out_recovery()
 	_test_change_order()
@@ -129,6 +131,10 @@ func _test_partial_delivery_disposal_and_cancellation() -> void:
 func _test_auto_reorder_capacity_clamp() -> void:
 	_reset_test_state()
 	_set_all_stock(0)
+	# Isolate the per-ingredient clamp from the continuation bundle tested by
+	# m0_integrity_soak: this case intentionally has no active recipe.
+	for recipe_id: String in GameState.menu:
+		GameState.set_recipe_active(recipe_id, false)
 	GameState.stock.tomato.amount = StorageManager.capacity_for("ambient") - 1
 	GameState.stock.potato.amount = 0
 	GameState.stock.potato.threshold = 0
@@ -142,6 +148,27 @@ func _test_auto_reorder_capacity_clamp() -> void:
 	_expect(GameState.money == money_after_first and int(EconomyManager.normal_batch_snapshot().items.potato.amount) == 1, "un riordino saturo non ripete addebiti o batch")
 
 
+func _test_recovery_guard_and_atomicity() -> void:
+	_reset_test_state()
+	var healthy_before := GameState.serialize().duplicate(true)
+	var healthy_plan := StorageManager.build_recovery_plan()
+	_expect(not bool(healthy_plan.eligible) and String(healthy_plan.reason) == "not_soft_locked", "il recupero non e disponibile in una partita che puo continuare")
+	var healthy_result := EconomyManager.apply_recovery_plan()
+	_expect(not bool(healthy_result.success) and String(healthy_result.reason) == "not_soft_locked", "l'esecutore rifiuta un recupero fuori da un soft-lock reale")
+	_expect(GameState.serialize() == healthy_before, "un tentativo di recupero non necessario non muta denaro, stock, menu o consegne")
+
+	_set_all_stock(0)
+	GameState.layout = []
+	GameState.progress.emergency_recovery_used = false
+	StorageManager.recalculate_layout_capacity()
+	var impossible_before := GameState.serialize().duplicate(true)
+	var impossible_audit := StorageManager.soft_lock_snapshot()
+	_expect(bool(impossible_audit.soft_locked) and not bool(impossible_audit.recovery_available), "un soft-lock senza alcuna capacita produce un piano esplicitamente non applicabile")
+	var impossible_result := EconomyManager.apply_recovery_plan()
+	_expect(not bool(impossible_result.success) and String(impossible_result.reason) == "insufficient_capacity", "un piano che non puo rispettare la capacita fallisce prima del commit")
+	_expect(GameState.serialize() == impossible_before, "il fallimento di prevalidazione del recupero e atomico")
+
+
 func _test_storage_removal_guard_and_recovery() -> void:
 	_reset_test_state()
 	var fridge_guard := StorageManager.can_remove_storage_item("fridge_1")
@@ -150,16 +177,56 @@ func _test_storage_removal_guard_and_recovery() -> void:
 	_expect(not bool(pantry_guard.valid) and pantry_guard.blocked_types.has("ambient"), "la guardia impedisce di rimuovere l'ultimo deposito ambiente")
 
 	_set_all_stock(0)
+	# Keep exactly one unlocked continuation. Potato would otherwise be a valid
+	# inactive-menu escape route through the baked-potato recipe, so this fixture
+	# would not be a genuine soft-lock.
+	for recipe_id: String in GameState.menu:
+		GameState.menu[recipe_id].unlocked = recipe_id == "margherita"
+		GameState.menu[recipe_id].active = recipe_id == "margherita"
+		GameState.menu[recipe_id].manual_paused = false
 	GameState.stock.potato.amount = StorageManager.capacity_for("ambient")
+	GameState.set_pending_delivery_batch({
+		"id": "recovery_paid_rounding",
+		"items": {"potato": {"amount": 2, "unit_cost": 1.5}},
+		"remaining": 120.0,
+		"paid": true,
+		"paid_cost": 4,
+		"urgent": {
+			"id": "recovery_unpaid_corrupt",
+			"items": {"mushroom": {"amount": 1, "unit_cost": 999.0}},
+			"remaining": 20.0,
+			"paid": false,
+			"paid_cost": 999,
+		},
+	})
 	GameState.progress.emergency_recovery_used = false
 	StorageManager.recalculate_usage()
 	var audit := StorageManager.soft_lock_snapshot()
 	_expect(bool(audit.soft_locked) and bool(audit.recovery_available), "l'audit rileva un save pieno senza alcuna ricetta producibile o ordinabile")
 	var plan: Dictionary = audit.recovery_plan
 	_expect(not String(plan.recipe_id).is_empty() and not plan.grant_items.is_empty() and not plan.discard_items.is_empty(), "il recupero propone una ricetta e lo smaltimento minimo necessario")
+	_expect(int(plan.pending_refund) == 4, "il recupero usa il paid_cost autorevole e non rimborsa un batch marcato non pagato")
+	var money_before_recovery := GameState.money
 	var recovered := EconomyManager.apply_recovery_plan()
 	_expect(bool(recovered.success) and StorageManager.is_recipe_producible(String(recovered.recipe_id)), "il recupero atomico garantisce una porzione producibile")
+	_expect(GameState.money - money_before_recovery == 4 and EconomyManager.normal_batch_snapshot().items.is_empty() and EconomyManager.urgent_batch_snapshot().items.is_empty(), "il commit rimborsa l'importo esatto e cancella entrambi i batch in una sola transazione")
 	_expect(bool(GameState.progress.emergency_recovery_used) and not bool(EconomyManager.apply_recovery_plan().success), "il grant di emergenza e disponibile una sola volta per salvataggio")
+
+
+func _test_paused_recipe_recovery() -> void:
+	_reset_test_state()
+	_set_all_stock(0)
+	for recipe_id: String in GameState.menu:
+		GameState.menu[recipe_id].unlocked = recipe_id == "margherita"
+		GameState.menu[recipe_id].active = recipe_id == "margherita"
+		GameState.menu[recipe_id].manual_paused = recipe_id == "margherita"
+	GameState.stock.potato.amount = StorageManager.capacity_for("ambient")
+	GameState.progress.emergency_recovery_used = false
+	StorageManager.recalculate_usage()
+	var plan := StorageManager.build_recovery_plan()
+	_expect(bool(plan.eligible) and bool(plan.resume_recipe), "il piano riconosce una ricetta selezionata ma messa manualmente in pausa")
+	var recovered := EconomyManager.apply_recovery_plan()
+	_expect(bool(recovered.success) and not bool(GameState.menu.margherita.manual_paused) and bool(GameState.menu.margherita.active), "il recupero riattiva e riprende la ricetta scelta")
 
 
 func _test_reservation_race_and_release() -> void:

@@ -560,18 +560,6 @@ static func _stock(content: VBoxContainer, ui: RestaurantUI) -> void:
 		controls.add_child(target)
 		box.add_child(controls)
 		var purchase := HBoxContainer.new()
-		var supplier := OptionButton.new()
-		var selected_index := 0
-		for index: int in DataRegistry.suppliers.size():
-			var supplier_definition: Dictionary = DataRegistry.suppliers[index]
-			supplier.add_item(supplier_definition.name)
-			supplier.set_item_metadata(index, supplier_definition.id)
-			if supplier_definition.id == entry.supplier:
-				selected_index = index
-		supplier.select(selected_index)
-		supplier.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		supplier.item_selected.connect(func(index: int): StorageManager.set_supplier(ingredient_id, String(supplier.get_item_metadata(index))))
-		purchase.add_child(supplier)
 		var lot := SpinBox.new()
 		lot.min_value = 1
 		lot.max_value = 100
@@ -1002,21 +990,7 @@ static func _legacy_stock(content: VBoxContainer, ui: RestaurantUI) -> void:
 			target.value_changed.connect(func(value: float): GameState.stock[ingredient_id].target = int(value))
 			reorder.add_child(target)
 			box.add_child(reorder)
-			var supplier_row := HBoxContainer.new()
-			var supplier := OptionButton.new()
-			var selected_index := 0
-			for index: int in DataRegistry.suppliers.size():
-				var supplier_definition: Dictionary = DataRegistry.suppliers[index]
-				supplier.add_item(supplier_definition.name)
-				supplier.set_item_metadata(index, supplier_definition.id)
-				if supplier_definition.id == entry.supplier:
-					selected_index = index
-			supplier.select(selected_index)
-			supplier.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-			supplier.item_selected.connect(func(index: int): GameState.stock[ingredient_id].supplier = supplier.get_item_metadata(index))
-			supplier_row.add_child(supplier)
-			supplier_row.add_child(ui.make_button("Ordine urgente", func(): EconomyManager.order_stock(ingredient_id, int(GameState.stock[ingredient_id].lot), true), "red"))
-			box.add_child(supplier_row)
+			box.add_child(ui.make_button("Ordine urgente", func(): EconomyManager.order_stock(ingredient_id, int(GameState.stock[ingredient_id].lot), true), "red"))
 		else:
 			box.add_child(ui.make_button("Sblocca una tantum · 350 [coin]", func(): if GameState.spend(350, "Sblocco %s" % ingredient.name): GameState.stock[ingredient_id].unlocked = true; ui.refresh_screen(), "yellow"))
 		content.add_child(card)
@@ -1117,6 +1091,7 @@ static func _statistics(content: VBoxContainer, ui: RestaurantUI) -> void:
 static func _settings(content: VBoxContainer, ui: RestaurantUI) -> void:
 	content.add_child(ui.make_section("Impostazioni", "Preferenze salvate insieme al ristorante e applicate immediatamente."))
 	content.add_child(ProfileScreen.create())
+	content.add_child(PersistenceDiagnosticsPanel.create(ui))
 
 	if PwaUpdateManager.is_available():
 		var update_card := ui.make_card()
@@ -1147,14 +1122,15 @@ static func _settings(content: VBoxContainer, ui: RestaurantUI) -> void:
 	quality_title.add_theme_font_override("font", GameFonts.bold())
 	general_box.add_child(quality_title)
 	var quality := OptionButton.new()
+	quality.name = "GraphicsQuality"
+	quality.custom_minimum_size.y = 44
 	var quality_presets := [
 		{"id":"auto", "name":"Automatica (consigliata)"},
 		{"id":"low", "name":"Bassa"},
-		{"id":"balanced", "name":"Bilanciata"},
-		{"id":"high", "name":"Alta"},
-		{"id":"ultra", "name":"Massima · PC"}
+		{"id":"medium", "name":"Media"},
+		{"id":"high", "name":"Alta"}
 	]
-	var selected_quality := String(GameState.settings.get("graphics_quality", "auto"))
+	var selected_quality := WebPlatformProfile.normalize_preset(String(GameState.settings.get("graphics_quality", "auto")))
 	for index: int in quality_presets.size():
 		quality.add_item(String(quality_presets[index].name))
 		quality.set_item_metadata(index, String(quality_presets[index].id))
@@ -1162,7 +1138,7 @@ static func _settings(content: VBoxContainer, ui: RestaurantUI) -> void:
 			quality.select(index)
 	general_box.add_child(quality)
 	var quality_detail := Label.new()
-	quality_detail.text = "Scala 3D, antialiasing, ombre e limite FPS. Su iPad usa Automatica o Bilanciata; Massima è pensata per PC."
+	quality_detail.text = "Scala 3D, antialiasing, ombre e limite FPS. Automatica adatta il carico al dispositivo; Alta privilegia la resa su PC."
 	quality_detail.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	quality_detail.add_theme_color_override("font_color", Color("52686b"))
 	general_box.add_child(quality_detail)
@@ -1173,14 +1149,73 @@ static func _settings(content: VBoxContainer, ui: RestaurantUI) -> void:
 		SaveManager.save_game()
 		ui.show_toast("Qualità grafica: %s" % quality.get_item_text(index), "info")
 	)
+	var music := CheckBox.new()
+	music.name = "MusicEnabled"
+	music.text = "Musica"
+	music.custom_minimum_size.y = 44
+	music.button_pressed = bool(GameState.settings.get("music", true))
+	music.toggled.connect(func(value: bool):
+		GameState.settings.music = value
+		AudioManager.apply_settings()
+		SaveManager.save_game()
+	)
+	general_box.add_child(music)
 	var sound := CheckBox.new()
+	sound.name = "SoundEnabled"
 	sound.text = "Effetti sonori"
+	sound.custom_minimum_size.y = 44
 	sound.button_pressed = bool(GameState.settings.get("sound", true))
 	sound.toggled.connect(func(value: bool):
 		GameState.settings.sound = value
+		AudioManager.apply_settings()
 		SaveManager.save_game()
 	)
 	general_box.add_child(sound)
+	for volume_definition: Dictionary in [
+		{"label":"Musica", "bus":AudioManager.BUS_MUSIC, "key":"music_volume"},
+		{"label":"Ambiente", "bus":AudioManager.BUS_AMBIENCE, "key":"ambience_volume"},
+		{"label":"Effetti", "bus":AudioManager.BUS_SFX, "key":"sfx_volume"},
+		{"label":"Interfaccia", "bus":AudioManager.BUS_UI, "key":"ui_volume"},
+	]:
+		var volume_row := HBoxContainer.new()
+		var volume_label := Label.new()
+		volume_label.text = String(volume_definition.label)
+		volume_label.custom_minimum_size.x = 92
+		volume_row.add_child(volume_label)
+		var volume_slider := HSlider.new()
+		volume_slider.name = "%sVolume" % String(volume_definition.bus)
+		volume_slider.min_value = 0.0
+		volume_slider.max_value = 1.0
+		volume_slider.step = 0.05
+		volume_slider.value = float(GameState.settings.get(String(volume_definition.key), 0.8))
+		volume_slider.custom_minimum_size = Vector2(180, 44)
+		volume_slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		volume_slider.value_changed.connect(func(value: float): AudioManager.set_bus_volume(String(volume_definition.bus), value))
+		volume_slider.drag_ended.connect(func(value_changed: bool): if value_changed: SaveManager.save_game())
+		volume_row.add_child(volume_slider)
+		general_box.add_child(volume_row)
+	var contrast := CheckBox.new()
+	contrast.name = "HighContrast"
+	contrast.text = "Contrasto elevato"
+	contrast.custom_minimum_size.y = 44
+	contrast.button_pressed = bool(GameState.settings.get("high_contrast", false))
+	contrast.toggled.connect(func(value: bool):
+		GameState.settings.high_contrast = value
+		ui.apply_accessibility_settings()
+		SaveManager.save_game()
+	)
+	general_box.add_child(contrast)
+	var reduced_motion := CheckBox.new()
+	reduced_motion.name = "ReducedMotion"
+	reduced_motion.text = "Riduci animazioni interfaccia e camera"
+	reduced_motion.custom_minimum_size.y = 44
+	reduced_motion.button_pressed = bool(GameState.settings.get("reduced_motion", false))
+	reduced_motion.toggled.connect(func(value: bool):
+		GameState.settings.reduced_motion = value
+		ui.apply_accessibility_settings()
+		SaveManager.save_game()
+	)
+	general_box.add_child(reduced_motion)
 	var zoom_label := Label.new()
 	zoom_label.text = "Zoom iniziale e corrente della camera"
 	zoom_label.add_theme_color_override("font_color", Color("52686b"))
@@ -1190,7 +1225,7 @@ static func _settings(content: VBoxContainer, ui: RestaurantUI) -> void:
 	zoom.max_value = 34.0
 	zoom.step = 1.0
 	zoom.value = ui.world.camera_rig.zoom
-	zoom.custom_minimum_size.y = 34
+	zoom.custom_minimum_size.y = 44
 	zoom.value_changed.connect(func(value: float):
 		ui.world.camera_rig.zoom = value
 		GameState.settings.camera_zoom = value

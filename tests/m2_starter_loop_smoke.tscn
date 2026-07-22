@@ -1,0 +1,6 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource path="res://tests/m2_starter_loop_smoke.gd" type="Script" id="1"]
+
+[node name="M2StarterLoopSmoke" type="Node"]
+script = ExtResource("1")

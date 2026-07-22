@@ -1,0 +1,70 @@
+{
+  "save_version": 11,
+  "money": 4321,
+  "reputation": 3.25,
+  "stock": {
+    "tomato": {
+      "amount": 17,
+      "reserved": 5,
+      "unlocked": true,
+      "average_cost": 1.75,
+      "auto_reorder": false
+    }
+  },
+  "menu": {
+    "margherita": {
+      "active": true,
+      "unlocked": true,
+      "price": 27,
+      "sold_out": false
+    }
+  },
+  "employees": [],
+  "candidates": [],
+  "layout": [
+    {
+      "uid": "compat_table",
+      "item": "table_small",
+      "cell": [6, 6],
+      "rotation": 1
+    }
+  ],
+  "settings": {},
+  "tutorial": {
+    "version": 2,
+    "current_step_id": "menu_valid",
+    "completed_ids": ["table_moved", "chair_attached"],
+    "skipped": false,
+    "complete": false
+  },
+  "purchased_preparations": {},
+  "progress": {
+    "customers_served": 18,
+    "desserts_served": 0,
+    "services_started": 3
+  },
+  "album_inventory": {
+    "tomato": 4
+  },
+  "album_discovered": {
+    "tomato": true
+  },
+  "reviews": [],
+  "review_reward_progress": 2,
+  "reputation_weight": 5.0,
+  "world_clock": {
+    "day": 7,
+    "minute": 730.0
+  },
+  "restaurant_profile": {
+    "player_name": "Compat",
+    "restaurant_name": "V11 Bistro",
+    "avatar_appearance": "Chef_Female",
+    "badge_id": "starter",
+    "uniform_variant": 0
+  },
+  "pending_delivery_batch": {},
+  "cleanliness_state": {},
+  "pest_state": {},
+  "staff_preferences": {}
+}

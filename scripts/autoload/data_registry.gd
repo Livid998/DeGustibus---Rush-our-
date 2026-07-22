@@ -247,6 +247,9 @@ func _validate_gameplay_balance() -> bool:
 	balance_validation_errors.clear()
 	_require_balance_number("schema_version", 1.0)
 	_require_balance_number("save.autosave_debounce_seconds", 0.05)
+	_require_balance_number("new_game.money", 0.0)
+	_require_balance_number("new_game.target_cover_count", 1.0)
+	_require_balance_number("new_game.stock_margin", 0.0, 1.0)
 	_require_balance_number("day_cycle.real_seconds_at_1x", 1.0)
 	_require_balance_number("day_cycle.start_minute", 0.0, 1439.0)
 	_require_balance_number("day_cycle.rush_warning_seconds", 0.0)
@@ -333,9 +336,52 @@ func _validate_gameplay_balance() -> bool:
 				balance_validation_errors.append("album starter references unknown ingredient %s" % ingredient_id)
 			elif int(starter[ingredient_id]) < 0:
 				balance_validation_errors.append("album starter amount cannot be negative for %s" % ingredient_id)
+	_validate_new_game_configuration()
 	for error: String in balance_validation_errors:
 		push_error("Gameplay balance validation: %s" % error)
 	return balance_validation_errors.is_empty()
+
+
+func _validate_new_game_configuration() -> void:
+	var employee_ids: Variant = balance_value("new_game.employee_ids", null)
+	var hired_by_id := _index(employee_data.get("hired", []))
+	var roles: Dictionary = {}
+	if not employee_ids is Array or (employee_ids as Array).is_empty():
+		balance_validation_errors.append("new_game.employee_ids must be a non-empty array")
+	else:
+		var seen_employees: Dictionary = {}
+		for value: Variant in employee_ids:
+			var employee_id := String(value)
+			if seen_employees.has(employee_id):
+				balance_validation_errors.append("new_game employee %s is duplicated" % employee_id)
+				continue
+			seen_employees[employee_id] = true
+			if not hired_by_id.has(employee_id):
+				balance_validation_errors.append("new_game references unknown employee %s" % employee_id)
+				continue
+			var role := String((hired_by_id[employee_id] as Dictionary).get("role", ""))
+			roles[role] = int(roles.get(role, 0)) + 1
+	for required_role: String in ["cook", "waiter", "handyman"]:
+		if int(roles.get(required_role, 0)) != 1:
+			balance_validation_errors.append("new_game needs exactly one %s" % required_role)
+
+	var active_recipe_ids: Variant = balance_value("new_game.active_recipe_ids", null)
+	if not active_recipe_ids is Array or (active_recipe_ids as Array).is_empty():
+		balance_validation_errors.append("new_game.active_recipe_ids must be a non-empty array")
+	else:
+		for value: Variant in active_recipe_ids:
+			if not recipes_by_id.has(String(value)):
+				balance_validation_errors.append("new_game references unknown recipe %s" % value)
+
+	var starter_stock: Variant = balance_value("new_game.stock", null)
+	if not starter_stock is Dictionary:
+		balance_validation_errors.append("new_game.stock must be an object")
+	else:
+		for ingredient_id: String in starter_stock:
+			if not ingredients_by_id.has(ingredient_id):
+				balance_validation_errors.append("new_game stock references unknown ingredient %s" % ingredient_id)
+			elif int(starter_stock[ingredient_id]) < 0:
+				balance_validation_errors.append("new_game stock cannot be negative for %s" % ingredient_id)
 
 
 func _validate_ingredient_unlock_rule(ingredient: Dictionary) -> void:

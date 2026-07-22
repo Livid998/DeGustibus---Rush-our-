@@ -77,8 +77,8 @@ func _build_diagnostics_card() -> void:
 
 
 func _refresh_status() -> void:
-	var status := SaveManager.persistence_status()
-	var state_name := {
+	var status: Dictionary = SaveManager.persistence_status()
+	var state_name: String = String({
 		"persistent": "spazio Web persistente concesso",
 		"best-effort": "spazio Web non garantito: esporta periodicamente un backup",
 		"unsupported": "persistenza Web non supportata dal browser",
@@ -86,14 +86,14 @@ func _refresh_status() -> void:
 		"filesystem": "salvataggio locale su filesystem",
 		"checking": "controllo della persistenza in corso",
 		"unavailable": "persistenza Web non disponibile"
-	}.get(String(status.get("state", "unavailable")), "stato sconosciuto")
+	}.get(String(status.get("state", "unavailable")), "stato sconosciuto"))
 	_status_label.text = "Stato: %s. Backup: %s. Modifiche non salvate: %s." % [
 		state_name,
 		"valido" if bool(status.get("backup_valid", false)) else "non disponibile",
 		"si" if bool(status.get("unsaved_changes", false)) else "no"
 	]
 	_restore_button.disabled = not bool(status.get("backup_valid", false))
-	var diagnostics := RuntimeDiagnostics.snapshot()
+	var diagnostics: Dictionary = RuntimeDiagnostics.snapshot()
 	_diagnostics_label.text = "Frame p95: %.1f ms  |  Memoria: %.1f MiB  |  Context loss: %d" % [
 		float(diagnostics.frame_window.p95_ms),
 		float(diagnostics.latest.get("static_memory_bytes", 0)) / 1048576.0,
@@ -102,7 +102,7 @@ func _refresh_status() -> void:
 
 
 func _export_save() -> void:
-	var result := SaveManager.download_export()
+	var result: Dictionary = SaveManager.download_export()
 	if bool(result.get("success", false)):
 		_ui.call("show_toast", "Salvataggio esportato", "income")
 	else:
@@ -110,7 +110,7 @@ func _export_save() -> void:
 
 
 func _import_save() -> void:
-	var result := SaveManager.request_import_picker()
+	var result: Dictionary = SaveManager.request_import_picker()
 	if not bool(result.get("success", false)):
 		_ui.call("show_toast", String(result.get("error", "Importazione non riuscita")), "warning")
 
@@ -120,7 +120,7 @@ func _restore_backup() -> void:
 
 
 func _export_diagnostics() -> void:
-	var result := RuntimeDiagnostics.download_export()
+	var result: Dictionary = RuntimeDiagnostics.download_export()
 	if bool(result.get("success", false)):
 		_ui.call("show_toast", "Diagnostica esportata", "income")
 	else:

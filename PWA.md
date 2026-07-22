@@ -1,110 +1,125 @@
-# DeGustibus PWA
+# DeGustibus PWA — build, verifica e release
 
-## Creare la build
+La closed beta Web usa l'export Godot **PWA no-thread**. PC e iPad ricevono lo
+stesso artifact: la CI lo esporta una sola volta, lo verifica, lo prova in
+Chromium e WebKit e solo dopo lo rende pubblicabile. Il test fisico di 60 minuti
+su iPad resta intenzionalmente un gate umano.
+
+## Build locale
 
 Da PowerShell, nella cartella del progetto:
 
 ```powershell
-.\BUILD_PWA.ps1
+.\BUILD_PWA.ps1 -Release closed-beta-candidate
 ```
 
-I file pronti da pubblicare vengono creati in `builds/pwa`.
-
-La cartella contiene anche `build-info.json`, con data UTC, versione di Godot,
-commit e stato sorgente (`clean`, `dirty` oppure `unknown`). In GitHub Actions il
-commit coincide con `GITHUB_SHA` e lo stato è sempre registrato esplicitamente
-come pulito; in locale lo script cerca sia Git installato sia il runtime Git
-fornito da Codex, senza inventare `dirty=true` quando Git non è disponibile.
-
-## Provarla nella rete locale
+Una build release richiede Git disponibile e un repository pulito. Esegue la
+matrice autorevole `tools/release/test_matrix.txt`, compresi soak e dieci nuove
+partite fino al giorno 3, poi esporta in `builds/pwa`. Per una verifica rapida
+non pubblicabile durante lo sviluppo:
 
 ```powershell
-.\START_PWA_PREVIEW.ps1
+.\BUILD_PWA.ps1 -DebugBuild -Fast
 ```
 
-Lo script mostra l'indirizzo da aprire sul PC e sul tablet. Il gioco è testabile via HTTP nella rete locale; l'installazione PWA, l'uso offline e gli aggiornamenti richiedono invece che la build sia pubblicata tramite HTTPS.
+`build-info.json` contiene `commit`, `godot_version`, `built_at_utc`, `release`
+e `dirty`. Soltanto un export release con `dirty:false` supera il verificatore
+pubblicabile. I limiti hard sono:
+
+- artifact totale: 65 MiB;
+- `index.wasm`: 42 MiB;
+- `index.pck`: 25 MiB.
+
+Il superamento di un solo limite interrompe la build; non viene pubblicato un
+artifact fuori budget.
+
+## Prova nella rete locale
+
+```powershell
+.\START_PWA_PREVIEW.ps1 -NoBuild
+```
+
+Lo script mostra l'indirizzo da aprire su PC e tablet. HTTP nella rete locale è
+utile per il gameplay; installazione, offline e aggiornamenti richiedono HTTPS
+(oppure localhost sullo stesso computer).
 
 ## Aggiornamenti senza reinstallazione
 
-Pubblicare ogni nuova cartella `builds/pwa` allo stesso indirizzo HTTPS. La PWA installata:
+Pubblicando la nuova build sullo stesso origin, la PWA:
 
-- controlla automaticamente gli aggiornamenti all'avvio, quando torna in primo piano e periodicamente;
-- mostra `Aggiorna e riavvia` quando la nuova versione è pronta;
-- offre anche `Impostazioni > Controlla aggiornamenti`;
+- cerca un aggiornamento all'avvio, tornando in primo piano e periodicamente;
+- mostra `Aggiorna e riavvia` quando il worker nuovo è pronto;
+- offre `Impostazioni > Controlla aggiornamenti`;
 - conserva il salvataggio locale durante l'aggiornamento.
 
-Non cambiare dominio o percorso pubblico tra una versione e l'altra e non cancellare i dati del sito, altrimenti il browser la considererà un'installazione diversa o eliminerà il salvataggio.
+Il flusso no-thread e il service worker controllato non cambiano. Non cambiare
+dominio o percorso e non cancellare i dati del sito.
 
-## Uso offline e prova reale
+## Verifica offline locale
 
-Il service worker mette subito in cache shell, manifest, build-info e icone.
-I due file pesanti del gioco (`index.wasm` e `index.pck`) vengono invece salvati
-mentre il gioco li usa, evitando un download bloccante di circa 70 MB durante
-l'installazione del worker.
+Il service worker precachea shell, manifest, build-info e icone. WASM e PCK
+entrano nella cache durante il caricamento controllato:
 
-Alla prima installazione la pagina può ricaricarsi automaticamente una volta:
-è il worker appena attivato che prende il controllo della scheda. Attendere che
-la mappa torni utilizzabile prima di chiudere la pagina o togliere la rete.
+1. avviare la preview e attendere che la mappa sia utilizzabile;
+2. ricaricare una volta con il server attivo: è il **secondo caricamento**;
+3. chiudere il server;
+4. ricaricare la stessa origine con il **server spento**.
 
-Per verificare una nuova build su `localhost`:
+La mappa deve riaprirsi. Cambiare porta crea un'origine e una cache diverse.
 
-1. avviare `START_PWA_PREVIEW.ps1 -NoBuild` e aprire il gioco, aspettando che la
-   mappa sia utilizzabile e che l'eventuale riavvio automatico sia concluso;
-2. se non è già avvenuto il riavvio automatico, ricaricare una volta con il
-   server ancora acceso e aspettare di nuovo la mappa: questo è il secondo caricamento,
-   ora controllato dal service worker;
-3. spegnere il server;
-4. ricaricare la stessa scheda. La mappa deve avviarsi anche a server spento.
+## Pipeline GitHub Actions
 
-Usare sempre la stessa origine (protocollo, host e porta) per tutti e tre i
-passaggi. Il primo caricamento installa il worker; il secondo garantisce che
-WASM e PCK passino dal worker attivo. Una nuova porta crea invece un'origine e
-una cache separate.
+`.github/workflows/deploy-pwa.yml` separa cinque responsabilità:
 
-## Pubblicazione automatica su GitHub Pages
+1. `verify`: test core, M0, M1, M2 e M3, soak breve e 10 fresh-run;
+2. `export`: checkout pulito, export unico, metadati e budget hard;
+3. `reuse`: recupero opzionale di un artifact precedente per rollback;
+4. `browser-smoke`: stesso artifact in Chromium e WebKit;
+5. `deploy`: gate iPad manuale e pubblicazione Pages, senza re-export.
 
-Il workflow `.github/workflows/deploy-pwa.yml` esporta e pubblica automaticamente la PWA a ogni push rilevante sul ramo `main`.
+Un push su `main` produce e conserva per 90 giorni artifact ed evidence, ma
+**non pubblica automaticamente**: manca ancora la prova fisica iPad. Per la
+release aprire `Actions > Verifica e pubblica PWA > Run workflow`, impostare:
 
-La prima volta, nel repository GitHub aprire `Settings > Pages` e scegliere `GitHub Actions` come sorgente. Dopo il successivo push o un avvio manuale da `Actions > Pubblica PWA`, il gioco sarà disponibile all'indirizzo Pages mostrato dal job di pubblicazione.
+- `release`: versione della closed beta;
+- `publish`: attivo;
+- `ipad_evidence`: link o ID dell'evidence del test fisico;
+- `rollback_run_id`: vuoto per una build nuova.
 
-## Installazione su iPad/iPhone
+Impostare `Settings > Pages > Source: GitHub Actions`. È consigliato aggiungere
+anche un reviewer obbligatorio all'environment `github-pages`: l'input evidence
+non sostituisce la revisione umana.
 
-Aprire l'indirizzo HTTPS in Safari, usare `Condividi` e scegliere `Aggiungi alla schermata Home`.
+### Rollback
 
-La PWA non blocca l'orientamento: può essere usata in portrait su telefono e
-tablet oppure in landscape su tablet e desktop. La barra inferiore mostra
-quattro destinazioni principali e `Altro` a 390x844 e 412x915; da 800 px in su
-mostra direttamente tutte le sezioni. I target verificati sono:
+Gli artifact `pwa-release-ready` sono conservati per 90 giorni. Per ripubblicare
+una versione, avviare manualmente il workflow indicando il suo `run_id` in
+`rollback_run_id`, `publish=true` e l'evidence iPad relativa a quell'artifact.
+La pipeline non ricompila: rivalida budget/metadati, ripete Chromium/WebKit e
+pubblica gli stessi byte.
 
-- 390x844;
-- 412x915;
-- 800x1024;
-- 1280x720;
-- 1366x768.
+## Gate fisico iPad da 60 minuti
 
-Le schermate gestionali vengono mantenute in memoria: cambiare sezione conserva
-scroll e selezione. Recensioni, personale, statistiche operative e countdown del
-mercato aggiornano soltanto i controlli interessati.
+Questo gate non è automatizzato e non va dichiarato superato senza una sessione
+reale. Registrare in un ticket o report:
 
-## Modalita sicura su iPad
+- release, commit, modello iPad, versione iPadOS e browser/modalità Home Screen;
+- ora iniziale/finale e 60 minuti continuativi di gioco reale;
+- nessun `webglcontextlost`, freeze o ricaricamento spontaneo;
+- p50/p95 frame time (e relativo frame rate) e memoria a fine warm-up e fine sessione dalla diagnostica
+  locale; crescita memoria inferiore al 10% e nessun degrado progressivo;
+- almeno un servizio, chiusura, salvataggio, ricarica e cambio schermata;
+- secondo avvio online e riapertura offline dalla stessa installazione;
+- screenshot iniziale/finale e diagnostica locale esportata.
 
-La build Web riconosce automaticamente i dispositivi mobili e riduce il carico della GPU. Se iOS segnala comunque `WebGL context lost`, la pagina esegue una sola volta il riavvio in modalita sicura, con risoluzione 3D e frequenza ridotte.
+Solo dopo allegare il link/ID in `ipad_evidence` e approvare l'environment.
 
-La modalita sicura puo essere attivata manualmente aggiungendo `?safe=1` alla fine dell'indirizzo della PWA. Prima di riprovare, chiudere le altre schede o applicazioni Web 3D aperte. Non cancellare i dati del sito: contengono anche il salvataggio locale.
+## Installazione e target responsive
 
-## Verifica prima della pubblicazione
+Su iPad/iPhone aprire l'URL HTTPS in Safari, scegliere `Condividi` e
+`Aggiungi alla schermata Home`. La PWA supporta portrait e landscape. I target
+QA sono 390x844, 412x915, 800x1024 e 1280x720 (più 1366x768 desktop).
 
-`BUILD_PWA.ps1` interrompe l'export se falliscono l'audit dei glifi, lo smoke
-test responsive o la verifica del flusso di aggiornamento. Anche il workflow
-GitHub Pages esegue la suite completa prima di caricare l'artifact. Dopo
-l'export, la CI verifica inoltre orientamento `any`, icone PNG 192×192 e
-512×512, file runtime, strategia di cache e dimensione finale.
-
-Ogni export genera una nuova versione del service worker. Quando una build è
-pronta compare `Aggiorna e riavvia`; il worker in attesa prende il controllo,
-la pagina si ricarica una sola volta e il salvataggio locale resta nello stesso
-origin.
-
-Gli atlanti sorgente usati per produrre le icone restano versionati nel
-repository, ma non vengono inseriti nel PCK distribuito. Nella build rimangono
-solo gli atlanti trasparenti e le icone effettivamente caricate dal gioco.
+Se iOS segnala `WebGL context lost`, la shell prova una sola ripartenza sicura.
+La modalità sicura è anche attivabile con `?safe=1`; prima chiudere altre schede
+WebGL. Non cancellare i dati del sito, perché contengono il salvataggio locale.

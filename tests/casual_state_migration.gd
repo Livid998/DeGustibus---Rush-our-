@@ -22,7 +22,7 @@ func _ready() -> void:
 
 func _test_balance_registry() -> void:
 	_expect(DataRegistry.gameplay_balance_valid, "gameplay_balance passes schema validation")
-	_expect(int(DataRegistry.balance_value("day_cycle.real_seconds_at_1x", 0)) == 720, "day duration is data-driven")
+	_expect(int(DataRegistry.balance_value("day_cycle.real_seconds_at_1x", 0)) == 2880, "the 1x clock gives the first 09:00-midnight loop thirty minutes")
 	_expect(int(DataRegistry.balance_value("delivery.batch_interval_seconds", 0)) == 300, "delivery batch interval is data-driven")
 	_expect(int(DataRegistry.balance_value("delivery.urgent_delivery_seconds", 0)) == 30, "urgent delivery interval is data-driven")
 	_expect(int(DataRegistry.balance_value("reviews.history_limit", 0)) == 100, "review history limit is data-driven")

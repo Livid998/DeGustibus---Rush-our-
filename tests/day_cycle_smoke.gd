@@ -32,6 +32,7 @@ func _ready() -> void:
 	_test_rollover_and_periods()
 	_test_rush_signal_boundaries()
 	_test_pause_and_speed()
+	_test_closed_management_time()
 	_test_force_rush_debug()
 	_test_traffic_formula_and_cap()
 	_test_lighting_profile()
@@ -111,9 +112,43 @@ func _test_pause_and_speed() -> void:
 
 	manager.set_clock(7, 600.0)
 	manager.advance_seconds(10.0, 4.0, "closed")
-	_expect(is_equal_approx(manager.minute, 600.0), "il clock continuo resta fermo a ristorante chiuso")
+	_expect(manager.minute > 600.0, "il clock gestionale continua anche a ristorante chiuso")
+	var closed_delta := manager.minute - 600.0
+	manager.set_clock(7, 600.0)
 	manager.advance_seconds(10.0, 1.0, "closing")
-	_expect(manager.minute > 600.0, "il clock continua durante la chiusura operativa")
+	_expect(manager.minute > 600.0 and is_equal_approx(closed_delta, (manager.minute - 600.0) * 4.0), "la velocita selezionata vale allo stesso modo durante chiusura e gestione")
+
+
+func _test_closed_management_time() -> void:
+	GameState.set_restaurant_state("closed")
+	var tomato_before := int(GameState.stock.tomato.amount)
+	GameState.set_pending_delivery_batch({
+		"id": "closed_clock_delivery",
+		"items": {"tomato": {"amount": 1, "unit_cost": 2.0}},
+		"remaining": 1.0,
+		"paid": true,
+		"paid_cost": 2,
+		"urgent": {
+			"id": "",
+			"items": {},
+			"remaining": float(DataRegistry.balance_value("delivery.urgent_delivery_seconds", 30.0)),
+			"paid": false,
+			"paid_cost": 0,
+		},
+	})
+	EconomyManager.advance_delivery_time(2.0, 1.0)
+	_expect(int(GameState.stock.tomato.amount) == tomato_before + 1, "le consegne gia pagate arrivano anche mentre il ristorante e chiuso")
+
+	manager.reset_event_history()
+	manager.set_clock(18, 1439.0)
+	GameState.money = 1000
+	GameState.progress.erase("last_payroll_day")
+	GameState.progress.erase("wage_debt")
+	var expected_wages := 0
+	for employee: Dictionary in GameState.employees:
+		expected_wages += maxi(int(employee.get("salary", 0)), 0)
+	manager.advance_seconds(_seconds_for_game_minutes(2.0), 1.0, "closed")
+	_expect(int(GameState.world_clock.day) == 19 and GameState.money == 1000 - expected_wages, "il rollover chiuso applica una sola volta i costi giornalieri")
 
 
 func _test_force_rush_debug() -> void:

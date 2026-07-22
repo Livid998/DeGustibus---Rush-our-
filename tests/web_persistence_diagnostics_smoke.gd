@@ -11,6 +11,9 @@ func _ready() -> void:
 	_test_export_package()
 	_test_transactional_import(original_state)
 	_test_import_rejections()
+	_test_v11_atomic_migration()
+	_test_recursive_fixture_rollback()
+	_test_explicit_transaction_rollback()
 	_test_runtime_diagnostics()
 	_test_web_bridge_contract()
 	GameState.deserialize(original_state)
@@ -67,12 +70,71 @@ func _test_import_rejections() -> void:
 		"payload": GameState.serialize()
 	}))
 	_expect(not bool(foreign.success) and GameState.money == money_before, "foreign package is rejected without touching state")
+	var malformed_wrapper := SaveManager.import_package_json(JSON.stringify({
+		"app_id": SaveManager.PACKAGE_APP_ID,
+		"package_version": [1],
+		"payload": GameState.serialize()
+	}))
+	_expect(not bool(malformed_wrapper.success) and GameState.money == money_before, "malformed package metadata is rejected before coercion or state changes")
 	var invalid := GameState.serialize().duplicate(true)
 	invalid.stock = []
 	var invalid_result := SaveManager.import_package_json(JSON.stringify(invalid))
 	_expect(not bool(invalid_result.success) and GameState.money == money_before, "invalid section types are rejected transactionally")
 	var too_large := SaveManager.import_package_json("x".repeat(SaveManager.MAX_IMPORT_BYTES + 1))
 	_expect(not bool(too_large.success) and "5 MiB" in String(too_large.error), "imports are capped at 5 MiB")
+
+
+func _test_v11_atomic_migration() -> void:
+	var fixture_text := FileAccess.get_file_as_string("res://tests/fixtures/save_v11_atomic_fixture.json")
+	var result := SaveManager.import_package_json(fixture_text)
+	_expect(bool(result.success) and bool(result.legacy), "a v11 raw fixture migrates through the transactional importer")
+	var canonical := GameState.serialize()
+	_expect(int(canonical.get("save_version", -1)) == 12, "the in-memory migration immediately produces canonical v12")
+	_expect(GameState.money == 4321, "v11 migration preserves money")
+	_expect(GameState.layout.any(func(record: Dictionary) -> bool:
+		var cell: Variant = record.get("cell", [])
+		return String(record.get("uid", "")) == "compat_table" and cell is Array and cell.size() == 2 and int(cell[0]) == 6 and int(cell[1]) == 6
+	), "v11 migration preserves custom layout records")
+	_expect(int(GameState.stock.get("tomato", {}).get("amount", -1)) == 17 and bool(GameState.stock.get("tomato", {}).get("unlocked", false)), "v11 migration preserves stock and ingredient unlocks")
+	_expect(bool(GameState.menu.get("margherita", {}).get("active", false)) and bool(GameState.menu.get("margherita", {}).get("unlocked", false)) and int(GameState.menu.get("margherita", {}).get("price", 0)) == 27, "v11 migration preserves menu configuration and recipe unlocks")
+	_expect(bool(GameState.album_discovered.get("tomato", false)), "v11 migration preserves Album discovery unlocks")
+	var exported: Variant = JSON.parse_string(SaveManager.export_package())
+	_expect(exported is Dictionary and int(exported.get("payload", {}).get("save_version", -1)) == 12, "an imported v11 save can only be exported as canonical v12")
+
+
+func _test_recursive_fixture_rollback() -> void:
+	var before := GameState.serialize().duplicate(true)
+	for fixture_path: String in [
+		"res://tests/fixtures/save_malformed_nested_stock.json",
+		"res://tests/fixtures/save_malformed_layout.json",
+	]:
+		var result := SaveManager.import_package_json(FileAccess.get_file_as_string(fixture_path))
+		_expect(not bool(result.success), "%s is rejected by recursive structural validation" % fixture_path.get_file())
+		_expect(GameState.serialize() == before, "%s leaves the complete runtime snapshot untouched" % fixture_path.get_file())
+	var too_deep: Variant = {"leaf": 1}
+	for _depth: int in 70:
+		too_deep = {"nested": too_deep}
+	var deep_payload := {"save_version": 12, "stock": {}, "menu": {}, "progress": too_deep}
+	var deep_result := SaveManager.import_package_json(JSON.stringify(deep_payload))
+	_expect(not bool(deep_result.success), "excessively deep JSON is rejected before deserialization")
+	_expect(GameState.serialize() == before, "depth rejection rolls back without any partial state")
+
+
+func _test_explicit_transaction_rollback() -> void:
+	var before := GameState.serialize().duplicate(true)
+	var previous_dirty := SaveManager.dirty
+	var previous_remaining := SaveManager._autosave_remaining
+	SaveManager.dirty = true
+	SaveManager._autosave_remaining = 0.75
+	var candidate := before.duplicate(true)
+	candidate.money = int(before.get("money", 0)) + 777
+	var transaction := SaveManager._apply_payload_transactionally(candidate)
+	_expect(bool(transaction.success) and GameState.money == int(candidate.money), "a valid candidate is fully applied before persistence is attempted")
+	SaveManager._rollback_runtime_transaction(transaction)
+	_expect(GameState.serialize() == before, "transaction rollback restores the complete GameState snapshot")
+	_expect(SaveManager.dirty and is_equal_approx(SaveManager._autosave_remaining, 0.75), "transaction rollback restores autosave state as well as gameplay data")
+	SaveManager.dirty = previous_dirty
+	SaveManager._autosave_remaining = previous_remaining
 
 
 func _test_runtime_diagnostics() -> void:

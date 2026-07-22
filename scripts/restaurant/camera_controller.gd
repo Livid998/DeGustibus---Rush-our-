@@ -44,8 +44,12 @@ func _ready() -> void:
 
 
 func _process(delta: float) -> void:
-	global_position = global_position.lerp(target, minf(delta * 8.0, 1.0))
-	camera.size = lerpf(camera.size, zoom, minf(delta * 10.0, 1.0))
+	if bool(GameState.settings.get("reduced_motion", false)):
+		global_position = target
+		camera.size = zoom
+	else:
+		global_position = global_position.lerp(target, minf(delta * 8.0, 1.0))
+		camera.size = lerpf(camera.size, zoom, minf(delta * 10.0, 1.0))
 	if _touches.size() == 1 and not _primary_dragged and not _long_press_triggered:
 		_touch_hold_time += delta
 		if _touch_hold_time >= 0.55:
@@ -171,6 +175,10 @@ func _rotate_by(direction: int) -> void:
 	GameState.settings.camera_quadrant = quadrant
 	view_changed.emit(quadrant)
 	SaveManager.save_game()
+	if bool(GameState.settings.get("reduced_motion", false)):
+		_apply_rotation_yaw(_target_yaw)
+		_finish_rotation()
+		return
 	if _rotation_tween:
 		_rotation_tween.kill()
 	_rotation_tween = create_tween()

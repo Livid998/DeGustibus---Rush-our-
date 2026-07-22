@@ -62,6 +62,21 @@ func _test_runtime_leases() -> void:
 	_expect(registry.release_all(first_owner) == 2 and registry.release_all(first_owner) == 0, "release_all is complete and idempotent")
 	_expect(registry.active_count() == 1 and registry.owner_of(&"task:c") == second_owner, "release_all preserves leases held by others")
 	_expect(registry.metadata_for(&"missing").is_empty(), "missing lease metadata is an empty dictionary")
+	var bundle := [&"employee:cook", &"task:prep", &"station:prep:0"]
+	var bundle_metadata := {
+		&"employee:cook": {"kind": "employee_slot"},
+		&"task:prep": {"kind": "staff_task"},
+		&"station:prep:0": {"kind": "station_slot"},
+	}
+	_expect(registry.try_acquire_many(bundle, second_owner, 30.0, 0.0, bundle_metadata), "a task and its runtime resources are acquired atomically")
+	var third_owner := Node.new()
+	third_owner.name = "ThirdOwner"
+	add_child(third_owner)
+	_expect(not registry.try_acquire_many([&"task:other", &"station:prep:0"], third_owner, 30.0), "a conflicting bundle is rejected as a whole")
+	_expect(registry.owner_of(&"task:other", 30.0) == null, "a rejected bundle leaves no partial task lease")
+	var diagnostic := registry.diagnostic_summary(30.0)
+	_expect(int(diagnostic.get("active", 0)) == 4 and int(diagnostic.get("by_kind", {}).get("station_slot", 0)) == 1, "lease diagnostics group active resources by kind")
+	_expect(registry.release_many(bundle, second_owner) and registry.release_many(bundle, second_owner), "bundle release is complete and idempotent")
 	registry.try_acquire(&"idle:temporary", first_owner)
 	first_owner.free()
 	_expect(registry.cleanup() == 1, "cleanup reclaims leases held by freed Objects")

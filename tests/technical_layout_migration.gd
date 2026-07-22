@@ -95,15 +95,17 @@ func _test_v10_technical_kitchen_migration() -> void:
 
 func _test_v11_default_layout() -> void:
 	GameState.reset_to_defaults(false)
-	var dessert := _record("dessert_1")
+	var pizza_oven := _record("pizza_1")
 	_expect(
-		String(dessert.get("support_uid", "")) == "support_dessert_1"
-		and String(_record("support_dessert_1").get("item", "")) == "worktable",
-		"il layout nuovo nasce con la gelatiera gia appoggiata sul banco"
+		String(pizza_oven.get("support_uid", "")) == "support_pizza_1"
+		and String(_record("support_pizza_1").get("item", "")) == "prep_counter",
+		"il layout starter nasce con il forno pizza correttamente appoggiato sul banco da due slot"
 	)
 	_expect(
-		_hoods_for("stove_1").size() == 1 and _hoods_for("multi_1").size() == 1,
-		"il layout nuovo nasce con entrambi i fornelli ventilati"
+		_record("stove_1").is_empty()
+		and _record("multi_1").is_empty()
+		and _record("dessert_1").is_empty(),
+		"il layout starter non include attrezzature estranee alle due ricette iniziali"
 	)
 
 

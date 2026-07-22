@@ -134,7 +134,11 @@ func _test_progression_reachability() -> void:
 	GameState.reset_to_defaults(false)
 	GameState.money = 250
 	_expect(GameState.purchase_ingredient_unlock("milk"), "il ramo dessert puo iniziare acquistando il latte")
-	GameState.layout.append({"uid":"reachability_dessert_2", "item":"dessert", "cell":[15, 12], "rotation":2})
+	# The focused M2 starter kitchen intentionally has no dessert equipment.
+	# Build both tabletop machines here so this progression fixture still reaches
+	# the authoritative `build_count: 2` rule without relying on an old layout.
+	GameState.layout.append({"uid":"reachability_dessert_1", "item":"dessert", "cell":[14, 11], "rotation":2})
+	GameState.layout.append({"uid":"reachability_dessert_2", "item":"dessert", "cell":[15, 11], "rotation":2})
 	var first_unlocks := GameState.check_progression(false)
 	_expect(first_unlocks.has("ice_vanilla") and bool(GameState.menu.icecream_cone.unlocked), "la seconda gelatiera rende raggiungibile il primo dessert senza dipendenze circolari")
 	GameState.reputation = 3.0

@@ -146,7 +146,7 @@ func _process(delta: float) -> void:
 		var visible_market_page: VBoxContainer = _screen_pages.get("Mercato")
 		if visible_market_page != null:
 			ManagementScreens.update_market_countdowns(visible_market_page, market_provider)
-	if Input.is_action_just_pressed("toggle_debug"):
+	if OS.is_debug_build() and debug_panel != null and Input.is_action_just_pressed("toggle_debug"):
 		debug_panel.visible = not debug_panel.visible
 	if Input.is_action_just_pressed("speed_1"):
 		_select_simulation_speed(1.0)
@@ -178,15 +178,17 @@ func show_screen(screen_name: String, sound: bool = true) -> void:
 	screen_title_label.text = screen_name.to_upper()
 	var animate_open := sound or not screen_panel.visible
 	screen_panel.visible = true
-	if animate_open:
+	if animate_open and not reduced_motion_enabled():
 		screen_panel.modulate.a = 0.0
 		create_tween().tween_property(screen_panel, "modulate:a", 1.0, 0.16).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	else:
+		screen_panel.modulate.a = 1.0
 	_update_nav_selection()
 	_update_world_actions()
 	_update_pass()
 	_restore_current_scroll(screen_name)
 	if sound:
-		AudioManager.play_feedback()
+		AudioManager.play_ui("page")
 	if screen_name == "Statistiche":
 		TutorialManager.record_event("station_load_viewed")
 
@@ -248,6 +250,7 @@ func _ensure_screen_page(screen_name: String) -> VBoxContainer:
 	screen_content.add_child(page)
 	ManagementScreens.populate(screen_name, page, self)
 	GameFonts.sanitize_control_tree(page)
+	_enforce_touch_targets(page)
 	_screen_pages[screen_name] = page
 	_screen_build_counts[screen_name] = int(_screen_build_counts.get(screen_name, 0)) + 1
 	return page
@@ -259,6 +262,7 @@ func _refresh_screen_page(screen_name: String, page: VBoxContainer) -> void:
 	ManagementScreens.refresh(screen_name, page, self)
 	GameFonts.sanitize_control_tree(page)
 	ManagementScreens.apply_responsive_layout(page, self)
+	_enforce_touch_targets(page)
 
 
 func _show_only_screen_page(page: VBoxContainer) -> void:
@@ -301,6 +305,8 @@ func make_button(text: String, callback: Callable, tone: String = "blue") -> But
 	set_button_content(button, text)
 	button.custom_minimum_size = Vector2(112, 48)
 	button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	button.set_meta("ui_tone", tone)
+	button.pressed.connect(func(): AudioManager.play_ui("tap"))
 	button.pressed.connect(callback)
 	button.add_theme_stylebox_override("normal", _button_style(tone))
 	button.add_theme_stylebox_override("hover", _button_style("green" if tone != "red" else "yellow"))
@@ -350,16 +356,8 @@ func make_section(title: String, subtitle: String = "") -> VBoxContainer:
 func make_card() -> PanelContainer:
 	var panel := PanelContainer.new()
 	panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	var style := StyleBoxFlat.new()
-	style.bg_color = Color("f5f0e7")
-	style.border_color = Color("d4c9b7")
-	style.set_border_width_all(1)
-	style.set_corner_radius_all(12)
-	style.content_margin_left = 12
-	style.content_margin_right = 12
-	style.content_margin_top = 10
-	style.content_margin_bottom = 10
-	panel.add_theme_stylebox_override("panel", style)
+	panel.set_meta("accessible_card", true)
+	panel.add_theme_stylebox_override("panel", _card_style())
 	return panel
 
 
@@ -373,8 +371,10 @@ func show_toast(message: String, tone: String = "info") -> void:
 	if _toast_tween:
 		_toast_tween.kill()
 	_toast_tween = create_tween()
-	_toast_tween.tween_interval(1.8)
-	_toast_tween.tween_property(toast_label, "modulate:a", 0.0, 0.45)
+	AudioManager.play_event({"income":"income", "warning":"warning", "cost":"warning"}.get(tone, "notification"))
+	_toast_tween.tween_interval(2.25 if reduced_motion_enabled() else 1.8)
+	if not reduced_motion_enabled():
+		_toast_tween.tween_property(toast_label, "modulate:a", 0.0, 0.45)
 	_toast_tween.tween_callback(func(): toast_label.visible = false)
 
 
@@ -394,7 +394,8 @@ func _build_shell() -> void:
 	_build_screen_panel()
 	_build_world_actions()
 	_build_pass_panel()
-	_build_debug_panel()
+	if OS.is_debug_build():
+		_build_debug_panel()
 	_build_toast()
 	_build_tutorial()
 	_build_readiness_dialog()
@@ -1309,6 +1310,7 @@ func _apply_responsive_layout(viewport_size: Vector2 = Vector2.ZERO) -> void:
 	_orientation_initialized = true
 	_update_top_bar()
 	_update_nav_selection()
+	_enforce_touch_targets(root)
 
 
 func _detected_viewport_size() -> Vector2:
@@ -1321,7 +1323,42 @@ func _detected_viewport_size() -> Vector2:
 	return Vector2(1280, 720)
 
 
+func reduced_motion_enabled() -> bool:
+	return bool(GameState.settings.get("reduced_motion", false))
+
+
+func apply_accessibility_settings() -> void:
+	_build_theme()
+	if root == null:
+		return
+	root.theme = _theme
+	_refresh_accessible_styles(root)
+	_enforce_touch_targets(root)
+
+
+func _refresh_accessible_styles(node: Node) -> void:
+	if node is Button and node.has_meta("ui_tone"):
+		var button := node as Button
+		var tone := String(button.get_meta("ui_tone", "blue"))
+		button.add_theme_stylebox_override("normal", _button_style(tone))
+		button.add_theme_stylebox_override("hover", _button_style("green" if tone != "red" else "yellow"))
+		button.add_theme_stylebox_override("pressed", _button_style("yellow"))
+	if node is PanelContainer and node.has_meta("accessible_card"):
+		(node as PanelContainer).add_theme_stylebox_override("panel", _card_style())
+	for child: Node in node.get_children():
+		_refresh_accessible_styles(child)
+
+
+func _enforce_touch_targets(node: Node) -> void:
+	if node is BaseButton or node is LineEdit or node is SpinBox or node is HSlider or node is VSlider:
+		var control := node as Control
+		control.custom_minimum_size.y = maxf(control.custom_minimum_size.y, 44.0)
+	for child: Node in node.get_children():
+		_enforce_touch_targets(child)
+
+
 func _build_theme() -> void:
+	var high_contrast := bool(GameState.settings.get("high_contrast", false))
 	_theme = Theme.new()
 	_theme.default_font = GameFonts.medium()
 	_theme.default_font_size = 16
@@ -1329,39 +1366,72 @@ func _build_theme() -> void:
 	_theme.set_font("font", "OptionButton", GameFonts.semibold())
 	_theme.set_font("font", "CheckBox", GameFonts.semibold())
 	_theme.set_font("font", "TabBar", GameFonts.semibold())
-	_theme.set_color("font_color", "Label", Color("29464b"))
+	_theme.set_color("font_color", "Label", Color("10292e") if high_contrast else Color("29464b"))
 	_theme.set_color("font_color", "Button", Color("fffaf0"))
-	_theme.set_color("font_color", "CheckBox", Color("304e52"))
-	_theme.set_color("font_hover_color", "CheckBox", Color("1d777f"))
-	_theme.set_color("font_pressed_color", "CheckBox", Color("1d777f"))
+	_theme.set_color("font_color", "CheckBox", Color("10292e") if high_contrast else Color("304e52"))
+	_theme.set_color("font_hover_color", "CheckBox", Color("075f68") if high_contrast else Color("1d777f"))
+	_theme.set_color("font_pressed_color", "CheckBox", Color("075f68") if high_contrast else Color("1d777f"))
 	_theme.set_font_size("font_size", "Button", 17)
 	_theme.set_font_size("font_size", "OptionButton", 16)
 	_theme.set_constant("separation", "VBoxContainer", 8)
 	var default_panel := StyleBoxFlat.new()
-	default_panel.bg_color = Color("fffaf0e8")
-	default_panel.border_color = Color("c9d9d7")
-	default_panel.set_border_width_all(1)
+	default_panel.bg_color = Color("fffdf7f5") if high_contrast else Color("fffaf0e8")
+	default_panel.border_color = Color("173f45") if high_contrast else Color("c9d9d7")
+	default_panel.set_border_width_all(2 if high_contrast else 1)
 	default_panel.set_corner_radius_all(12)
 	_theme.set_stylebox("panel", "PanelContainer", default_panel)
+	var focus := StyleBoxFlat.new()
+	focus.bg_color = Color("00000000")
+	focus.border_color = Color("fff1a8") if high_contrast else Color("8de0d4")
+	focus.set_border_width_all(3)
+	focus.set_corner_radius_all(10)
+	focus.expand_margin_left = 2
+	focus.expand_margin_right = 2
+	focus.expand_margin_top = 2
+	focus.expand_margin_bottom = 2
+	_theme.set_stylebox("focus", "Button", focus)
+	_theme.set_stylebox("focus", "OptionButton", focus)
+	_theme.set_stylebox("focus", "CheckBox", focus)
 
 
 func _button_style(tone: String) -> StyleBox:
-	var colors := {
+	var high_contrast := bool(GameState.settings.get("high_contrast", false))
+	var colors := ({
+		"blue": Color("075f68"),
+		"green": Color("087247"),
+		"red": Color("9f2438"),
+		"yellow": Color("9b5a00"),
+		"ghost": Color("243f44")
+	} if high_contrast else {
 		"blue": Color("277985"),
 		"green": Color("1d9b72"),
 		"red": Color("c95360"),
 		"yellow": Color("d59535"),
 		"ghost": Color("44666b")
-	}
+	})
 	var style := StyleBoxFlat.new()
 	style.bg_color = colors.get(tone, colors.blue)
-	style.border_color = Color("ffffff24")
-	style.set_border_width_all(1)
+	style.border_color = Color("fff8df") if high_contrast else Color("ffffff24")
+	style.set_border_width_all(2 if high_contrast else 1)
 	style.set_corner_radius_all(9)
 	style.content_margin_left = 12
 	style.content_margin_right = 12
 	style.content_margin_top = 8
 	style.content_margin_bottom = 8
+	return style
+
+
+func _card_style() -> StyleBoxFlat:
+	var high_contrast := bool(GameState.settings.get("high_contrast", false))
+	var style := StyleBoxFlat.new()
+	style.bg_color = Color("fffdf7") if high_contrast else Color("f5f0e7")
+	style.border_color = Color("173f45") if high_contrast else Color("d4c9b7")
+	style.set_border_width_all(2 if high_contrast else 1)
+	style.set_corner_radius_all(12)
+	style.content_margin_left = 12
+	style.content_margin_right = 12
+	style.content_margin_top = 10
+	style.content_margin_bottom = 10
 	return style
 
 

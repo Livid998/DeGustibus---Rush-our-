@@ -482,23 +482,25 @@ func is_recipe_producible(recipe_or_id: Variant) -> bool:
 	return true
 
 
-## Single source of truth for the "can this save continue?" warning. A future
-## paid delivery counts as recoverable; a recipe that requires a locked
-## ingredient does not.
-func soft_lock_snapshot() -> Dictionary:
-	recalculate_layout_capacity()
+func _continuation_paths_snapshot() -> Dictionary:
 	var active_recipe_ids: Array[String] = []
 	var producible_recipe_ids: Array[String] = []
 	var pending_recipe_ids: Array[String] = []
 	var orderable_recipe_ids: Array[String] = []
+	var menu_action_recipe_ids: Array[String] = []
 	for recipe: Dictionary in DataRegistry.recipes:
 		var recipe_id := String(recipe.get("id", ""))
 		var state: Dictionary = GameState.menu.get(recipe_id, {})
-		if not bool(state.get("unlocked", false)) or not bool(state.get("active", false)) or bool(state.get("manual_paused", false)):
+		if not bool(state.get("unlocked", false)):
 			continue
-		active_recipe_ids.append(recipe_id)
+		var is_active_option := bool(state.get("active", false)) and not bool(state.get("manual_paused", false))
+		if is_active_option:
+			active_recipe_ids.append(recipe_id)
 		if is_recipe_producible(recipe):
-			producible_recipe_ids.append(recipe_id)
+			if is_active_option:
+				producible_recipe_ids.append(recipe_id)
+			else:
+				menu_action_recipe_ids.append(recipe_id)
 			continue
 		var requirements := DataRegistry.recipe_raw_requirements(recipe)
 		var missing_after_pending: Dictionary = {}
@@ -510,7 +512,10 @@ func soft_lock_snapshot() -> Dictionary:
 				pending_can_complete = false
 				missing_after_pending[ingredient_id] = required - eventual
 		if pending_can_complete:
-			pending_recipe_ids.append(recipe_id)
+			if is_active_option:
+				pending_recipe_ids.append(recipe_id)
+			else:
+				menu_action_recipe_ids.append(recipe_id)
 			continue
 		var ingredients_unlocked := true
 		var purchase_cost := 0.0
@@ -521,15 +526,41 @@ func soft_lock_snapshot() -> Dictionary:
 			purchase_cost += float(DataRegistry.ingredients_by_id.get(ingredient_id, {}).get("cost", 0.0)) * int(missing_after_pending[ingredient_id])
 		var purchase_plan := plan_delivery(missing_after_pending)
 		if ingredients_unlocked and bool(purchase_plan.fully_accepted) and GameState.can_afford(int(ceil(purchase_cost))):
-			orderable_recipe_ids.append(recipe_id)
-	var recovery_plan := build_recovery_plan()
-	var soft_locked := producible_recipe_ids.is_empty() and pending_recipe_ids.is_empty() and orderable_recipe_ids.is_empty()
+			if is_active_option:
+				orderable_recipe_ids.append(recipe_id)
+			else:
+				menu_action_recipe_ids.append(recipe_id)
+	var active_path_exists := not producible_recipe_ids.is_empty() or not pending_recipe_ids.is_empty() or not orderable_recipe_ids.is_empty()
+	# An inactive/paused recipe is a valid self-service escape only when the
+	# player has no active menu. It must not hide recovery for an active recipe
+	# whose inventory is genuinely saturated, otherwise service and auto-reorder
+	# can remain stuck behind an unrelated inactive dish.
+	var menu_only_escape := active_recipe_ids.is_empty() and not menu_action_recipe_ids.is_empty()
 	return {
-		"soft_locked": soft_locked,
+		"soft_locked": not active_path_exists and not menu_only_escape,
 		"active_recipe_ids": active_recipe_ids,
 		"producible_recipe_ids": producible_recipe_ids,
 		"pending_recipe_ids": pending_recipe_ids,
 		"orderable_recipe_ids": orderable_recipe_ids,
+		"menu_action_recipe_ids": menu_action_recipe_ids,
+	}
+
+
+## Single source of truth for the "can this save continue?" warning. A future
+## paid delivery counts as recoverable; a recipe that requires a locked
+## ingredient does not.
+func soft_lock_snapshot() -> Dictionary:
+	recalculate_layout_capacity()
+	var continuation := _continuation_paths_snapshot()
+	var recovery_plan := _build_recovery_plan(continuation)
+	var soft_locked := bool(continuation.get("soft_locked", false))
+	return {
+		"soft_locked": soft_locked,
+		"active_recipe_ids": (continuation.get("active_recipe_ids", []) as Array).duplicate(),
+		"producible_recipe_ids": (continuation.get("producible_recipe_ids", []) as Array).duplicate(),
+		"pending_recipe_ids": (continuation.get("pending_recipe_ids", []) as Array).duplicate(),
+		"orderable_recipe_ids": (continuation.get("orderable_recipe_ids", []) as Array).duplicate(),
+		"menu_action_recipe_ids": (continuation.get("menu_action_recipe_ids", []) as Array).duplicate(),
 		"capacity": capacity_snapshot(),
 		"usage": usage_snapshot(),
 		"forecast": forecast_usage(),
@@ -544,6 +575,11 @@ func soft_lock_snapshot() -> Dictionary:
 ## EconomyManager so preview and confirmation use the exact same payload.
 func build_recovery_plan() -> Dictionary:
 	recalculate_layout_capacity()
+	return _build_recovery_plan(_continuation_paths_snapshot())
+
+
+func _build_recovery_plan(continuation: Dictionary) -> Dictionary:
+	var soft_locked := bool(continuation.get("soft_locked", false))
 	var selected_recipe: Dictionary = {}
 	var selected_score := INF
 	for recipe: Dictionary in DataRegistry.recipes:
@@ -551,7 +587,7 @@ func build_recovery_plan() -> Dictionary:
 		var state: Dictionary = GameState.menu.get(recipe_id, {})
 		if not bool(state.get("unlocked", false)):
 			continue
-		var active_penalty := 0.0 if bool(state.get("active", false)) else 1000000.0
+		var active_penalty := 0.0 if bool(state.get("active", false)) and not bool(state.get("manual_paused", false)) else 1000000.0
 		var score := active_penalty + DataRegistry.estimate_recipe_cost(recipe)
 		if selected_recipe.is_empty() or score < selected_score or (is_equal_approx(score, selected_score) and recipe_id < String(selected_recipe.get("id", ""))):
 			selected_recipe = recipe
@@ -585,9 +621,7 @@ func build_recovery_plan() -> Dictionary:
 		if items.is_empty():
 			continue
 		cancel_batches.append(batch_kind)
-		for ingredient_id: String in items:
-			var item: Dictionary = batch.get("items", {}).get(ingredient_id, {})
-			pending_refund += int(round(float(item.get("unit_cost", DataRegistry.ingredients_by_id.get(ingredient_id, {}).get("cost", 0.0))) * int(items[ingredient_id])))
+		pending_refund += _recovery_batch_paid_cost(batch)
 	var simulated_usage := usage_snapshot()
 	var deficit := _empty_storage_totals()
 	for storage_type: String in STORAGE_TYPES:
@@ -638,12 +672,22 @@ func build_recovery_plan() -> Dictionary:
 			viable = false
 			break
 	var already_used := bool(GameState.progress.get("emergency_recovery_used", false))
+	var eligible := soft_locked and viable and not already_used
+	var reason := ""
+	if already_used:
+		reason = "already_used"
+	elif not soft_locked:
+		reason = "not_soft_locked"
+	elif not viable:
+		reason = "insufficient_capacity"
 	return {
-		"eligible": viable and not already_used,
+		"eligible": eligible,
 		"viable": viable,
-		"reason": "already_used" if already_used else ("insufficient_capacity" if not viable else ""),
+		"soft_locked": soft_locked,
+		"reason": reason,
 		"recipe_id": recipe_id,
 		"activate_recipe": not bool(GameState.menu.get(recipe_id, {}).get("active", false)),
+		"resume_recipe": bool(GameState.menu.get(recipe_id, {}).get("manual_paused", false)),
 		"cancel_batches": cancel_batches,
 		"pending_refund": pending_refund,
 		"discard_items": discard_items,
@@ -651,6 +695,19 @@ func build_recovery_plan() -> Dictionary:
 		"capacity": capacity_snapshot(),
 		"usage": usage_snapshot(),
 	}
+
+
+func _recovery_batch_paid_cost(batch: Dictionary) -> int:
+	if not bool(batch.get("paid", false)):
+		return 0
+	if batch.has("paid_cost"):
+		return maxi(int(batch.get("paid_cost", 0)), 0)
+	var reconstructed := 0.0
+	for ingredient_id: String in batch.get("items", {}):
+		var item: Variant = batch.items[ingredient_id]
+		if item is Dictionary:
+			reconstructed += maxi(int((item as Dictionary).get("amount", 0)), 0) * maxf(float((item as Dictionary).get("unit_cost", 0.0)), 0.0)
+	return int(ceil(reconstructed))
 
 
 func refresh_auto_sold_out() -> void:

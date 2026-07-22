@@ -21,6 +21,20 @@ func _ready() -> void:
 		GameFonts.unsupported_runtime_characters(GameFonts.web_safe_text(legacy_text)).is_empty(),
 		"legacy text symbols are sanitized before reaching a Godot control"
 	)
+	var medium := GameFonts.medium()
+	var semibold := GameFonts.semibold()
+	var bold := GameFonts.bold()
+	_check(
+		medium.base_font == GameFonts.FREDOKA
+		and int(medium.variation_opentype.get("wght", 0)) == 500
+		and int(semibold.variation_opentype.get("wght", 0)) == 600
+		and int(bold.variation_opentype.get("wght", 0)) == 700,
+		"body, controls and emphasis use the authored Fredoka Medium/SemiBold/Bold axes"
+	)
+	_check(
+		GameFonts.display() == GameFonts.FREDOKA_ONE and GameFonts.display() != medium.base_font,
+		"Fredoka One remains a separate expressive display face"
+	)
 	for texture: Texture2D in [
 		GameIcons.currency_icon(), GameIcons.lock_icon(),
 		GameIcons.rotate_left_icon(), GameIcons.rotate_right_icon(),
@@ -28,6 +42,12 @@ func _ready() -> void:
 		GameIcons.play_icon(), GameIcons.pause_icon(), GameIcons.priority_icon(),
 	]:
 		_check(texture != null and texture.get_width() > 0 and texture.get_height() > 0, "required Web-safe UI icon is importable")
+	for fallback: Texture2D in [
+		GameIcons.casual_system_icon("missing_registry_id"),
+		GameIcons.ingredient_icon({"icon_index": -1}),
+		GameIcons.recipe_icon({"icon_index": 999}),
+	]:
+		_check(fallback != null and fallback.get_width() == 64 and fallback.get_height() == 64, "missing registry icons resolve to the valid graphical fallback")
 	var report := "UI GLYPH AUDIT: %d checks, %d failures\n" % [checks, failures.size()]
 	for failure: String in failures:
 		report += "FAIL: %s\n" % failure

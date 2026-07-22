@@ -22,6 +22,8 @@ var _last_text := ""
 var _request_was_visible := false
 var _remaining := 0.0
 var _zoom_allowed := false
+var _active_priority := 0
+var _pending_text := ""
 
 
 func setup(label: Label3D, restaurant_world: RestaurantWorld, value_audience: String) -> void:
@@ -50,11 +52,23 @@ func update_bubble(delta: float) -> void:
 	var text := source_label.text.strip_edges().to_upper()
 	if requested and (not _request_was_visible or text != _last_text):
 		_last_text = text
-		_set_icon_for_text(text)
-		_remaining = _duration_for_text(text)
+		var descriptor := _descriptor_for_text(text)
+		var requested_priority := _priority_for_key(String(descriptor.get("key", "")))
+		if _remaining <= 0.0 or requested_priority >= _active_priority:
+			_activate_text(text, descriptor, requested_priority)
+			_pending_text = ""
+		else:
+			# Retain the lower-priority state and reveal it after the urgent cue,
+			# rather than stacking two bubbles over the same character.
+			_pending_text = text
 	_request_was_visible = requested
 	if _remaining > 0.0:
 		_remaining = maxf(_remaining - delta, 0.0)
+	if _remaining <= 0.0 and requested and not _pending_text.is_empty():
+		var pending := _pending_text
+		_pending_text = ""
+		var pending_descriptor := _descriptor_for_text(pending)
+		_activate_text(pending, pending_descriptor, _priority_for_key(String(pending_descriptor.get("key", ""))))
 
 	var was_zoom_allowed := _zoom_allowed
 	var zoom := 999.0
@@ -87,7 +101,7 @@ func _build_sprite() -> void:
 	_sprite = Sprite3D.new()
 	_sprite.name = "BubbleIcon"
 	_sprite.position = Vector3(0.0, 0.22, 0.0)
-	_sprite.pixel_size = 0.006
+	_sprite.pixel_size = 0.0048
 	_sprite.billboard = BaseMaterial3D.BILLBOARD_ENABLED
 	_sprite.no_depth_test = true
 	_sprite.shaded = false
@@ -98,8 +112,21 @@ func _build_sprite() -> void:
 	add_child(_sprite)
 
 
+func _descriptor_for_text(text: String) -> Dictionary:
+	return _staff_descriptor(text) if audience == "staff" else _customer_descriptor(text)
+
+
+func _activate_text(text: String, descriptor: Dictionary, priority: int) -> void:
+	_set_icon_for_descriptor(descriptor)
+	_active_priority = priority
+	_remaining = _duration_for_text(text)
+
+
 func _set_icon_for_text(text: String) -> void:
-	var descriptor := _staff_descriptor(text) if audience == "staff" else _customer_descriptor(text)
+	_set_icon_for_descriptor(_descriptor_for_text(text))
+
+
+func _set_icon_for_descriptor(descriptor: Dictionary) -> void:
 	current_key = String(descriptor.get("key", ""))
 	if current_key.is_empty():
 		_sprite.texture = null
@@ -114,6 +141,20 @@ func _set_icon_for_text(text: String) -> void:
 	texture.atlas = atlas_texture
 	texture.region = Rect2(Vector2(cell.x, cell.y) * CELL_SIZE, CELL_SIZE)
 	_sprite.texture = texture
+
+
+func _priority_for_key(key: String) -> int:
+	if key in ["angry", "change_order"]:
+		return 100
+	if key in ["leaving", "waiting"]:
+		return 80
+	if key in ["bill", "payment", "collect_dishes", "wash", "clean"]:
+		return 65
+	if key in ["served", "serve", "ordering", "take_order"]:
+		return 50
+	if key in ["happy", "paid"]:
+		return 40
+	return 20
 
 
 func _duration_for_text(text: String) -> float:

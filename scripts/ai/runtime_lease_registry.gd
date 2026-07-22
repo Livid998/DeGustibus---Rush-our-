@@ -41,6 +41,67 @@ func try_acquire(
 	return true
 
 
+## Atomically acquires a set of resources. The preflight checks every lease
+## before writing any record, so callers never end up owning a task without its
+## workstation (or vice versa). Repeating the same bundle for its owner renews
+## every lease and remains safe.
+func try_acquire_many(
+	lease_ids: Array,
+	owner: Variant,
+	now_seconds: float = -1.0,
+	ttl_seconds: float = 0.0,
+	metadata_by_lease: Dictionary = {}
+) -> bool:
+	if lease_ids.is_empty() or not _owner_is_live(owner):
+		return false
+	var unique_ids: Array[StringName] = []
+	for lease_value: Variant in lease_ids:
+		var lease_id := StringName(String(lease_value))
+		if lease_id.is_empty():
+			return false
+		if not unique_ids.has(lease_id):
+			unique_ids.append(lease_id)
+	var now := _resolve_now(now_seconds)
+	var owner_key := _owner_key(owner)
+	for lease_id: StringName in unique_ids:
+		_cleanup_one(lease_id, now)
+		if not _leases.has(lease_id):
+			continue
+		var current: Dictionary = _leases[lease_id]
+		if String(current.get("owner_key", "")) != owner_key:
+			return false
+	for lease_id: StringName in unique_ids:
+		var metadata: Dictionary = {}
+		if metadata_by_lease.has(lease_id) and metadata_by_lease[lease_id] is Dictionary:
+			metadata = metadata_by_lease[lease_id]
+		elif metadata_by_lease.has(String(lease_id)) and metadata_by_lease[String(lease_id)] is Dictionary:
+			metadata = metadata_by_lease[String(lease_id)]
+		if not try_acquire(lease_id, owner, now, ttl_seconds, metadata):
+			# This is only defensive (the registry is single-threaded), but keeps
+			# the operation atomic if acquisition validation changes in the future.
+			for acquired_id: StringName in unique_ids:
+				if acquired_id == lease_id:
+					break
+				release(acquired_id, owner)
+			return false
+	return true
+
+
+## Idempotently releases a bundle owned by owner. A conflicting live owner is
+## preserved and makes the result false.
+func release_many(lease_ids: Array, owner: Variant) -> bool:
+	var success := true
+	var seen: Dictionary = {}
+	for lease_value: Variant in lease_ids:
+		var lease_id := StringName(String(lease_value))
+		if lease_id.is_empty() or seen.has(lease_id):
+			continue
+		seen[lease_id] = true
+		if not release(lease_id, owner):
+			success = false
+	return success
+
+
 ## Returns true only while owner holds a live lease.
 func owns(lease_id: StringName, owner: Variant, now_seconds: float = -1.0) -> bool:
 	if lease_id.is_empty() or not _owner_is_live(owner):
@@ -108,6 +169,33 @@ func metadata_for(lease_id: StringName, now_seconds: float = -1.0) -> Dictionary
 	if not _leases.has(lease_id):
 		return {}
 	return Dictionary((_leases[lease_id] as Dictionary).get("metadata", {})).duplicate(true)
+
+
+## Read-only diagnostic copy. Owners are intentionally retained so an audit can
+## release an orphan with the normal owner-aware API.
+func records_snapshot(now_seconds: float = -1.0) -> Dictionary:
+	cleanup(now_seconds)
+	var result: Dictionary = {}
+	for lease_id: Variant in _leases:
+		var record: Dictionary = _leases[lease_id]
+		result[lease_id] = {
+			"owner": record.get("owner"),
+			"owner_key": String(record.get("owner_key", "")),
+			"acquired_at": float(record.get("acquired_at", 0.0)),
+			"expires_at": float(record.get("expires_at", -1.0)),
+			"metadata": Dictionary(record.get("metadata", {})).duplicate(true),
+		}
+	return result
+
+
+func diagnostic_summary(now_seconds: float = -1.0) -> Dictionary:
+	var records := records_snapshot(now_seconds)
+	var by_kind: Dictionary = {}
+	for record_value: Variant in records.values():
+		var record: Dictionary = record_value
+		var kind := String((record.get("metadata", {}) as Dictionary).get("kind", "unspecified"))
+		by_kind[kind] = int(by_kind.get(kind, 0)) + 1
+	return {"active": records.size(), "by_kind": by_kind}
 
 
 func clear() -> void:

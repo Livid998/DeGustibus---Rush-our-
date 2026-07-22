@@ -1,0 +1,14 @@
+{
+  "save_version": 12,
+  "money": 888888,
+  "stock": {},
+  "menu": {},
+  "layout": [
+    {
+      "uid": "broken",
+      "item": "table_small",
+      "cell": ["six", 6],
+      "rotation": 0
+    }
+  ]
+}

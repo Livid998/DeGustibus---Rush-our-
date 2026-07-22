@@ -250,7 +250,10 @@ func cancel_pending_batch(batch_kind: String, recovery: bool = false) -> Diction
 ## available while closed and without runtime reservations, and only once per
 ## save, preventing the emergency grant from becoming an economy exploit.
 func apply_recovery_plan() -> Dictionary:
-	var plan := StorageManager.build_recovery_plan()
+	var audit := StorageManager.soft_lock_snapshot()
+	var plan: Dictionary = audit.get("recovery_plan", {})
+	if not bool(audit.get("soft_locked", false)):
+		return {"success": false, "reason": "not_soft_locked", "plan": plan}
 	if not bool(plan.get("eligible", false)):
 		return {"success": false, "reason": String(plan.get("reason", "unavailable")), "plan": plan}
 	if GameState.restaurant_state != "closed" or StorageManager.reservation_count() > 0:
@@ -278,31 +281,62 @@ func apply_recovery_plan() -> Dictionary:
 			root.items = {}
 			root.paid = false
 			root.paid_cost = 0
+	var recipe_id := String(plan.get("recipe_id", ""))
+	if not _recovery_stock_fits_capacity(stock_after) or not _recovery_recipe_is_producible(stock_after, recipe_id):
+		return {"success": false, "reason": "invariant_failed", "plan": plan}
 	var changed_ingredients: Array = []
 	for ingredient_id: String in GameState.stock:
 		if int(GameState.stock[ingredient_id].get("amount", 0)) != int(stock_after.get(ingredient_id, {}).get("amount", 0)):
 			changed_ingredients.append(ingredient_id)
-	GameState.stock = stock_after
-	_publish_batch(root)
 	var refund := maxi(int(plan.get("pending_refund", 0)), 0)
+	var batch_changed := GameState.pending_delivery_batch != root
+	var menu_changed := false
+	var recipe_state: Dictionary = GameState.menu.get(recipe_id, {})
+	if recipe_state.is_empty():
+		return {"success": false, "reason": "stale_plan", "plan": plan}
+
+	# Commit barrier: every authoritative field is mutated without emitting a
+	# signal or scheduling an autosave. GDScript execution is single-threaded,
+	# so observers can only run after the complete final state exists.
+	GameState.stock = stock_after
+	GameState.pending_delivery_batch = root.duplicate(true)
+	_sync_legacy_deliveries(root)
 	if refund > 0:
-		GameState.earn(refund, "Recupero consegne bloccate")
-	if bool(plan.get("activate_recipe", false)):
-		GameState.set_recipe_active(String(plan.recipe_id), true)
+		GameState.money += refund
+	if bool(plan.get("activate_recipe", false)) and not bool(recipe_state.get("active", false)):
+		recipe_state.active = true
+		menu_changed = true
+	if bool(plan.get("resume_recipe", false)) and bool(recipe_state.get("manual_paused", false)):
+		recipe_state.manual_paused = false
+		menu_changed = true
+	if bool(recipe_state.get("auto_sold_out", false)) or bool(recipe_state.get("sold_out", false)):
+		recipe_state.auto_sold_out = false
+		recipe_state.sold_out = false
+		menu_changed = true
 	GameState.progress.emergency_recovery_used = true
+
+	# Publish only after the transaction is complete. Every listener therefore
+	# observes the same coherent stock, money, menu and delivery state.
+	StorageManager.recalculate_usage()
+	if batch_changed:
+		_publishing_batch = true
+		GameState.pending_delivery_batch_changed.emit(GameState.pending_delivery_batch.duplicate(true))
+		_publishing_batch = false
+		delivery_batch_changed.emit(GameState.pending_delivery_batch.duplicate(true))
+	if refund > 0:
+		GameState.money_changed.emit(GameState.money)
+		GameState.toast_requested.emit("+%d · Recupero consegne bloccate" % refund, "income")
+	if menu_changed:
+		GameState.menu_changed.emit()
 	for ingredient_value: Variant in changed_ingredients:
 		var ingredient_id := String(ingredient_value)
 		GameState.stock_changed.emit(ingredient_id, int(GameState.stock[ingredient_id].amount))
 	GameState.mark_save_dirty()
-	StorageManager.recalculate_usage()
 	StorageManager.refresh_auto_sold_out()
-	if not StorageManager.is_recipe_producible(String(plan.recipe_id)):
-		push_error("Emergency recovery invariant failed for %s" % String(plan.recipe_id))
-		return {"success": false, "reason": "invariant_failed", "plan": plan}
 	var summary := {
 		"success": true,
 		"reason": "",
-		"recipe_id": String(plan.recipe_id),
+		"recipe_id": recipe_id,
 		"refund": refund,
 		"discard_items": (plan.discard_items as Dictionary).duplicate(true),
 		"grant_items": (plan.grant_items as Dictionary).duplicate(true),
@@ -312,11 +346,64 @@ func apply_recovery_plan() -> Dictionary:
 	return summary
 
 
+func _recovery_recipe_is_producible(stock_state: Dictionary, recipe_id: String) -> bool:
+	if recipe_id.is_empty():
+		return false
+	var requirements := DataRegistry.recipe_raw_requirements(recipe_id)
+	if requirements.is_empty():
+		return false
+	for ingredient_id: String in requirements:
+		var entry: Dictionary = stock_state.get(ingredient_id, {})
+		var available := maxi(int(entry.get("amount", 0)) - int(entry.get("reserved", 0)), 0)
+		if available < int(requirements[ingredient_id]):
+			return false
+	return true
+
+
+func _recovery_stock_fits_capacity(stock_state: Dictionary) -> bool:
+	var usage := {"ambient": 0, "refrigerated": 0}
+	for ingredient_id: String in stock_state:
+		var entry: Variant = stock_state[ingredient_id]
+		if not entry is Dictionary:
+			continue
+		var metadata := DataRegistry.storage_metadata_for_ingredient(ingredient_id)
+		var storage_type := String(metadata.get("storage_type", "ambient"))
+		usage[storage_type] = int(usage.get(storage_type, 0)) + maxi(int((entry as Dictionary).get("amount", 0)), 0) * maxi(int(metadata.get("storage_units", 1)), 1)
+	var capacity := StorageManager.capacity_snapshot()
+	for storage_type: String in usage:
+		if int(usage[storage_type]) > int(capacity.get(storage_type, 0)):
+			return false
+	return true
+
+
 func _check_auto_reorders() -> void:
 	# Tests, migrations and builder confirmations may replace GameState directly
 	# without emitting layout/stock signals. Recalculate only at this explicit
 	# event boundary; StorageManager never polls per frame.
 	StorageManager.recalculate_layout_capacity()
+	# Protect the continuation invariant before filling independent stock
+	# targets.  With very little free capacity, iterating ingredients first can
+	# otherwise buy (for example) two cheeses and no dough, even though one
+	# cheese plus one dough would complete an active recipe.  The audit already
+	# proves this exact bundle is unlocked, affordable and capacity-safe.
+	var integrity := StorageManager.soft_lock_snapshot()
+	if (
+		(integrity.get("producible_recipe_ids", []) as Array).is_empty()
+		and (integrity.get("pending_recipe_ids", []) as Array).is_empty()
+	):
+		var orderable_recipe_ids: Array = (integrity.get("orderable_recipe_ids", []) as Array).duplicate()
+		orderable_recipe_ids.sort()
+		if not orderable_recipe_ids.is_empty():
+			var recipe_id := String(orderable_recipe_ids[0])
+			var requirements := DataRegistry.recipe_raw_requirements(recipe_id)
+			var recovery_bundle: Dictionary = {}
+			for ingredient_id: String in requirements:
+				var required := int(requirements[ingredient_id])
+				var eventual := StorageManager.available_amount(ingredient_id) + StorageManager.pending_amount(ingredient_id, "all")
+				if eventual < required:
+					recovery_bundle[ingredient_id] = required - eventual
+			if not recovery_bundle.is_empty():
+				_confirm_items(recovery_bundle, false, "Riordino automatico")
 	for ingredient_id: String in GameState.stock:
 		var entry: Dictionary = GameState.stock[ingredient_id]
 		if not bool(entry.get("auto_reorder", false)):
