@@ -58,16 +58,51 @@ func _process(delta: float) -> void:
 
 func set_model(path: String) -> void:
 	if model_root == null:
+		if not is_inside_tree():
+			return
 		await ready
+	if not is_inside_tree() or model_root == null:
+		return
 	for child: Node in model_root.get_children():
 		child.queue_free()
 	if not path.is_empty():
 		var model := ModelFactory.instantiate_model(path)
 		model_root.add_child(model)
-		await get_tree().process_frame
+		var tree := get_tree()
+		if tree == null:
+			return
+		await tree.process_frame
+		if not is_inside_tree() or model_root == null or camera == null:
+			return
 		_fit_camera_to_model()
 		if not auto_rotate:
 			viewport_3d.render_target_update_mode = SubViewport.UPDATE_ONCE
+
+
+func set_build_definition(definition: Dictionary) -> void:
+	if model_root == null:
+		if not is_inside_tree():
+			return
+		await ready
+	if not is_inside_tree() or model_root == null:
+		return
+	for child: Node in model_root.get_children():
+		child.queue_free()
+	if definition.is_empty():
+		return
+	var item_id := String(definition.get("id", ""))
+	var model := ModelFactory.instantiate_build_visual(definition, not item_id.begins_with("floor_"))
+	ModelFactory.align_visual_to_grid_origin(model, not item_id.begins_with("floor_"))
+	model_root.add_child(model)
+	var tree := get_tree()
+	if tree == null:
+		return
+	await tree.process_frame
+	if not is_inside_tree() or model_root == null or camera == null:
+		return
+	_fit_camera_to_model()
+	if not auto_rotate:
+		viewport_3d.render_target_update_mode = SubViewport.UPDATE_ONCE
 
 
 func _fit_camera_to_model() -> void:

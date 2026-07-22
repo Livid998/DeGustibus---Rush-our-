@@ -4,6 +4,7 @@ extends Node
 signal mode_changed(active: bool)
 signal preview_changed(valid: bool, reason: String, cost: int)
 signal selection_changed(object: PlacedObject)
+signal history_changed(can_undo: bool, can_redo: bool, undo_label: String, redo_label: String)
 
 var world: RestaurantWorld
 var camera: Camera3D
@@ -28,14 +29,20 @@ var _preview_target_position := Vector3.ZERO
 var _preview_target_rotation := 0.0
 var _preview_transform_initialized := false
 var _moving_dependents: Array[PlacedObject] = []
+var _undo_stack: Array[Dictionary] = []
+var _redo_stack: Array[Dictionary] = []
+var _history_applying := false
+var _uid_serial := 0
 
 const EDGE_SELECTION_FALLBACK_RADIUS_PX := 22.0
+const HISTORY_LIMIT := 50
 
 
 func setup(value_world: RestaurantWorld, value_camera: Camera3D) -> void:
 	world = value_world
 	camera = value_camera
 	set_process(true)
+	_emit_history_changed()
 
 
 func _process(delta: float) -> void:
@@ -100,7 +107,24 @@ func move_selected() -> void:
 func sell_selected() -> bool:
 	if selected_object == null or not is_instance_valid(selected_object) or not can_edit_definition(selected_object.definition):
 		return false
+	var before := _capture_history_state()
+	var before_selection_uid := selected_object.uid
 	var attached := world.attached_objects(selected_object.uid)
+	var removes_storage := not (selected_object.definition.get("storage_capacity", {}) as Dictionary).is_empty()
+	for dependent: PlacedObject in attached:
+		removes_storage = removes_storage or not (dependent.definition.get("storage_capacity", {}) as Dictionary).is_empty()
+	if removes_storage:
+		var storage_guard := StorageManager.can_remove_storage_item(selected_object.uid)
+		if not bool(storage_guard.get("valid", false)):
+			var blocked_names: Array[String] = []
+			for storage_type_value: Variant in storage_guard.get("blocked_types", []):
+				var storage_type := String(storage_type_value)
+				blocked_names.append("refrigerata" if storage_type == "refrigerated" else "ambiente")
+			GameState.toast_requested.emit(
+				"Deposito necessario: stock e consegne supererebbero la capacita %s" % ", ".join(blocked_names),
+				"warning"
+			)
+			return false
 	var removal_cost := maxi(int(selected_object.definition.get("removal_cost", 0)), 0)
 	if removal_cost > 0:
 		if not GameState.spend(removal_cost, "Rimozione %s" % selected_object.definition.name):
@@ -113,6 +137,7 @@ func sell_selected() -> bool:
 		GameState.earn(refund, "Vendita %s%s" % [selected_object.definition.name, " con %d agganci" % attached.size() if not attached.is_empty() else ""])
 	world.remove_placed_object(selected_object)
 	_clear_selection()
+	_commit_history("Vendita", before, before_selection_uid, "")
 	SaveManager.save_game()
 	return true
 
@@ -127,6 +152,8 @@ func confirm() -> bool:
 	if not bool(validation.valid):
 		GameState.toast_requested.emit(String(validation.reason), "warning")
 		return false
+	var before := _capture_history_state()
+	var before_selection_uid := move_source.uid if move_source != null and is_instance_valid(move_source) else ""
 	var is_move := move_source != null and is_instance_valid(move_source)
 	var replaced_wall: PlacedObject = world.structural_edge_at(preview_cell, rotation_steps, move_source) if world.is_edge_placement(current_definition) else null
 	var cost := 0 if is_move else int(current_definition.price)
@@ -145,11 +172,99 @@ func confirm() -> bool:
 	if replaced_wall != null and is_instance_valid(replaced_wall):
 		world.remove_placed_object(replaced_wall, true)
 	if not is_move:
-		placed = world.add_layout_object(String(current_definition.id), preview_cell, rotation_steps, preview_support_uid, preview_attachment_slot)
+		placed = _add_layout_object_with_unique_uid(String(current_definition.id), preview_cell, rotation_steps, preview_support_uid, preview_attachment_slot)
+	var transaction_label := "Spostamento" if is_move else "Acquisto"
+	if replaced_wall != null:
+		transaction_label = "Sostituzione apertura"
 	_finish_preview()
 	select_object(placed)
+	_commit_history(transaction_label, before, before_selection_uid, placed.uid if placed != null else "")
 	SaveManager.save_game()
 	return true
+
+
+func rotate_selected() -> void:
+	if selected_object == null or not is_instance_valid(selected_object):
+		return
+	move_selected()
+	if active:
+		rotate_preview()
+
+
+func can_undo() -> bool:
+	return not _undo_stack.is_empty()
+
+
+func can_redo() -> bool:
+	return not _redo_stack.is_empty()
+
+
+func undo() -> bool:
+	if _undo_stack.is_empty() or _history_applying:
+		return false
+	if active:
+		cancel_preview()
+	var transaction: Dictionary = _undo_stack.back()
+	if not _history_state_matches(transaction.get("after", {})):
+		clear_history()
+		GameState.toast_requested.emit("Cronologia azzerata: il layout e stato modificato altrove", "warning")
+		return false
+	if not _history_capacity_allows(transaction.get("before", {})):
+		return false
+	var money_adjustment := -int(transaction.get("money_delta", 0))
+	if GameState.money + money_adjustment < 0:
+		GameState.toast_requested.emit("Monete insufficienti per annullare questa vendita", "warning")
+		return false
+	_undo_stack.pop_back()
+	_history_applying = true
+	_apply_history_state(transaction.get("before", {}), String(transaction.get("before_selection_uid", "")), money_adjustment)
+	_history_applying = false
+	_redo_stack.append(transaction)
+	_emit_history_changed()
+	GameState.toast_requested.emit("Annullato: %s" % String(transaction.get("label", "modifica")), "info")
+	SaveManager.save_game()
+	return true
+
+
+func redo() -> bool:
+	if _redo_stack.is_empty() or _history_applying:
+		return false
+	if active:
+		cancel_preview()
+	var transaction: Dictionary = _redo_stack.back()
+	if not _history_state_matches(transaction.get("before", {})):
+		clear_history()
+		GameState.toast_requested.emit("Cronologia azzerata: il layout e stato modificato altrove", "warning")
+		return false
+	if not _history_capacity_allows(transaction.get("after", {})):
+		return false
+	var money_adjustment := int(transaction.get("money_delta", 0))
+	if GameState.money + money_adjustment < 0:
+		GameState.toast_requested.emit("Monete insufficienti per ripetere questo acquisto", "warning")
+		return false
+	_redo_stack.pop_back()
+	_history_applying = true
+	_apply_history_state(transaction.get("after", {}), String(transaction.get("after_selection_uid", "")), money_adjustment)
+	_history_applying = false
+	_undo_stack.append(transaction)
+	_emit_history_changed()
+	GameState.toast_requested.emit("Ripristinato: %s" % String(transaction.get("label", "modifica")), "info")
+	SaveManager.save_game()
+	return true
+
+
+func clear_history() -> void:
+	_undo_stack.clear()
+	_redo_stack.clear()
+	_emit_history_changed()
+
+
+func undo_label() -> String:
+	return String(_undo_stack.back().get("label", "")) if not _undo_stack.is_empty() else ""
+
+
+func redo_label() -> String:
+	return String(_redo_stack.back().get("label", "")) if not _redo_stack.is_empty() else ""
 
 
 func cancel_preview() -> void:
@@ -205,6 +320,13 @@ func rotate_preview_back() -> void:
 		rotation_steps = posmod(rotation_steps - 1, 4)
 		_sync_wall_mount_support_for_edge()
 	_sync_preview_transform()
+
+
+func unpin_preview() -> void:
+	if not active:
+		return
+	preview_pinned = false
+	_update_validation()
 
 
 func _sync_wall_mount_support_for_edge() -> void:
@@ -649,3 +771,227 @@ func _update_selection_marker() -> void:
 	if edge_placement:
 		selection_marker.rotation.y = selected_object.rotation.y
 	world.preview_root.add_child(selection_marker)
+
+
+func _add_layout_object_with_unique_uid(item_id: String, cell: Vector2i, value_rotation_steps: int, support_uid: String, attachment_slot: int) -> PlacedObject:
+	if item_id.begins_with("floor_"):
+		world.add_layout_object(item_id, cell, value_rotation_steps, support_uid, attachment_slot)
+		return null
+	_uid_serial += 1
+	var uid := "%s_%d_%d" % [item_id, Time.get_ticks_msec(), _uid_serial]
+	while world.placed_objects.has(uid) or _layout_has_uid(uid):
+		_uid_serial += 1
+		uid = "%s_%d_%d" % [item_id, Time.get_ticks_msec(), _uid_serial]
+	var record := {"uid": uid, "item": item_id, "cell": [cell.x, cell.y], "rotation": value_rotation_steps}
+	if not support_uid.is_empty():
+		record.support_uid = support_uid
+		record.attachment_slot = attachment_slot
+	GameState.layout.append(record)
+	var object := world.instantiate_layout_object(uid, item_id, cell, value_rotation_steps, support_uid, attachment_slot)
+	world._refresh_attachment(object)
+	world._refresh_operational_stations()
+	world._rebuild_astar()
+	GameState.layout_changed.emit()
+	if object != null:
+		world.layout_object_added.emit(object)
+	return object
+
+
+func _layout_has_uid(uid: String) -> bool:
+	for record: Dictionary in GameState.layout:
+		if String(record.get("uid", "")) == uid:
+			return true
+	return false
+
+
+func _capture_history_state() -> Dictionary:
+	return {
+		"layout": GameState.layout.duplicate(true),
+		"money": GameState.money,
+	}
+
+
+func _commit_history(label: String, before: Dictionary, before_selection_uid: String, after_selection_uid: String) -> void:
+	if _history_applying:
+		return
+	var after := _capture_history_state()
+	if before == after:
+		return
+	_undo_stack.append({
+		"label": label,
+		"before": before.duplicate(true),
+		"after": after.duplicate(true),
+		"before_selection_uid": before_selection_uid,
+		"after_selection_uid": after_selection_uid,
+		"money_delta": int(after.get("money", 0)) - int(before.get("money", 0)),
+	})
+	while _undo_stack.size() > HISTORY_LIMIT:
+		_undo_stack.pop_front()
+	_redo_stack.clear()
+	_emit_history_changed()
+
+
+func _history_state_matches(state: Dictionary) -> bool:
+	if state.is_empty():
+		return false
+	return GameState.layout == state.get("layout", [])
+
+
+func _history_capacity_allows(state: Dictionary) -> bool:
+	var target_layout: Array = state.get("layout", [])
+	var current_capacity := StorageManager.capacity_snapshot_for_layout(GameState.layout)
+	var target_capacity := StorageManager.capacity_snapshot_for_layout(target_layout)
+	var reduces_capacity := false
+	for storage_type: String in ["ambient", "refrigerated"]:
+		if int(target_capacity.get(storage_type, 0)) < int(current_capacity.get(storage_type, 0)):
+			reduces_capacity = true
+			break
+	if not reduces_capacity:
+		return true
+	var validation := StorageManager.validate_storage_capacity_for_layout(target_layout)
+	if bool(validation.get("valid", false)):
+		return true
+	var blocked_names: Array[String] = []
+	for storage_type_value: Variant in validation.get("blocked_types", []):
+		blocked_names.append("refrigerata" if String(storage_type_value) == "refrigerated" else "ambiente")
+	GameState.toast_requested.emit("Impossibile applicare: capacita %s necessaria a stock e consegne" % ", ".join(blocked_names), "warning")
+	return false
+
+
+func _apply_history_state(state: Dictionary, selection_uid: String, money_adjustment: int) -> void:
+	var target_layout: Array = (state.get("layout", []) as Array).duplicate(true)
+	var previous_layout := GameState.layout.duplicate(true)
+	var target_by_uid: Dictionary = {}
+	for record: Dictionary in target_layout:
+		var item_id := String(record.get("item", ""))
+		if not item_id.begins_with("floor_"):
+			target_by_uid[String(record.get("uid", ""))] = record
+
+	# Remove only runtime objects affected by this transaction. This preserves
+	# customer/staff state when a decoration is edited during service.
+	for object_value: Variant in world.placed_objects.values().duplicate():
+		var object := object_value as PlacedObject
+		if object == null or not is_instance_valid(object) or not world.placed_objects.has(object.uid):
+			continue
+		var target: Dictionary = target_by_uid.get(object.uid, {})
+		if target.is_empty() or String(target.get("item", "")) != object.item_id:
+			_remove_station_runtimes_for_group(object)
+			world.remove_placed_object(object, false)
+
+	# The authoritative record array is replaced atomically. Existing runtime
+	# nodes are moved in dependency order; missing ones are recreated with their
+	# original UID so attachments and save references remain stable.
+	GameState.layout = target_layout.duplicate(true)
+	var ordered_records := _records_in_dependency_order(target_layout)
+	for record: Dictionary in ordered_records:
+		var uid := String(record.get("uid", ""))
+		var item_id := String(record.get("item", ""))
+		var cell_data: Array = record.get("cell", [0, 0])
+		var cell := Vector2i(int(cell_data[0]), int(cell_data[1]))
+		var target_rotation := int(record.get("rotation", 0))
+		var support_uid := String(record.get("support_uid", ""))
+		var attachment_slot := int(record.get("attachment_slot", -1))
+		var object := world.placed_objects.get(uid) as PlacedObject
+		if object == null or not is_instance_valid(object):
+			world.instantiate_layout_object(uid, item_id, cell, target_rotation, support_uid, attachment_slot)
+			continue
+		if object.grid_cell != cell or object.rotation_steps != posmod(target_rotation, 4) or object.support_uid != support_uid or object.attachment_slot != attachment_slot:
+			world.move_layout_object(object, cell, target_rotation, support_uid, attachment_slot)
+
+	if not _floor_records_equal(previous_layout, target_layout):
+		_restore_floor_snapshot(target_layout)
+	world._refresh_all_attachments()
+	world._refresh_operational_stations()
+	world._rebuild_astar()
+	world.refresh_shell_cutaway()
+	if world.ambience_system != null:
+		world._refresh_ambience()
+	if world.storage_fill_visualizer != null:
+		world.storage_fill_visualizer.refresh()
+	GameState.money += money_adjustment
+	GameState.money_changed.emit(GameState.money)
+	GameState.layout_changed.emit()
+	GameState.mark_save_dirty()
+	_clear_selection(false)
+	var selected := world.placed_objects.get(selection_uid) as PlacedObject
+	select_object(selected)
+
+
+func _records_in_dependency_order(layout_snapshot: Array) -> Array[Dictionary]:
+	var roots: Array[Dictionary] = []
+	var attachments: Array[Dictionary] = []
+	for record_value: Variant in layout_snapshot:
+		var record: Dictionary = record_value
+		if String(record.get("item", "")).begins_with("floor_"):
+			continue
+		if String(record.get("support_uid", "")).is_empty():
+			roots.append(record)
+		else:
+			attachments.append(record)
+	attachments.sort_custom(func(a: Dictionary, b: Dictionary): return String(a.get("support_uid", "")) < String(b.get("support_uid", "")) if String(a.get("support_uid", "")) != String(b.get("support_uid", "")) else int(a.get("attachment_slot", -1)) < int(b.get("attachment_slot", -1)))
+	roots.append_array(attachments)
+	return roots
+
+
+func _restore_floor_snapshot(layout_snapshot: Array) -> void:
+	world.floor_tiles.clear()
+	for y: int in range(RestaurantWorld.LOT_REGION.position.y, RestaurantWorld.LOT_REGION.end.y):
+		for x: int in range(RestaurantWorld.LOT_REGION.position.x, RestaurantWorld.LOT_REGION.end.x):
+			var cell := Vector2i(x, y)
+			var style := "floor_grass"
+			if Rect2i(Vector2i.ZERO, RestaurantWorld.GRID_SIZE).has_point(cell):
+				style = "floor_dining" if y < 8 else "floor_kitchen"
+			elif y in RestaurantWorld.SIDEWALK_ROWS:
+				style = "floor_sidewalk"
+			elif y in RestaurantWorld.ROAD_ROWS:
+				style = "floor_road"
+			world.floor_tiles[cell] = style
+	for record_value: Variant in layout_snapshot:
+		var record: Dictionary = record_value
+		var item_id := String(record.get("item", ""))
+		if not item_id.begins_with("floor_"):
+			continue
+		var cell_data: Array = record.get("cell", [-999, -999])
+		var cell := Vector2i(int(cell_data[0]), int(cell_data[1]))
+		if RestaurantWorld.LOT_REGION.has_point(cell):
+			world.floor_tiles[cell] = item_id
+	world._rebuild_floor_batches()
+
+
+func _floor_records_equal(first_layout: Array, second_layout: Array) -> bool:
+	var first: Dictionary = {}
+	var second: Dictionary = {}
+	for record_value: Variant in first_layout:
+		var record: Dictionary = record_value
+		if String(record.get("item", "")).begins_with("floor_"):
+			first[String(record.get("uid", ""))] = record
+	for record_value: Variant in second_layout:
+		var record: Dictionary = record_value
+		if String(record.get("item", "")).begins_with("floor_"):
+			second[String(record.get("uid", ""))] = record
+	return first == second
+
+
+func _remove_station_runtimes_for_group(object: PlacedObject) -> void:
+	var doomed: Array[PlacedObject] = [object]
+	_collect_attachment_group(object.uid, doomed)
+	for station_id_value: Variant in SimulationManager.stations.keys():
+		var station_id := String(station_id_value)
+		var runtimes: Array = SimulationManager.stations.get(station_id, [])
+		for runtime_value: Variant in runtimes.duplicate():
+			var runtime: Dictionary = runtime_value
+			if runtime.get("node") in doomed:
+				runtimes.erase(runtime)
+		SimulationManager.stations[station_id] = runtimes
+
+
+func _collect_attachment_group(support_uid: String, result: Array[PlacedObject]) -> void:
+	for child: PlacedObject in world.attached_objects(support_uid):
+		if child in result:
+			continue
+		result.append(child)
+		_collect_attachment_group(child.uid, result)
+
+
+func _emit_history_changed() -> void:
+	history_changed.emit(can_undo(), can_redo(), undo_label(), redo_label())

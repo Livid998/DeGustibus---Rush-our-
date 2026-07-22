@@ -96,7 +96,17 @@ func _capture_day_cycle_states() -> void:
 	)
 	await _capture("02-night.png", LANDSCAPE_SIZE)
 
-	_set_clock(690.0)
+	var rush_windows: Array[Dictionary] = _cycle.call("configured_rush_windows")
+	var first_rush: Dictionary = rush_windows[0] if not rush_windows.is_empty() else {}
+	var rush_start := float(first_rush.get("start", 720.0))
+	var minutes_per_real_second := 1440.0 / maxf(
+		float(DataRegistry.balance_value("day_cycle.real_seconds_at_1x", 1.0)),
+		0.001
+	)
+	var warning_minutes := float(
+		DataRegistry.balance_value("day_cycle.rush_warning_seconds", 0.0)
+	) * minutes_per_real_second
+	_set_clock(rush_start - warning_minutes * 0.5)
 	var warning_status: Dictionary = _cycle.call("rush_status", 1.0)
 	_expect(
 		String(warning_status.get("phase", "")) == "warning"
@@ -105,7 +115,8 @@ func _capture_day_cycle_states() -> void:
 	)
 	await _capture("03-pre-rush.png", LANDSCAPE_SIZE)
 
-	_set_clock(765.0)
+	var rush_end := float(first_rush.get("end", rush_start + 120.0))
+	_set_clock(lerpf(rush_start, rush_end, 0.375))
 	var rush_status: Dictionary = _cycle.call("rush_status", 1.0)
 	_expect(
 		String(rush_status.get("phase", "")) == "active"
@@ -318,6 +329,10 @@ func _capture_ventilation_comparison() -> void:
 	_main.ui.build_hud.refresh_catalog()
 	var stove := _main.world.placed_objects.get("stove_1") as PlacedObject
 	var hood := _main.world.placed_objects.get("hood_stove_1") as PlacedObject
+	if stove == null:
+		stove = _main.world.add_layout_object("stove", Vector2i(9, 12), 2)
+	if stove != null and hood == null:
+		hood = _main.world.add_layout_object("extractor_hood", stove.grid_cell, stove.rotation_steps, stove.uid, 0)
 	_expect(stove != null and hood != null, "fornello e cappa reali sono presenti nel layout iniziale")
 	if stove == null:
 		return
@@ -348,6 +363,10 @@ func _capture_tabletop_icecream_machine() -> void:
 	var worktop: PlacedObject
 	if dessert != null:
 		worktop = _main.world.placed_objects.get(dessert.support_uid) as PlacedObject
+	else:
+		worktop = _main.world.add_layout_object("worktable", Vector2i(12, 12), 2)
+		if worktop != null:
+			dessert = _main.world.add_layout_object("dessert", worktop.grid_cell, worktop.rotation_steps, worktop.uid, 0)
 	_expect(dessert != null and worktop != null, "la gelatiera reale conserva il proprio tavolo di supporto")
 	if dessert == null or worktop == null:
 		return

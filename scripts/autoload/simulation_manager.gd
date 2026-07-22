@@ -10,6 +10,8 @@ signal customer_count_changed(count: int)
 signal statistics_changed
 signal group_review_completed(review: Dictionary)
 signal dish_quality_resolved(order: Dictionary)
+signal restaurant_opening_blocked(readiness: Dictionary)
+signal restaurant_opening_evaluated(readiness: Dictionary)
 
 var simulation_speed: float = 1.0
 var world: Node = null
@@ -18,6 +20,10 @@ var orders: Dictionary = {}
 var service_tasks: Dictionary = {}
 var maintenance_tasks: Dictionary = {}
 var stations: Dictionary = {}
+## Authoritative ownership for employee assignments and their runtime resources.
+## The dictionaries on task/station records remain observable mirrors for UI
+## and metrics, but claims are decided by this registry.
+var staff_leases := RuntimeLeaseRegistry.new()
 var customers: Array[Node] = []
 var stats: Dictionary = {}
 var _task_serial := 0
@@ -62,6 +68,7 @@ func _process(delta: float) -> void:
 			_simulation_tick_accumulator = minf(_simulation_tick_accumulator, SIMULATION_TICK)
 		if _maintenance_clock >= 2.0:
 			_maintenance_clock = 0.0
+			_audit_staff_leases()
 			_prune_completed_work()
 	if GameState.restaurant_state == "closing" and customers.is_empty():
 		GameState.set_restaurant_state("closed")
@@ -84,6 +91,15 @@ func set_speed(value: float) -> void:
 func open_restaurant() -> bool:
 	if GameState.restaurant_state != "closed":
 		return false
+	var readiness := opening_readiness()
+	restaurant_opening_evaluated.emit(readiness.duplicate(true))
+	if not bool(readiness.get("ready", false)):
+		restaurant_opening_blocked.emit(readiness.duplicate(true))
+		GameState.toast_requested.emit(
+			"APERTURA BLOCCATA - %d problemi da risolvere" % (readiness.get("blockers", []) as Array).size(),
+			"warning"
+		)
+		return false
 	if world != null and world.has_method("restaurant_opening_blockers"):
 		var blockers: Array = world.restaurant_opening_blockers()
 		if not blockers.is_empty():
@@ -97,7 +113,31 @@ func open_restaurant() -> bool:
 	GameState.progress.services_started = int(GameState.progress.get("services_started", 0)) + 1
 	GameState.check_progression()
 	GameState.set_restaurant_state("open")
+	TutorialManager.record_event("restaurant_opened")
+	var warnings: Array = readiness.get("warnings", [])
+	if not warnings.is_empty():
+		GameState.toast_requested.emit(
+			"RISTORANTE APERTO - %d avvisi non bloccanti" % warnings.size(),
+			"warning"
+		)
 	return true
+
+
+func opening_readiness() -> Dictionary:
+	if world != null and world.has_method("restaurant_opening_readiness"):
+		return world.call("restaurant_opening_readiness")
+	if world != null:
+		return OpeningReadinessService.evaluate(world)
+	return {
+		"ready": false,
+		"blockers": [{
+			"id": "world_unavailable",
+			"message": "La mappa del ristorante non e disponibile.",
+			"cta": {"action": "Ristorante", "label": "Torna alla mappa"},
+		}],
+		"warnings": [],
+		"context": {},
+	}
 
 
 func request_close() -> void:
@@ -108,17 +148,29 @@ func request_close() -> void:
 func close_immediately() -> void:
 	for order_id: String in orders:
 		StorageManager.release_order(order_id)
+		var order: Dictionary = orders.get(order_id, {})
+		if String(order.get("state", "")) not in ["paid", "cancelled"]:
+			order.state = "cancelled"
+			order.finished_at = GameState.service_seconds
+	for task: Dictionary in tasks.values():
+		_release_station(task)
+		if String(task.get("state", "")) != "completed":
+			task.state = "cancelled"
+		task.employee_id = ""
+		task.station_runtime = null
 	for customer: Node in customers.duplicate():
 		if is_instance_valid(customer):
 			customer.queue_free()
 	customers.clear()
 	for task_id: String in service_tasks:
+		_release_task_leases(service_tasks[task_id])
 		service_tasks[task_id].state = "cancelled"
 	for task_id: String in maintenance_tasks:
 		_cancel_maintenance_record(maintenance_tasks[task_id], false)
 	GameState.set_restaurant_state("closed")
 	customer_count_changed.emit(0)
 	_prune_completed_work(true)
+	_update_staff_lease_diagnostics()
 
 
 func register_station(station_id: String, node: Node, capacity: int) -> void:
@@ -190,7 +242,25 @@ func _expanded_interaction_positions(base_positions: Array[Vector3], capacity: i
 
 
 func unregister_world_stations() -> void:
+	# A layout rebuild invalidates physical station nodes. Release each affected
+	# assignment before removing the runtime catalogue so no invisible station
+	# can keep an employee or task leased.
+	for task: Dictionary in tasks.values():
+		if task.get("station_runtime") is Dictionary and not (task.get("station_runtime") as Dictionary).is_empty():
+			_release_station(task)
+			task.station_runtime = null
+			task.employee_id = ""
+			if String(task.get("state", "")) in ["reserved", "in_progress"]:
+				task.state = "queued"
+	for task: Dictionary in maintenance_tasks.values():
+		if task.get("station_runtime") is Dictionary and not (task.get("station_runtime") as Dictionary).is_empty():
+			_release_station(task)
+			task.station_runtime = null
+			task.employee_id = ""
+			if String(task.get("state", "")) in ["reserved", "in_progress"]:
+				task.state = "queued" if maintenance_task_is_actionable(task) else "cancelled"
 	stations.clear()
+	_update_staff_lease_diagnostics()
 
 
 func register_customer(customer: Node) -> void:
@@ -333,7 +403,11 @@ func complete_group_abandonment(
 	return completion
 
 
-func create_order(recipe_id: String, table_id: String, customer: Node) -> Dictionary:
+func create_order(recipe_id: String, table_id: String, customer: Node, idempotency_key: String = "") -> Dictionary:
+	if not idempotency_key.is_empty():
+		for existing: Dictionary in orders.values():
+			if existing.get("customer") == customer and String(existing.get("idempotency_key", "")) == idempotency_key:
+				return existing
 	var recipe: Dictionary = DataRegistry.recipes_by_id.get(recipe_id, {})
 	if recipe.is_empty():
 		return {}
@@ -352,6 +426,7 @@ func create_order(recipe_id: String, table_id: String, customer: Node) -> Dictio
 		"recipe_name": recipe.name,
 		"price": int(menu_state.get("price", recipe.get("price", 0))),
 		"customer": customer,
+		"idempotency_key": idempotency_key,
 		"created_at": GameState.service_seconds,
 		"priority": 1,
 		"suspended": false,
@@ -509,12 +584,15 @@ func claim_kitchen_task(employee: Dictionary, from_position: Variant = null) -> 
 				best_position = interaction_position
 	if best.is_empty():
 		return {}
+	var employee_id := String(employee.get("id", ""))
+	if not _acquire_staff_claim(best, "kitchen", employee_id, best_runtime, best_slot, best_position):
+		return {}
 	best.state = "reserved"
-	best.employee_id = String(employee.id)
+	best.employee_id = employee_id
 	best.station_runtime = best_runtime
 	best.interaction_slot = best_slot
 	best.interaction_position = best_position
-	best.station_runtime.reservations[best_slot] = String(employee.id)
+	best.station_runtime.reservations[best_slot] = employee_id
 	best.station_runtime.busy = best.station_runtime.reservations.size()
 	task_board_changed.emit()
 	return best
@@ -541,9 +619,9 @@ func begin_kitchen_task(task_id: String) -> bool:
 	if task.state != "reserved":
 		return false
 	if not _station_reservation_is_owned(task):
+		_release_station(task)
 		task.state = "queued"
 		task.employee_id = ""
-		_release_station(task)
 		task.station_runtime = null
 		task_board_changed.emit()
 		return false
@@ -837,6 +915,7 @@ func cancel_employee_task(employee_id: String) -> void:
 	for task_id: String in service_tasks:
 		var service_task: Dictionary = service_tasks.get(task_id, {})
 		if String(service_task.get("employee_id", "")) == employee_id and String(service_task.get("state", "")) in ["reserved", "in_progress"]:
+			_release_task_leases(service_task)
 			service_task.state = "queued" if service_task_is_actionable(service_task) else "cancelled"
 			service_task.employee_id = ""
 			if service_task.state == "cancelled":
@@ -923,8 +1002,11 @@ func claim_service_task(employee: Dictionary, from_position: Variant = null) -> 
 			best = task
 	if best.is_empty():
 		return {}
+	var employee_id := String(employee.get("id", ""))
+	if not _acquire_staff_claim(best, "service", employee_id, {}, -1, Vector3(best.get("target", Vector3.ZERO))):
+		return {}
 	best.state = "reserved"
-	best.employee_id = String(employee.id)
+	best.employee_id = employee_id
 	return best
 
 
@@ -932,8 +1014,9 @@ func begin_service_task(task_id: String) -> bool:
 	if not service_tasks.has(task_id):
 		return false
 	var task: Dictionary = service_tasks[task_id]
-	if String(task.get("state", "")) != "reserved" or not service_task_is_actionable(task):
+	if String(task.get("state", "")) != "reserved" or not service_task_is_actionable(task) or not service_task_reservation_is_valid(task_id, String(task.get("employee_id", ""))):
 		if String(task.get("state", "")) == "reserved":
+			_release_task_leases(task)
 			task.state = "cancelled"
 			task.employee_id = ""
 			task.finished_at = GameState.service_seconds
@@ -949,11 +1032,13 @@ func complete_service_task(task_id: String) -> void:
 	if String(task.get("state", "")) not in ["reserved", "in_progress"]:
 		return
 	if not service_task_is_actionable(task):
+		_release_task_leases(task)
 		task.state = "cancelled"
 		task.employee_id = ""
 		task.finished_at = GameState.service_seconds
 		task_board_changed.emit()
 		return
+	_release_task_leases(task)
 	task.state = "completed"
 	task.finished_at = GameState.service_seconds
 	var employee_id := String(task.get("employee_id", ""))
@@ -985,6 +1070,17 @@ func service_task_is_actionable(task: Dictionary) -> bool:
 	if customer.has_method("accepts_service_action"):
 		return customer.accepts_service_action(String(task.get("action", "")), task.get("payload", {}))
 	return true
+
+
+func service_task_reservation_is_valid(task_id: String, employee_id: String) -> bool:
+	if not service_tasks.has(task_id) or employee_id.is_empty():
+		return false
+	var task: Dictionary = service_tasks[task_id]
+	return (
+		String(task.get("employee_id", "")) == employee_id
+		and String(task.get("state", "")) in ["reserved", "in_progress"]
+		and _staff_bundle_is_owned(task)
+	)
 
 
 func request_maintenance_task(owner: Node, action: String, target: Vector3, payload: Dictionary = {}, priority: int = 1, duration: float = 1.5, tool_model: String = "") -> Dictionary:
@@ -1038,6 +1134,7 @@ func claim_maintenance_task(employee: Dictionary, from_position: Variant = null)
 	var best_runtime: Dictionary = {}
 	var best_slot := -1
 	var best_position := Vector3.ZERO
+	var best_allows_adjacent := false
 	for task_id: String in maintenance_tasks:
 		var task: Dictionary = maintenance_tasks.get(task_id, {})
 		if task.is_empty() or String(task.get("state", "")) != "queued":
@@ -1050,8 +1147,7 @@ func claim_maintenance_task(employee: Dictionary, from_position: Variant = null)
 		var station_id := String(task.get("station", ""))
 		if station_id.is_empty():
 			var target := Vector3(task.get("target", Vector3.ZERO))
-			if world != null and world.has_method("is_work_position_available") and not world.is_work_position_available(target, String(employee.get("id", ""))):
-				continue
+			var target_available := world == null or not world.has_method("is_work_position_available") or bool(world.call("is_work_position_available", target, String(employee.get("id", ""))))
 			if from_position is Vector3 and world != null and world.has_method("find_path") and world.find_path(Vector3(from_position), target).is_empty():
 				continue
 			var candidate := float(task.get("priority", 1)) * 100.0 + GameState.service_seconds - float(task.get("created_at", 0.0))
@@ -1070,6 +1166,7 @@ func claim_maintenance_task(employee: Dictionary, from_position: Variant = null)
 				best_runtime = {}
 				best_slot = -1
 				best_position = target
+				best_allows_adjacent = not target_available
 			continue
 		for runtime: Dictionary in stations.get(station_id, []):
 			var slot := _free_station_slot(runtime)
@@ -1099,16 +1196,21 @@ func claim_maintenance_task(employee: Dictionary, from_position: Variant = null)
 				best_runtime = runtime
 				best_slot = slot
 				best_position = interaction_position
+				best_allows_adjacent = false
 	if best.is_empty():
 		return {}
+	var employee_id := String(employee.get("id", ""))
+	if not _acquire_staff_claim(best, "maintenance", employee_id, best_runtime, best_slot, best_position):
+		return {}
 	best.state = "reserved"
-	best.employee_id = String(employee.get("id", ""))
+	best.employee_id = employee_id
 	best.target = best_position
+	best.allow_adjacent_interaction = best_allows_adjacent
 	if not best_runtime.is_empty():
 		best.station_runtime = best_runtime
 		best.interaction_slot = best_slot
 		best.interaction_position = best_position
-		best.station_runtime.reservations[best_slot] = String(employee.get("id", ""))
+		best.station_runtime.reservations[best_slot] = employee_id
 		best.station_runtime.busy = best.station_runtime.reservations.size()
 	task_board_changed.emit()
 	return best
@@ -1176,8 +1278,10 @@ func maintenance_task_reservation_is_valid(task_id: String, employee_id: String)
 	var task: Dictionary = maintenance_tasks[task_id]
 	if String(task.get("employee_id", "")) != employee_id:
 		return false
+	if String(task.get("state", "")) not in ["reserved", "in_progress"] or not _staff_bundle_is_owned(task):
+		return false
 	if String(task.get("station", "")).is_empty():
-		return String(task.get("state", "")) in ["reserved", "in_progress"]
+		return true
 	return _station_reservation_is_owned(task)
 
 
@@ -1209,22 +1313,19 @@ func _cancel_maintenance_record(task: Dictionary, notify_owner: bool) -> void:
 func _maintenance_key_is_reserved(key: String) -> bool:
 	if key.is_empty():
 		return false
-	for task: Dictionary in maintenance_tasks.values():
-		if String(task.get("reservation_key", "")) == key and String(task.get("state", "")) in ["reserved", "in_progress"]:
-			return true
-	return false
+	return staff_leases.owner_of(_maintenance_slot_lease_id(key)) != null
 
 
 func _service_key_is_reserved(key: String) -> bool:
-	for task: Dictionary in service_tasks.values():
-		if String(task.get("reservation_key", "")) == key and String(task.get("state", "")) in ["reserved", "in_progress"]:
-			return true
-	return false
+	if key.is_empty():
+		return false
+	return staff_leases.owner_of(_service_slot_lease_id(key)) != null
 
 
 func cancel_customer_work(customer: Node) -> void:
 	for service_task: Dictionary in service_tasks.values():
 		if service_task.get("customer") == customer and String(service_task.get("state", "")) not in ["completed", "cancelled"]:
+			_release_task_leases(service_task)
 			service_task.state = "cancelled"
 			service_task.employee_id = ""
 			service_task.finished_at = GameState.service_seconds
@@ -1508,7 +1609,7 @@ func get_station_position(runtime: Dictionary) -> Vector3:
 
 func _find_free_station(station_id: String) -> Dictionary:
 	for runtime: Dictionary in stations.get(station_id, []):
-		if is_instance_valid(runtime.node) and (not runtime.node.has_method("is_operational") or bool(runtime.node.is_operational())) and int(runtime.busy) < int(runtime.capacity):
+		if is_instance_valid(runtime.node) and (not runtime.node.has_method("is_operational") or bool(runtime.node.is_operational())) and _free_station_slot(runtime) >= 0:
 			return runtime
 	return {}
 
@@ -1522,18 +1623,26 @@ func _free_station_slot(runtime: Dictionary) -> int:
 	var reservations: Dictionary = runtime.get("reservations", {})
 	var positions: Array = runtime.get("interaction_positions", [])
 	for slot: int in mini(int(runtime.get("capacity", 1)), positions.size()):
-		if not reservations.has(slot):
+		var lease_id := _station_slot_lease_id(runtime, slot)
+		var lease_owner: Variant = staff_leases.owner_of(lease_id)
+		if lease_owner == null:
+			reservations.erase(slot)
+			runtime.busy = reservations.size()
 			return slot
+		reservations[slot] = String(lease_owner)
+	runtime.busy = reservations.size()
 	return -1
 
 
 func _release_station(task: Dictionary) -> void:
-	if task.station_runtime:
+	_release_task_leases(task)
+	if task.get("station_runtime") is Dictionary and not (task.get("station_runtime") as Dictionary).is_empty():
+		var runtime: Dictionary = task.get("station_runtime")
 		var slot := int(task.get("interaction_slot", -1))
 		var owner_id := String(task.get("employee_id", ""))
-		if slot >= 0 and String(task.station_runtime.reservations.get(slot, "")) == owner_id:
-			task.station_runtime.reservations.erase(slot)
-		task.station_runtime.busy = task.station_runtime.reservations.size()
+		if slot >= 0 and String(runtime.get("reservations", {}).get(slot, "")) == owner_id:
+			runtime.reservations.erase(slot)
+		runtime.busy = runtime.reservations.size()
 		task.erase("interaction_slot")
 		task.erase("interaction_position")
 
@@ -1553,7 +1662,193 @@ func _station_reservation_is_owned(task: Dictionary) -> bool:
 	var employee_id := String(task.get("employee_id", ""))
 	if slot < 0 or employee_id.is_empty():
 		return false
-	return String((runtime as Dictionary).get("reservations", {}).get(slot, "")) == employee_id
+	var lease_id := _station_slot_lease_id(runtime as Dictionary, slot)
+	if not staff_leases.owns(lease_id, employee_id) or not _staff_bundle_is_owned(task):
+		return false
+	# Keep the legacy runtime dictionary as a read-only-compatible mirror for
+	# station metrics and existing presentation code.
+	(runtime as Dictionary).reservations[slot] = employee_id
+	(runtime as Dictionary).busy = (runtime as Dictionary).reservations.size()
+	return true
+
+
+func _acquire_staff_claim(
+	task: Dictionary,
+	task_kind: String,
+	employee_id: String,
+	runtime: Dictionary = {},
+	slot: int = -1,
+	target: Vector3 = Vector3.ZERO
+) -> bool:
+	var task_id := String(task.get("id", ""))
+	if task_id.is_empty() or employee_id.is_empty():
+		return false
+	var employee_lease_id := _employee_slot_lease_id(employee_id)
+	var current_employee_owner: Variant = staff_leases.owner_of(employee_lease_id)
+	if current_employee_owner != null:
+		var current_assignment := staff_leases.metadata_for(employee_lease_id)
+		if String(current_assignment.get("task_id", "")) != task_id or String(current_assignment.get("task_kind", "")) != task_kind:
+			RuntimeDiagnostics.record_lease_conflict()
+			RuntimeDiagnostics.record_counter("staff_employee_double_claims")
+			return false
+	var lease_ids: Array = [
+		employee_lease_id,
+		_staff_task_lease_id(task_kind, task_id),
+	]
+	var metadata: Dictionary = {
+		lease_ids[0]: {"kind": "employee_slot", "task_kind": task_kind, "task_id": task_id, "employee_id": employee_id},
+		lease_ids[1]: {"kind": "staff_task", "task_kind": task_kind, "task_id": task_id, "employee_id": employee_id},
+	}
+	if not runtime.is_empty() and slot >= 0:
+		var station_lease := _station_slot_lease_id(runtime, slot)
+		if station_lease.is_empty():
+			return false
+		lease_ids.append(station_lease)
+		metadata[station_lease] = {"kind": "station_slot", "task_kind": task_kind, "task_id": task_id, "employee_id": employee_id, "slot": slot}
+	elif task_kind == "kitchen":
+		return false
+	if task_kind == "service":
+		var service_lease := _service_slot_lease_id(String(task.get("reservation_key", task_id)))
+		lease_ids.append(service_lease)
+		metadata[service_lease] = {"kind": "service_slot", "task_kind": task_kind, "task_id": task_id, "employee_id": employee_id}
+	elif task_kind == "maintenance":
+		var maintenance_lease := _maintenance_slot_lease_id(String(task.get("reservation_key", task_id)))
+		lease_ids.append(maintenance_lease)
+		metadata[maintenance_lease] = {"kind": "maintenance_slot", "task_kind": task_kind, "task_id": task_id, "employee_id": employee_id}
+		if runtime.is_empty():
+			var work_cell_lease := _work_cell_lease_id(target)
+			lease_ids.append(work_cell_lease)
+			metadata[work_cell_lease] = {"kind": "work_cell", "task_kind": task_kind, "task_id": task_id, "employee_id": employee_id}
+	if not staff_leases.try_acquire_many(lease_ids, employee_id, -1.0, 0.0, metadata):
+		RuntimeDiagnostics.record_lease_conflict()
+		RuntimeDiagnostics.record_counter("staff_claim_conflicts")
+		_update_staff_lease_diagnostics()
+		return false
+	task.runtime_lease_ids = lease_ids.map(func(value: Variant): return String(value))
+	task.runtime_lease_owner = employee_id
+	task.runtime_lease_kind = task_kind
+	RuntimeDiagnostics.record_counter("staff_claims")
+	_update_staff_lease_diagnostics()
+	return true
+
+
+func _release_task_leases(task: Dictionary) -> void:
+	if task.is_empty():
+		return
+	var lease_ids: Array = task.get("runtime_lease_ids", [])
+	var owner_id := String(task.get("runtime_lease_owner", task.get("employee_id", "")))
+	if not lease_ids.is_empty() and not owner_id.is_empty():
+		if not staff_leases.release_many(lease_ids, owner_id):
+			RuntimeDiagnostics.record_counter("staff_lease_release_conflicts")
+		else:
+			RuntimeDiagnostics.record_counter("staff_releases")
+	task.erase("runtime_lease_ids")
+	task.erase("runtime_lease_owner")
+	task.erase("runtime_lease_kind")
+	_update_staff_lease_diagnostics()
+
+
+func _staff_bundle_is_owned(task: Dictionary) -> bool:
+	var owner_id := String(task.get("runtime_lease_owner", task.get("employee_id", "")))
+	var lease_ids: Array = task.get("runtime_lease_ids", [])
+	if owner_id.is_empty() or lease_ids.size() < 2:
+		return false
+	for lease_value: Variant in lease_ids:
+		if not staff_leases.owns(StringName(String(lease_value)), owner_id):
+			return false
+	return true
+
+
+func _employee_slot_lease_id(employee_id: String) -> StringName:
+	return StringName("staff:employee:%s" % employee_id)
+
+
+func _staff_task_lease_id(task_kind: String, task_id: String) -> StringName:
+	return StringName("staff:task:%s:%s" % [task_kind, task_id])
+
+
+func _station_slot_lease_id(runtime: Dictionary, slot: int) -> StringName:
+	var station_node := runtime.get("node") as Node
+	if station_node == null or not is_instance_valid(station_node) or slot < 0:
+		return &""
+	return StringName("staff:station:%d:%d" % [station_node.get_instance_id(), slot])
+
+
+func _service_slot_lease_id(reservation_key: String) -> StringName:
+	return StringName("staff:service:%s" % reservation_key)
+
+
+func _maintenance_slot_lease_id(reservation_key: String) -> StringName:
+	return StringName("staff:maintenance:%s" % reservation_key)
+
+
+func _work_cell_lease_id(target: Vector3) -> StringName:
+	# Half-metre buckets are narrow enough to represent a single reachable work
+	# stance while tolerating tiny floating point differences between callers.
+	return StringName("staff:workcell:%d:%d" % [roundi(target.x * 2.0), roundi(target.z * 2.0)])
+
+
+func staff_lease_snapshot() -> Dictionary:
+	return staff_leases.diagnostic_summary()
+
+
+func _update_staff_lease_diagnostics() -> void:
+	var diagnostic := staff_leases.diagnostic_summary()
+	var by_kind: Dictionary = diagnostic.get("by_kind", {})
+	RuntimeDiagnostics.set_gauge("staff_runtime_leases", int(diagnostic.get("active", 0)))
+	RuntimeDiagnostics.set_gauge("staff_task_leases", int(by_kind.get("staff_task", 0)))
+	RuntimeDiagnostics.set_gauge("staff_station_leases", int(by_kind.get("station_slot", 0)))
+	RuntimeDiagnostics.set_gauge("staff_service_leases", int(by_kind.get("service_slot", 0)))
+	RuntimeDiagnostics.set_gauge("staff_work_cell_leases", int(by_kind.get("work_cell", 0)))
+
+
+func _audit_staff_leases() -> void:
+	staff_leases.cleanup()
+	var active_task_ids: Dictionary = {}
+	for board_entry: Dictionary in [tasks, service_tasks, maintenance_tasks]:
+		for task_value: Variant in board_entry.values():
+			if not task_value is Dictionary:
+				continue
+			var task := task_value as Dictionary
+			if String(task.get("state", "")) not in ["reserved", "in_progress"]:
+				if not (task.get("runtime_lease_ids", []) as Array).is_empty():
+					_release_station(task)
+					task.employee_id = ""
+				continue
+			var kind := String(task.get("runtime_lease_kind", "kitchen" if task.has("order_id") else "maintenance" if String(task.get("task_kind", "")) == "maintenance" else "service"))
+			if not _staff_bundle_is_owned(task):
+				_invalidate_staff_claim(task, kind)
+				continue
+			active_task_ids["%s:%s" % [kind, String(task.get("id", ""))]] = true
+	var reclaimed := 0
+	var lease_records := staff_leases.records_snapshot()
+	for lease_id: Variant in lease_records:
+		var record: Dictionary = lease_records[lease_id]
+		var lease_metadata: Dictionary = record.get("metadata", {})
+		var task_kind := String(lease_metadata.get("task_kind", ""))
+		var task_id := String(lease_metadata.get("task_id", ""))
+		if task_kind.is_empty() or task_id.is_empty() or active_task_ids.has("%s:%s" % [task_kind, task_id]):
+			continue
+		if staff_leases.release(StringName(String(lease_id)), record.get("owner")):
+			reclaimed += 1
+	if reclaimed > 0:
+		RuntimeDiagnostics.record_counter("staff_ghost_leases_reclaimed", reclaimed)
+	_update_staff_lease_diagnostics()
+
+
+func _invalidate_staff_claim(task: Dictionary, task_kind: String) -> void:
+	_release_station(task)
+	task.station_runtime = null
+	task.employee_id = ""
+	match task_kind:
+		"service":
+			task.state = "queued" if service_task_is_actionable(task) else "cancelled"
+		"maintenance":
+			task.state = "queued" if maintenance_task_is_actionable(task) else "cancelled"
+		_:
+			var order: Dictionary = orders.get(String(task.get("order_id", "")), {})
+			task.state = "queued" if not order.is_empty() and String(order.get("state", "")) not in ["cancelled", "paid"] else "cancelled"
+	RuntimeDiagnostics.record_counter("staff_invalid_claims_repaired")
 
 
 func _stock_available(requirements: Dictionary) -> bool:
@@ -1657,8 +1952,13 @@ func reset_service_stats() -> void:
 	# service is restarted without rebuilding the restaurant scene.
 	for order_id: String in orders:
 		StorageManager.release_order(order_id)
+	for task: Dictionary in tasks.values():
+		_release_station(task)
+	for service_task: Dictionary in service_tasks.values():
+		_release_task_leases(service_task)
 	for maintenance_task: Dictionary in maintenance_tasks.values():
 		_release_station(maintenance_task)
+	staff_leases.clear()
 	stats = {
 		"revenue": 0,
 		"ingredient_cost": 0.0,
@@ -1678,6 +1978,7 @@ func reset_service_stats() -> void:
 	maintenance_tasks.clear()
 	_simulation_tick_accumulator = 0.0
 	_maintenance_clock = 0.0
+	_update_staff_lease_diagnostics()
 	_staff_performance().reset()
 	statistics_changed.emit()
 
@@ -1690,6 +1991,7 @@ func _prune_completed_work(force: bool = false) -> void:
 			continue
 		var finished_at := float(service_task.get("finished_at", service_task.get("created_at", now)))
 		if force or now - finished_at >= COMPLETED_WORK_RETENTION:
+			_release_task_leases(service_task)
 			service_tasks.erase(service_id)
 	for maintenance_id: String in maintenance_tasks.keys():
 		var maintenance_task: Dictionary = maintenance_tasks.get(maintenance_id, {})
@@ -1699,6 +2001,7 @@ func _prune_completed_work(force: bool = false) -> void:
 			continue
 		var finished_at := float(maintenance_task.get("finished_at", maintenance_task.get("created_at", now)))
 		if force or now - finished_at >= COMPLETED_WORK_RETENTION:
+			_release_station(maintenance_task)
 			maintenance_tasks.erase(maintenance_id)
 	for order_id: String in orders.keys():
 		var order: Dictionary = orders.get(order_id, {})
@@ -1708,6 +2011,8 @@ func _prune_completed_work(force: bool = false) -> void:
 		if not force and now - finished_at < COMPLETED_WORK_RETENTION:
 			continue
 		for task_id: String in order.get("task_ids", []):
+			if tasks.has(task_id):
+				_release_station(tasks[task_id])
 			tasks.erase(task_id)
 		orders.erase(order_id)
 

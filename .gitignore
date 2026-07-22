@@ -1,6 +1,11 @@
 .godot/
+.godot-bin/
+.godot-appdata/
+/release-evidence/
 *.tmp
 *.bak
 save_debug/
 *.log
 /builds/
+__pycache__/
+*.pyc

@@ -1,5 +1,7 @@
 extends Node
 
+const SERVICE_STRESS_FIXTURE := preload("res://tests/fixtures/service_stress_fixture.gd")
+
 var failures: Array[String] = []
 
 
@@ -10,6 +12,7 @@ func _ready() -> void:
 	var main := main_scene.instantiate()
 	add_child(main)
 	GameState.reset_to_defaults(false)
+	SERVICE_STRESS_FIXTURE.apply()
 	main.world.load_layout()
 	main.world.spawn_staff()
 	# This test advances the simulation manually inside _ready(), so the normal

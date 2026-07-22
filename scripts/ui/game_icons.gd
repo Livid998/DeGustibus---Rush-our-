@@ -66,6 +66,7 @@ const CASUAL_SYSTEM_TEXTURES := {
 	),
 }
 static var _scaled_cache: Dictionary = {}
+static var _fallback_texture: Texture2D
 
 const NAVIGATION_INDICES := {
 	"Ristorante": 0,
@@ -163,7 +164,8 @@ static func restaurant_edit_icon() -> Texture2D:
 
 
 static func casual_system_icon(icon_id: String) -> Texture2D:
-	return CASUAL_SYSTEM_TEXTURES.get(icon_id) as Texture2D
+	var texture := CASUAL_SYSTEM_TEXTURES.get(icon_id) as Texture2D
+	return texture if texture != null else fallback_icon()
 
 
 static func rarity_icon(rarity: int) -> Texture2D:
@@ -172,6 +174,24 @@ static func rarity_icon(rarity: int) -> Texture2D:
 
 static func speed_icon(index: int) -> Texture2D:
 	return SPEED_TEXTURES[clampi(index, 0, SPEED_TEXTURES.size() - 1)]
+
+
+static func fallback_icon() -> Texture2D:
+	if _fallback_texture != null:
+		return _fallback_texture
+	var image := Image.create(64, 64, false, Image.FORMAT_RGBA8)
+	image.fill(Color(0, 0, 0, 0))
+	var center := Vector2(31.5, 31.5)
+	for y: int in 64:
+		for x: int in 64:
+			var point := Vector2(x, y)
+			var diamond_distance := absf(point.x - center.x) + absf(point.y - center.y)
+			if diamond_distance <= 23.0:
+				image.set_pixel(x, y, Color("fff4da") if diamond_distance < 18.0 else Color("173f45"))
+			if point.distance_to(center) <= 5.0:
+				image.set_pixel(x, y, Color("df8e26"))
+	_fallback_texture = ImageTexture.create_from_image(image)
+	return _fallback_texture
 
 
 static func scaled_icon(texture: Texture2D, size: int) -> Texture2D:
@@ -191,9 +211,11 @@ static func scaled_icon(texture: Texture2D, size: int) -> Texture2D:
 
 static func _slice(sheet: Texture2D, index: int, columns: int, rows: int) -> AtlasTexture:
 	var icon := AtlasTexture.new()
-	icon.atlas = sheet
-	if index < 0 or index >= columns * rows:
+	if sheet == null or index < 0 or index >= columns * rows:
+		icon.atlas = fallback_icon()
+		icon.region = Rect2(Vector2.ZERO, Vector2(64, 64))
 		return icon
+	icon.atlas = sheet
 	var cell_size := Vector2(
 		float(sheet.get_width()) / float(columns),
 		float(sheet.get_height()) / float(rows)

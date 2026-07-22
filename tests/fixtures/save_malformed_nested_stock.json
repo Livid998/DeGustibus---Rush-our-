@@ -1,0 +1,11 @@
+{
+  "save_version": 12,
+  "money": 999999,
+  "stock": {
+    "tomato": {
+      "amount": ["not", "a", "number"],
+      "unlocked": true
+    }
+  },
+  "menu": {}
+}

@@ -4,6 +4,31 @@ extends AnimatedAgent
 const TABLE_WAIT_PATIENCE_MULTIPLIER := 1.75
 const EXIT_STAND_STAGGER := 0.18
 const EXIT_LANE_SPACING := 0.68
+const DECISION_STEP := 0.10
+const MAX_DECISION_TICKS_PER_FRAME := 8
+
+const LIFECYCLE_QUEUE := "queue"
+const LIFECYCLE_ENTER := "enter"
+const LIFECYCLE_TABLE := "table"
+const LIFECYCLE_SEATING := "seating"
+const LIFECYCLE_ORDER := "order"
+const LIFECYCLE_WAIT_FOOD := "wait_food"
+const LIFECYCLE_EATING := "eating"
+const LIFECYCLE_PAYMENT := "payment"
+const LIFECYCLE_LEAVING := "leaving"
+const LIFECYCLE_DESPAWN := "despawn"
+const LIFECYCLE_RANKS := {
+	LIFECYCLE_QUEUE: 0,
+	LIFECYCLE_ENTER: 1,
+	LIFECYCLE_TABLE: 2,
+	LIFECYCLE_SEATING: 3,
+	LIFECYCLE_ORDER: 4,
+	LIFECYCLE_WAIT_FOOD: 5,
+	LIFECYCLE_EATING: 6,
+	LIFECYCLE_PAYMENT: 7,
+	LIFECYCLE_LEAVING: 8,
+	LIFECYCLE_DESPAWN: 9,
+}
 
 ## Party controller.  Every visible guest is a CustomerPersonAgent with its own
 ## body, route and animation timeline; this node owns only the shared table,
@@ -28,6 +53,9 @@ var group_models: Array[Node3D] = []
 var people: Array[CustomerPersonAgent] = []
 var dish_models: Dictionary = {}
 var group_experience: Dictionary = {}
+var lifecycle_state := LIFECYCLE_QUEUE
+var lifecycle_history: Array[String] = []
+var decision_tick_count := 0
 
 var _thought: Label3D
 var _registered := false
@@ -65,6 +93,14 @@ var _quality_scores: Array[float] = []
 var _service_scores: Array[float] = []
 var _ambience_poll_clock := 0.0
 var _seen_pest_incidents: Dictionary = {}
+var _order_commit_token := ""
+var _table_release_committed := false
+var _departure_finished := false
+var _decision_accumulator := 0.0
+var _decision_phase_offset := 0.0
+var _service_request_attempts := 0
+
+static var _next_decision_slot := 0
 
 const CUSTOMER_APPEARANCES: Array[String] = [
 	"Casual_Male", "Casual_Female", "Casual2_Male", "Casual2_Female", "Casual3_Male", "Casual3_Female",
@@ -81,6 +117,15 @@ func setup(value_world: RestaurantWorld, size: int) -> void:
 	world = value_world
 	group_size = clampi(size, 1, 4)
 	name = "CustomerParty_%d_%d" % [Time.get_ticks_msec(), get_instance_id()]
+	_order_commit_token = "%s:%d" % [name, get_instance_id()]
+	lifecycle_state = LIFECYCLE_QUEUE
+	lifecycle_history.assign([LIFECYCLE_QUEUE])
+	_table_release_committed = false
+	_departure_finished = false
+	_decision_phase_offset = float(_next_decision_slot % 10) * (DECISION_STEP / 10.0)
+	_next_decision_slot += 1
+	_decision_accumulator = DECISION_STEP - _decision_phase_offset if _decision_phase_offset > 0.0 else 0.0
+	decision_tick_count = 0
 	customer_type = ["lavoratore", "famiglia", "studente", "gourmet", "abituale"].pick_random()
 	patience = randf_range(58.0, 82.0)
 	budget = randi_range(22, 48)
@@ -99,12 +144,23 @@ func setup(value_world: RestaurantWorld, size: int) -> void:
 
 
 func _exit_tree() -> void:
-	if world != null:
+	var world_runtime_live := world != null and is_instance_valid(world) and world.is_inside_tree() and not world.is_queued_for_deletion()
+	if world_runtime_live:
 		world.dequeue_customer(self)
 		world.finish_customer_exit(self)
-		if not _dirty_transferred:
+		if _seated and not _dirty_transferred and not dish_models.is_empty() and _dishes_can_transfer():
+			_transfer_dirty_table()
+		elif not _dirty_transferred:
 			_clear_dishes()
-		world.release_table(self)
+		_release_table_reservation(false)
+	else:
+		# Scene teardown has no live restaurant to adopt table props. Free them
+		# locally and mark the release complete; during normal runtime the branch
+		# above still transfers dirty dishes exactly once.
+		_clear_dishes()
+		_dirty_transferred = true
+		_table_release_committed = true
+		table = {}
 	if _registered and SimulationManager.customers.has(self):
 		SimulationManager.unregister_customer(self, false)
 	_registered = false
@@ -116,34 +172,47 @@ func _exit_tree() -> void:
 
 func _process(delta: float) -> void:
 	var scaled := delta * SimulationManager.simulation_speed
-	state_elapsed += scaled
 	for person: CustomerPersonAgent in people:
 		if is_instance_valid(person):
 			person.tick_motion(scaled)
 	_update_controller_anchor()
+	if delta <= 0.0:
+		_decision_tick(0.0)
+		return
+	_decision_accumulator += scaled
+	var processed := 0
+	while _decision_accumulator + 0.000001 >= DECISION_STEP and processed < MAX_DECISION_TICKS_PER_FRAME:
+		_decision_accumulator -= DECISION_STEP
+		_decision_tick(DECISION_STEP)
+		processed += 1
+
+
+func _decision_tick(delta: float) -> void:
+	decision_tick_count += 1
+	state_elapsed += delta
 	if _seated and state in ["waiting_order", "waiting_food", "eating", "waiting_payment", "change_order"]:
-		_ambience_poll_clock -= scaled
+		_ambience_poll_clock -= delta
 		if _ambience_poll_clock <= 0.0:
 			_ambience_poll_clock = 0.5
 			_update_visible_pest_experience()
-	if GameState.restaurant_state == "closing" and state in ["queueing", "waiting_table", "admitting"] and not _seated:
+	if GameState.restaurant_state == "closing" and _must_leave_for_closing():
 		_leave_for_closing()
 	if state in ["queueing", "waiting_table", "waiting_order", "waiting_food", "eating", "waiting_payment"]:
-		wait_time += scaled
+		wait_time += delta
 		var pressure := clampf((state_elapsed - patience * 0.55) / maxf(patience, 1.0), 0.0, 1.0)
-		satisfaction = maxf(satisfaction - scaled * (0.0012 + pressure * 0.0055), 0.3)
+		satisfaction = maxf(satisfaction - delta * (0.0012 + pressure * 0.0055), 0.3)
 	match state:
 		"queueing", "waiting_table":
-			_update_queue(scaled)
+			_update_queue(delta)
 		"admitting", "walking_to_table", "seating":
-			_update_admission_and_seating(scaled)
+			_update_admission_and_seating(delta)
 		"waiting_order":
 			_set_people_mode("conversation", false)
 			if state_elapsed > patience * 1.45:
 				_leave_lost("NESSUN CAMERIERE")
 		"waiting_food", "eating":
-			_update_dining(scaled)
-			if state == "waiting_food" and state_elapsed > patience * 2.4:
+			_update_dining(delta)
+			if served_order_ids.size() < orders.size() and state_elapsed > patience * 2.4:
 				_leave_lost("TROPPA ATTESA")
 		"waiting_payment":
 			_set_people_mode("conversation", false)
@@ -157,7 +226,7 @@ func _process(delta: float) -> void:
 			if world.try_begin_customer_exit(self):
 				_begin_exit_sequence()
 		"leaving":
-			_update_exit_sequence(scaled)
+			_update_exit_sequence(delta)
 
 
 func _build_people() -> void:
@@ -252,6 +321,9 @@ func _begin_admission() -> void:
 	_entry_leg_elapsed = 0.0
 	_thought.visible = false
 	_set_state("admitting")
+	# The traffic coordinator has granted the doorway to this party.  Play one
+	# transition cue for the whole group instead of one sound per moving body.
+	AudioManager.play_sfx("door")
 
 
 func _update_admission_and_seating(delta: float) -> void:
@@ -282,10 +354,16 @@ func _update_admission_and_seating(delta: float) -> void:
 		elif entering_person.phase == "route_failed":
 			var retry_target := world.customer_inside_door_position(_launch_cursor) if entering_person.target_tag == entry_tag else world.customer_outside_door_position(_launch_cursor)
 			_entry_leg_failures += 1
-			if _entry_leg_failures >= 2 or _entry_leg_elapsed >= 4.5:
-				_force_person_checkpoint(entering_person, retry_target, entering_person.target_tag)
+			if _entry_leg_elapsed >= AgentTrafficCoordinator.HARD_CANCEL_SECONDS:
+				# Admission is optional; crossing furniture to save it is not. Cancel
+				# the failed destination and let the whole party leave from its current
+				# physical positions through the normal exit planner.
+				entering_person.cancel_destination("customer_entry_timeout")
+				_leave_lost("INGRESSO BLOCCATO")
+				return
+			if _entry_leg_failures >= 2:
+				_retry_person_checkpoint(entering_person, retry_target, entering_person.target_tag)
 				_entry_leg_failures = 0
-				_entry_leg_elapsed = 0.0
 			else:
 				entering_person.walk_to_position(retry_target, entering_person.target_tag, 0.18)
 	if not _door_released and _launch_cursor == people.size():
@@ -328,12 +406,10 @@ func _complete_seating() -> void:
 
 
 func _return_to_queue() -> void:
-	world.finish_customer_entry(self)
-	world.release_table(self)
-	table = {}
-	world.enqueue_customer(self)
-	_set_state("queueing")
-	_refresh_queue_targets(true)
+	# Once admission has begun, returning to the public queue would permit the
+	# same party to reserve and sit at another table. A lost reservation is a
+	# controlled abandonment instead, preserving the monotone lifecycle.
+	_leave_lost("TAVOLO NON DISPONIBILE")
 
 
 func order_requires_change(order_id: String, _reason: String = "") -> void:
@@ -364,7 +440,13 @@ func service_completed(action: String, payload: Dictionary) -> void:
 					var recipe := _choose_recipe(excluded)
 					if recipe.is_empty():
 						break
-					var order := SimulationManager.create_order(recipe.id, String(table.get("uid", "")), self)
+					var order_slot := "%s:%d" % [_order_commit_token, guest_index]
+					var order := SimulationManager.create_order(
+						recipe.id,
+						String(table.get("uid", "")),
+						self,
+						order_slot
+					)
 					if not order.is_empty():
 						order.diner_index = guest_index
 						order.customer_budget = budget
@@ -375,6 +457,9 @@ func service_completed(action: String, payload: Dictionary) -> void:
 			if orders.size() != group_size:
 				_leave_lost("MENU NON DISPONIBILE")
 				return
+			# A ticket exists only after every diner obtained an authoritative order.
+			# Replayed service callbacks are rejected by _take_order_committed above.
+			AudioManager.play_sfx("order_ticket")
 			_set_state("waiting_food")
 			_thought.text = "%d COMANDE" % orders.size()
 		"serve":
@@ -495,6 +580,7 @@ func accepts_service_action(action: String, payload: Dictionary = {}) -> bool:
 
 
 func _request_service_once(action: String, payload: Dictionary = {}) -> void:
+	_service_request_attempts += 1
 	var previous_id := String(_service_request_ids.get(action, ""))
 	if not previous_id.is_empty() and SimulationManager.service_tasks.has(previous_id):
 		var previous: Dictionary = SimulationManager.service_tasks[previous_id]
@@ -535,7 +621,7 @@ func _choose_recipe(excluded: Dictionary = {}) -> Dictionary:
 
 
 func _leave_lost(message: String) -> void:
-	if state in ["standing_to_leave", "waiting_exit_door", "leaving"]:
+	if lifecycle_state in [LIFECYCLE_LEAVING, LIFECYCLE_DESPAWN]:
 		return
 	_thought.text = message
 	_thought.visible = true
@@ -545,22 +631,34 @@ func _leave_lost(message: String) -> void:
 
 
 func _leave_for_closing() -> void:
-	if state in ["standing_to_leave", "waiting_exit_door", "leaving"]:
+	if lifecycle_state in [LIFECYCLE_LEAVING, LIFECYCLE_DESPAWN]:
 		return
 	_thought.text = "CHIUSURA"
 	_thought.visible = true
+	_finalize_abandoned_review()
 	SimulationManager.cancel_customer_work(self)
 	_begin_leaving(false)
 
 
+func _must_leave_for_closing() -> bool:
+	if lifecycle_state in [LIFECYCLE_LEAVING, LIFECYCLE_DESPAWN]:
+		return false
+	if not _seated:
+		return true
+	# A fully served party is allowed to finish eating and pay. Everyone else
+	# leaves through the normal route so closing cannot retain unserved guests.
+	return orders.is_empty() or served_order_ids.size() < orders.size()
+
+
 func _begin_leaving(lost: bool) -> void:
+	if lifecycle_state in [LIFECYCLE_LEAVING, LIFECYCLE_DESPAWN]:
+		return
 	_lost_departure = _lost_departure or lost
 	world.dequeue_customer(self)
 	_thought.visible = false
 	if not _seated:
 		world.finish_customer_entry(self)
-		world.release_table(self)
-		table = {}
+		_release_table_reservation(false)
 		_outside_departure = true
 		_set_state("leaving")
 		_exit_member_states.clear()
@@ -596,6 +694,9 @@ func _begin_exit_sequence() -> void:
 			"failures": 0,
 			"lane": _exit_lane_offset(index),
 		}
+	# Exit ownership is granted once per party; member staggering must not ring
+	# the same door repeatedly.
+	AudioManager.play_sfx("door")
 	_set_state("leaving")
 	_update_exit_sequence(0.0)
 
@@ -646,6 +747,12 @@ func _update_exit_member(index: int, delta: float) -> void:
 		return
 	member_state.elapsed = float(member_state.get("elapsed", 0.0)) + maxf(delta, 0.0)
 	var stage := String(member_state.get("stage", "queued"))
+	if person.phase == "route_cancelled":
+		if _exit_sequence_elapsed >= float(member_state.get("retry_at", INF)):
+			var retry_checkpoint := _exit_checkpoint(index, stage)
+			if not retry_checkpoint.is_empty():
+				_retry_person_checkpoint(person, Vector3(retry_checkpoint.position), String(retry_checkpoint.tag))
+		return
 	match stage:
 		"queued":
 			if _exit_sequence_elapsed + 0.0001 >= float(member_state.get("launch_at", 0.0)):
@@ -691,6 +798,9 @@ func _update_outside_departure(delta: float) -> void:
 		var tag := _exit_tag("despawn", index)
 		if person.is_at(tag):
 			_mark_member_departed(index)
+		elif person.phase == "route_cancelled":
+			if _exit_sequence_elapsed >= float(member_state.get("retry_at", INF)):
+				_retry_person_checkpoint(person, _exit_gate_position(index), tag)
 		elif person.phase == "route_failed":
 			_recover_exit_member(index, person, member_state)
 		_exit_member_states[index] = member_state
@@ -702,11 +812,21 @@ func _recover_exit_member(index: int, person: CustomerPersonAgent, member_state:
 	if checkpoint.is_empty():
 		return
 	member_state.failures = int(member_state.get("failures", 0)) + 1
-	if int(member_state.failures) >= 2 or float(member_state.get("elapsed", 0.0)) >= 4.5:
-		_force_person_checkpoint(person, Vector3(checkpoint.position), String(checkpoint.tag))
-		member_state.failures = 0
-	else:
-		person.walk_to_position(Vector3(checkpoint.position), String(checkpoint.tag))
+	if float(member_state.get("elapsed", 0.0)) >= AgentTrafficCoordinator.HARD_CANCEL_SECONDS:
+		# A hard timeout invalidates only this route lease. The body remains at its
+		# real position and retries after a bounded backoff; no checkpoint teleport
+		# or collision bypass is permitted.
+		person.cancel_destination("customer_exit_timeout")
+		member_state.retry_at = _exit_sequence_elapsed + minf(0.45 + float(member_state.failures) * 0.20, 1.8)
+		member_state.elapsed = 0.0
+		RuntimeDiagnostics.record_event("customer_exit_retry", {
+			"party": String(name),
+			"member": index,
+			"stage": stage,
+			"failures": int(member_state.failures),
+		})
+		return
+	_retry_person_checkpoint(person, Vector3(checkpoint.position), String(checkpoint.tag))
 
 
 func _set_exit_member_stage(member_state: Dictionary, stage: String) -> void:
@@ -752,11 +872,9 @@ func _exit_gate_position(index: int) -> Vector3:
 func _release_exit_door_and_table() -> void:
 	if _door_released:
 		return
-	_transfer_dirty_table()
-	world.release_table(self)
+	_release_table_reservation(true)
 	world.finish_customer_exit(self)
 	_door_released = true
-	table = {}
 
 
 func _mark_member_departed(index: int) -> void:
@@ -768,37 +886,60 @@ func _mark_member_departed(index: int) -> void:
 		people[index].complete_individual_departure()
 
 
-func _force_person_checkpoint(person: CustomerPersonAgent, position: Vector3, tag: String) -> void:
-	# Last-resort watchdog for a physically clear, reserved doorway. It only
-	# activates after repeated path failures and prevents a stale body from
-	# keeping every table and the entrance locked indefinitely.
-	# The safe fallback can legitimately be an adjacent cell when another body
-	# occupies the exact checkpoint. Keep the navigation destination coherent
-	# with the actual fallback position so is_at(tag) can advance the FSM instead
-	# of leaving an "arrived" guest permanently short of its destination.
+func _retry_person_checkpoint(person: CustomerPersonAgent, position: Vector3, tag: String) -> bool:
+	if person == null or not is_instance_valid(person):
+		return false
 	var safe_position := world.find_safe_agent_position(position, person)
-	person.global_position = safe_position
-	person.destination = safe_position
-	person.target_tag = tag
-	person.phase = "arrived"
-	person.navigation_active = false
-	person.navigation_failed = false
-	person.velocity = Vector3.ZERO
-	person.play_animation("Idle")
+	# find_safe_agent_position chooses a reachable free endpoint; movement to it
+	# still goes through normal pathfinding from the body's current transform.
+	return person.walk_to_position(safe_position, tag, 0.12)
+
+
+func _force_person_checkpoint(person: CustomerPersonAgent, position: Vector3, tag: String) -> void:
+	# Backward-compatible diagnostic hook. Its old implementation teleported the
+	# body; callers now receive the same controlled route recovery as production.
+	_retry_person_checkpoint(person, position, tag)
 
 
 func _transfer_dirty_table() -> void:
 	if _dirty_transferred or table.is_empty() or dish_models.is_empty():
+		return
+	if world == null or not is_instance_valid(world) or not world.is_inside_tree() or world.is_queued_for_deletion() or not _dishes_can_transfer():
+		_clear_dishes()
+		_dirty_transferred = true
 		return
 	world.adopt_dirty_table(self, String(table.uid), dish_models.values())
 	dish_models.clear()
 	_dirty_transferred = true
 
 
+func _dishes_can_transfer() -> bool:
+	for dish_value: Variant in dish_models.values():
+		var dish := dish_value as Node3D
+		if dish == null or not is_instance_valid(dish) or not dish.is_inside_tree() or dish.is_queued_for_deletion():
+			return false
+	return true
+
+
+func _release_table_reservation(transfer_dirty: bool) -> void:
+	if _table_release_committed:
+		return
+	if transfer_dirty:
+		_transfer_dirty_table()
+	if world != null and not table.is_empty():
+		world.release_table(self)
+	_table_release_committed = true
+	table = {}
+
+
 func _finish_departure() -> void:
+	if _departure_finished:
+		return
+	_departure_finished = true
+	_set_state("despawn")
 	world.finish_customer_entry(self)
 	world.finish_customer_exit(self)
-	world.release_table(self)
+	_release_table_reservation(true)
 	# queue_free is deferred. Remove child bodies from traffic immediately so
 	# the next FIFO party never sees an already-departed invisible obstacle.
 	for person: CustomerPersonAgent in people:
@@ -975,9 +1116,25 @@ func _owns_reserved_table() -> bool:
 
 
 func _set_state(value: String, reset_elapsed: bool = true) -> void:
-	if state == "leaving" and value != "leaving": return
-	if state in ["standing_to_leave", "waiting_exit_door"] and value not in ["standing_to_leave", "waiting_exit_door", "leaving"]: return
-	if state == value and not reset_elapsed: return
+	var target_lifecycle := _canonical_lifecycle_for_state(value)
+	var current_rank := int(LIFECYCLE_RANKS.get(lifecycle_state, 0))
+	var target_rank := int(LIFECYCLE_RANKS.get(target_lifecycle, current_rank))
+	if target_rank < current_rank:
+		RuntimeDiagnostics.record_event("customer_lifecycle_regression_rejected", {
+			"party": String(name),
+			"from": lifecycle_state,
+			"to": target_lifecycle,
+			"requested_state": value,
+		})
+		return
+	if lifecycle_state == LIFECYCLE_DESPAWN and target_lifecycle != LIFECYCLE_DESPAWN:
+		return
+	# Replaying a completion callback must not reset patience or reopen work.
+	if state == value:
+		return
+	if target_rank > current_rank:
+		lifecycle_state = target_lifecycle
+		lifecycle_history.append(target_lifecycle)
 	state = value
 	if reset_elapsed: state_elapsed = 0.0
 	if not group_experience.is_empty():
@@ -992,6 +1149,51 @@ func _set_state(value: String, reset_elapsed: bool = true) -> void:
 		}.get(value, "")
 		if not String(experience_stage).is_empty():
 			SimulationManager.set_group_experience_stage(group_experience, String(experience_stage))
+
+
+func _canonical_lifecycle_for_state(value: String) -> String:
+	match value:
+		"queueing", "waiting_table":
+			return LIFECYCLE_QUEUE
+		"admitting":
+			return LIFECYCLE_ENTER
+		"walking_to_table":
+			return LIFECYCLE_TABLE
+		"seating":
+			return LIFECYCLE_SEATING
+		"waiting_order":
+			return LIFECYCLE_ORDER
+		"waiting_food":
+			return LIFECYCLE_WAIT_FOOD
+		"change_order":
+			# A changed ticket for a diner who has already started eating does not
+			# rewind the party's lifecycle.
+			return lifecycle_state if int(LIFECYCLE_RANKS.get(lifecycle_state, 0)) >= int(LIFECYCLE_RANKS[LIFECYCLE_EATING]) else LIFECYCLE_WAIT_FOOD
+		"eating":
+			return LIFECYCLE_EATING
+		"waiting_payment":
+			return LIFECYCLE_PAYMENT
+		"standing_to_leave", "waiting_exit_door", "leaving":
+			return LIFECYCLE_LEAVING
+		"despawn":
+			return LIFECYCLE_DESPAWN
+	return lifecycle_state
+
+
+func lifecycle_snapshot() -> Dictionary:
+	return {
+		"state": lifecycle_state,
+		"history": lifecycle_history.duplicate(),
+		"order_committed": _take_order_committed,
+		"payment_committed": _payment_committed,
+		"orders": orders.size(),
+		"served": served_order_ids.size(),
+		"seated": _seated,
+		"table_released": _table_release_committed,
+		"decision_ticks": decision_tick_count,
+		"decision_phase_offset": _decision_phase_offset,
+		"service_request_attempts": _service_request_attempts,
+	}
 
 
 func _record_service_score(payload: Dictionary) -> void:

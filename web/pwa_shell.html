@@ -195,10 +195,124 @@ const pwaInstallPromise = (
 	return null;
 }) : Promise.resolve(null);
 
+(function setupGodotRuntimeBridge() {
+	let lifecycleCallback = null;
+	let runtimeEventCallback = null;
+	const persistenceState = {
+		supported: Boolean(navigator.storage && navigator.storage.persist),
+		persisted: false,
+		state: 'checking',
+		last_error: '',
+	};
+
+	function callGodot(callback, eventName) {
+		if (typeof callback !== 'function') return;
+		try {
+			callback(eventName);
+		} catch (error) {
+			console.error('Godot lifecycle callback failed:', error);
+		}
+	}
+
+	async function requestPersistence() {
+		if (!persistenceState.supported) {
+			persistenceState.state = 'unsupported';
+			return false;
+		}
+		try {
+			const alreadyPersisted = await navigator.storage.persisted();
+			persistenceState.persisted = alreadyPersisted || await navigator.storage.persist();
+			persistenceState.state = persistenceState.persisted ? 'persistent' : 'best-effort';
+			persistenceState.last_error = '';
+			callGodot(lifecycleCallback, 'persistence-status');
+			return persistenceState.persisted;
+		} catch (error) {
+			persistenceState.persisted = false;
+			persistenceState.state = 'error';
+			persistenceState.last_error = String(error && error.message ? error.message : error);
+			callGodot(lifecycleCallback, 'persistence-status');
+			return false;
+		}
+	}
+
+	function downloadText(filename, text) {
+		const blob = new Blob([String(text)], { type: 'application/json;charset=utf-8' });
+		const url = URL.createObjectURL(blob);
+		const anchor = document.createElement('a');
+		anchor.href = url;
+		anchor.download = String(filename || 'degustibus-export.json');
+		anchor.hidden = true;
+		document.body.appendChild(anchor);
+		anchor.click();
+		anchor.remove();
+		window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+	}
+
+	function selectJsonFile(callback, maxBytes) {
+		const input = document.createElement('input');
+		input.type = 'file';
+		input.accept = 'application/json,.json';
+		input.hidden = true;
+		document.body.appendChild(input);
+		input.addEventListener('change', () => {
+			const file = input.files && input.files[0];
+			if (!file) {
+				callback(false, 'cancelled');
+				input.remove();
+				return;
+			}
+			if (file.size > Number(maxBytes || 0)) {
+				callback(false, 'Il file supera il limite di 5 MiB');
+				input.remove();
+				return;
+			}
+			const reader = new FileReader();
+			reader.addEventListener('load', () => {
+				callback(true, String(reader.result || ''), file.name);
+				input.remove();
+			});
+			reader.addEventListener('error', () => {
+				callback(false, 'Impossibile leggere il file selezionato');
+				input.remove();
+			});
+			reader.readAsText(file, 'utf-8');
+		}, { once: true });
+		input.click();
+	}
+
+	window.degustibusPersistence = {
+		registerLifecycleCallback(callback) {
+			lifecycleCallback = callback;
+		},
+		requestPersistence,
+		downloadText,
+		selectJsonFile,
+		status() {
+			return { ...persistenceState };
+		},
+	};
+	window.degustibusRuntime = {
+		registerEventCallback(callback) {
+			runtimeEventCallback = callback;
+		},
+		downloadText,
+		emitEvent(eventName) {
+			callGodot(runtimeEventCallback, eventName);
+		},
+	};
+	window.addEventListener('pagehide', () => callGodot(lifecycleCallback, 'pagehide'));
+	document.addEventListener('visibilitychange', () => {
+		if (document.visibilityState === 'hidden') {
+			callGodot(lifecycleCallback, 'visibility-hidden');
+		}
+	});
+}());
+
 (function setupWebGlRecovery() {
 	const canvas = document.getElementById('canvas');
 	canvas.addEventListener('webglcontextlost', (event) => {
 		event.preventDefault();
+		window.degustibusRuntime?.emitEvent('webglcontextlost');
 		if (!window.degustibusSafeMode) {
 			sessionStorage.setItem('degustibus-webgl-safe', '1');
 			window.setTimeout(() => window.location.reload(), 180);

@@ -1,1 +1,1 @@
-CUSTOMER FLOW SMOKE: PASS served=12 queue=0 active=0
+CUSTOMER FLOW SMOKE: PASS served=12 queue=0 active=0 monotone=true canonical=true unique_orders=true despawned=true staggered=true event_service=true meal_animation=true

@@ -8,6 +8,7 @@ func _ready() -> void:
 	process_mode = Node.PROCESS_MODE_ALWAYS
 	SaveManager.load_game()
 	WebPlatformProfile.apply_quality(String(GameState.settings.get("graphics_quality", "auto")))
+	AudioManager.apply_settings()
 	world = RestaurantWorld.new()
 	add_child(world)
 	ui = RestaurantUI.new()

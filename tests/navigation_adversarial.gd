@@ -20,6 +20,8 @@ func _ready() -> void:
 	_test_funnel_queue(main.world)
 	_test_bidirectional_doorway(main.world)
 	_test_station_contention(main.world)
+	_test_managed_wait_timeout(main.world)
+	_test_traffic_coordinator_contract()
 	var result := "NAVIGATION ADVERSARIAL: %s | %d checks | %s\n" % ["PASS" if failures.is_empty() else "FAIL", checks, metrics]
 	for failure: String in failures:
 		result += "FAIL: %s\n" % failure
@@ -248,13 +250,23 @@ func _run_navigation_scenario(world: RestaurantWorld, agents: Array[AnimatedAgen
 	var minimum_clearance := INF
 	var elapsed := 0.0
 	var maximum_stationary_cluster := 0
+	var controlled_cancellations := 0
 	for tick: int in maximum_ticks:
 		world._traffic_epoch += 1
 		var update_order: Array[AnimatedAgent] = agents.duplicate()
 		if tick % 2 == 1:
 			update_order.reverse()
 		for agent: AnimatedAgent in update_order:
-			if not arrived.has(agent.get_instance_id()) and agent.advance_path(delta):
+			if arrived.has(agent.get_instance_id()):
+				continue
+			# This synthetic test has no customer/employee FSM above AnimatedAgent.
+			# Model the controller acknowledgement explicitly: a bounded traffic
+			# timeout cancels one destination attempt, then the intent may be retried
+			# with a fresh FIFO ticket instead of remaining failed forever.
+			if agent.navigation_failed:
+				controlled_cancellations += 1
+				agent.move_to(agent.destination)
+			if agent.advance_path(delta):
 				arrived[agent.get_instance_id()] = true
 		var stationary_cluster := 0
 		for first_index: int in agents.size():
@@ -271,7 +283,8 @@ func _run_navigation_scenario(world: RestaurantWorld, agents: Array[AnimatedAgen
 			break
 	return {
 		"arrived": arrived.size(), "minimum_clearance": minimum_clearance,
-		"elapsed": elapsed, "maximum_stationary_cluster": maximum_stationary_cluster
+		"elapsed": elapsed, "maximum_stationary_cluster": maximum_stationary_cluster,
+		"controlled_cancellations": controlled_cancellations,
 	}
 
 
@@ -321,6 +334,110 @@ func _test_station_contention(world: RestaurantWorld) -> void:
 	for task: Dictionary in claimed:
 		SimulationManager.cancel_employee_task(String(task.get("employee_id", "")))
 	SimulationManager.reset_service_stats()
+
+
+func _test_traffic_coordinator_contract() -> void:
+	var coordinator := AgentTrafficCoordinator.new(RuntimeLeaseRegistry.new())
+	var exiting_party := CustomerAgent.new()
+	exiting_party.state = "leaving"
+	var exiting_guest := CustomerPersonAgent.new()
+	exiting_guest.party = exiting_party
+	exiting_guest.target_tag = "exit_gate_0"
+	var entering_party := CustomerAgent.new()
+	entering_party.state = "admitting"
+	var entering_guest := CustomerPersonAgent.new()
+	entering_guest.party = entering_party
+	entering_guest.target_tag = "seat_stage_0"
+	var active_worker := EmployeeAgent.new()
+	active_worker.state = "moving"
+	active_worker.active_task = {"id": "contract_task"}
+	var returning_worker := EmployeeAgent.new()
+	returning_worker.state = "returning_idle"
+	var idle_worker := EmployeeAgent.new()
+	idle_worker.state = "idle"
+	_expect(
+		coordinator.effective_priority(exiting_guest) < coordinator.effective_priority(entering_guest)
+		and coordinator.effective_priority(entering_guest) < coordinator.effective_priority(active_worker)
+		and coordinator.effective_priority(active_worker) < coordinator.effective_priority(returning_worker)
+		and coordinator.effective_priority(returning_worker) < coordinator.effective_priority(idle_worker),
+		"la policy centralizzata ordina uscita, ingresso, lavoro, ritorno e idle"
+	)
+	var first_owner := Node.new()
+	var second_owner := Node.new()
+	add_child(first_owner)
+	add_child(second_owner)
+	_expect(
+		coordinator.try_acquire_door(first_owner)
+		and not coordinator.try_acquire_door(second_owner),
+		"la porta espone un lease esclusivo"
+	)
+	coordinator.release_door(first_owner)
+	_expect(coordinator.try_acquire_door(second_owner), "la porta passa al prossimo proprietario dopo il rilascio")
+	coordinator.release_door(second_owner)
+	var first_agent := AnimatedAgent.new()
+	var second_agent := AnimatedAgent.new()
+	add_child(first_agent)
+	add_child(second_agent)
+	_expect(
+		coordinator.try_acquire_holding(first_agent, Vector2i(4, 4))
+		and not coordinator.try_acquire_holding(second_agent, Vector2i(4, 4)),
+		"una piazzola di holding non può essere assegnata a due agenti"
+	)
+	coordinator.release_holding(first_agent)
+	_expect(coordinator.try_acquire_holding(second_agent, Vector2i(4, 4)), "il lease della piazzola è riutilizzabile dopo il rilascio")
+	_expect(
+		coordinator.should_hard_cancel(AgentTrafficCoordinator.HARD_CANCEL_SECONDS, false)
+		and coordinator.should_hard_cancel(AgentTrafficCoordinator.HARD_CANCEL_SECONDS, true)
+		and not coordinator.should_hard_cancel(AgentTrafficCoordinator.HARD_CANCEL_SECONDS - 0.01, true),
+		"anche un'attesa gestita ha un limite rigido di otto secondi"
+	)
+	coordinator.release_holding(second_agent)
+	for node: Node in [first_owner, second_owner, first_agent, second_agent, exiting_party, exiting_guest, entering_party, entering_guest, active_worker, returning_worker, idle_worker]:
+		node.queue_free()
+
+
+func _test_managed_wait_timeout(world: RestaurantWorld) -> void:
+	_stop_existing_agents(world)
+	var corridor_cells: Array[Vector2i] = []
+	for x: int in range(1, 10):
+		corridor_cells.append(Vector2i(x, 5))
+	_configure_arena(world, corridor_cells)
+	var waiter := _make_agent(world, Vector2i(1, 5), 6)
+	var blocker := _make_agent(world, Vector2i(5, 5), 0)
+	var start := waiter.global_position
+	_expect(waiter.move_to(world.cell_to_world(Vector2i(9, 5))), "l'agente in attesa possiede una destinazione valida")
+	_expect(world._acquire_agent_holding(waiter, Vector2i(1, 5)), "l'attesa gestita possiede inizialmente una lease di holding")
+	_expect(world.agent_has_managed_traffic_wait(waiter), "la strettoia viene riconosciuta come attesa gestita")
+	var repaths_before := int(RuntimeDiagnostics.snapshot().get("counters", {}).get("repaths", 0))
+	var elapsed := 0.0
+	while elapsed < AgentTrafficCoordinator.HARD_CANCEL_SECONDS + 0.5 and not waiter.navigation_failed:
+		world._traffic_epoch += 1
+		waiter.advance_path(0.25)
+		elapsed += 0.25
+		if elapsed >= AgentTrafficCoordinator.HARD_CANCEL_SECONDS - 0.25 and not waiter.navigation_failed:
+			# Reinstall a managed-wait lease immediately before the deadline: the
+			# hard cancel must release it even though earlier repaths were correct.
+			world._acquire_agent_holding(waiter, Vector2i(1, 5))
+	var repaths_after := int(RuntimeDiagnostics.snapshot().get("counters", {}).get("repaths", 0))
+	_expect(repaths_after > repaths_before, "l'attesa gestita richiede un nuovo percorso dopo due secondi")
+	_expect(
+		waiter.navigation_failed and elapsed <= AgentTrafficCoordinator.HARD_CANCEL_SECONDS + 0.25,
+		"l'attesa gestita annulla controllatamente la destinazione entro otto secondi"
+	)
+	_expect(waiter.global_position.distance_to(start) <= 0.01, "il timeout non teletrasporta l'agente")
+	_expect(
+		not world.traffic_coordinator.has_holding(waiter)
+		and not world.agent_corridor_reservations.has(waiter.get_instance_id())
+		and world.runtime_leases.release_all(waiter) == 0,
+		"il timeout rilascia tutte le lease di traffico"
+	)
+	world.cancel_agent_navigation(waiter)
+	world.cancel_agent_navigation(waiter)
+	_expect(world.runtime_leases.release_all(waiter) == 0, "la cancellazione ripetuta delle lease resta idempotente")
+	waiter.shutdown_navigation()
+	blocker.shutdown_navigation()
+	waiter.queue_free()
+	blocker.queue_free()
 
 
 func _expect(condition: bool, message: String) -> void:

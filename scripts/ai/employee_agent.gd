@@ -21,6 +21,12 @@ var _task_destination := Vector3.ZERO
 var _pickup_sources: Array[Node] = []
 var _gesture_cycle_index := -1
 var _gesture_seed := 0.0
+var _decision_accumulator := 0.0
+
+const DECISION_INTERVAL := 0.1
+const WORK_SEARCH_INTERVAL := 0.25
+const MAX_DECISION_CATCH_UP := 5
+const SERVICE_INTERACTION_RANGE := 2.15
 
 
 func setup(value: Dictionary, value_world: RestaurantWorld) -> void:
@@ -34,6 +40,9 @@ func setup(value: Dictionary, value_world: RestaurantWorld) -> void:
 	home_position = world.staff_standby_position(self, String(employee.get("role", "cook")))
 	_create_task_prop_anchor()
 	_gesture_seed = float(abs(String(employee.id).hash() % 1000)) / 1000.0
+	# Every employee searches at 4 Hz, but a stable per-id phase prevents the
+	# whole brigade from scanning and contesting the task board on one frame.
+	poll_time = _gesture_seed * WORK_SEARCH_INTERVAL
 	_create_thought()
 	var preference_callback := Callable(self, "_on_staff_preference_changed")
 	if not GameState.staff_preferences_changed.is_connected(preference_callback):
@@ -41,11 +50,20 @@ func setup(value: Dictionary, value_world: RestaurantWorld) -> void:
 	validate_animations()
 
 
+func _exit_tree() -> void:
+	# Despawning or rebuilding the staff roster must never leave a task, station
+	# or service slot owned by an agent that no longer exists.
+	if not employee.is_empty():
+		SimulationManager.cancel_employee_task(String(employee.get("id", "")))
+	super._exit_tree()
+
+
 func _process(delta: float) -> void:
 	_update_carried_prop_anchor()
 	if GameState.restaurant_state == "closed":
 		if state != "idle":
 			cancel_active_task()
+		_decision_accumulator = 0.0
 		play_animation("Idle")
 		return
 	var scaled := delta * SimulationManager.simulation_speed
@@ -55,50 +73,69 @@ func _process(delta: float) -> void:
 		stress = maxf(stress - scaled * 0.003, 0.0)
 	employee.stress = stress
 	employee.state = state
+	_update_movement_frame(scaled)
+	if state == "working":
+		_update_work_gesture()
+		_update_task_prop_motion()
+	_decision_accumulator += scaled
+	var processed := 0
+	while _decision_accumulator >= DECISION_INTERVAL and processed < MAX_DECISION_CATCH_UP:
+		_decision_accumulator -= DECISION_INTERVAL
+		_decision_tick(DECISION_INTERVAL)
+		processed += 1
+	if processed == MAX_DECISION_CATCH_UP:
+		_decision_accumulator = minf(_decision_accumulator, DECISION_INTERVAL)
+
+
+func _update_movement_frame(delta: float) -> void:
+	match state:
+		"returning_idle":
+			if navigation_failed:
+				_begin_return_to_standby(true)
+			elif advance_path(delta):
+				state = "idle"
+				navigation_priority = _role_priority(false)
+				idle_time = 0.0
+		"moving":
+			if navigation_failed:
+				cancel_active_task()
+			elif _service_interaction_reached() or _maintenance_interaction_reached():
+				_complete_navigation()
+				_arrived()
+			elif advance_path(delta, _task_uses_carry_animation()):
+				_arrived()
+
+
+func _decision_tick(delta: float) -> void:
 	match state:
 		"idle":
 			navigation_priority = _role_priority(false)
-			idle_time += scaled
-			poll_time -= scaled
+			idle_time += delta
+			poll_time -= delta
 			if poll_time <= 0.0:
-				poll_time = randf_range(0.25, 0.6)
+				poll_time += WORK_SEARCH_INTERVAL
 				_claim_task()
 			if state == "idle" and idle_time >= 0.35:
 				_begin_return_to_standby()
 		"returning_idle":
-			poll_time -= scaled
+			poll_time -= delta
 			if poll_time <= 0.0:
-				poll_time = randf_range(0.2, 0.45)
+				poll_time += WORK_SEARCH_INTERVAL
 				_claim_task()
-			if state == "moving":
-				pass
-			elif navigation_failed:
-				_begin_return_to_standby(true)
-			elif advance_path(scaled):
-				state = "idle"
-				navigation_priority = _role_priority(false)
-				idle_time = 0.0
-				poll_time = randf_range(0.08, 0.22)
 		"moving":
 			if not _active_task_is_actionable():
 				cancel_active_task()
-			elif navigation_failed:
-				cancel_active_task()
-			elif advance_path(scaled, _task_uses_carry_animation()):
-				_arrived()
 		"working":
 			if not _active_task_is_actionable():
 				cancel_active_task()
 				return
-			work_time += scaled
-			_update_work_gesture()
-			_update_task_prop_motion()
+			work_time += delta
 			match _active_task_kind():
 				"kitchen":
 					var runtime := _active_station_runtime()
 					if runtime and is_instance_valid(runtime.node):
 						runtime.node.update_task_progress(active_task)
-					if SimulationManager.advance_kitchen_task(active_task.id, scaled, employee):
+					if SimulationManager.advance_kitchen_task(active_task.id, delta, employee):
 						_finish_task()
 				"maintenance":
 					var duration := float(active_task.get("duration", 1.5)) / maxf(float(employee.get("speed", 1.0)), 0.1)
@@ -165,7 +202,7 @@ func _claim_task() -> void:
 		if not move_to(first_target):
 			SimulationManager.cancel_employee_task(String(employee.get("id", "")))
 			active_task = {}
-			poll_time = 0.45
+			poll_time = WORK_SEARCH_INTERVAL
 			return
 		_thought.visible = true
 		state = "moving"
@@ -226,6 +263,9 @@ func _kitchen_pickup_descriptor() -> Dictionary:
 func _arrived() -> void:
 	work_time = 0.0
 	if _active_task_kind() == "kitchen" and _travel_stage == "kitchen_pickup":
+		# This branch is reached only after the reserved physical pickup point.
+		# The cue therefore represents a real transfer, never a search/repath tick.
+		AudioManager.play_sfx("ingredient_pickup")
 		_consume_pickup_sources()
 		_show_kitchen_carry_prop()
 		_travel_stage = "kitchen_delivery"
@@ -258,6 +298,7 @@ func _arrived() -> void:
 			if not SimulationManager.begin_maintenance_task(String(active_task.get("id", ""))):
 				_finish_task()
 				return
+			_play_maintenance_start_audio(String(active_task.get("action", "")))
 			var runtime := _active_station_runtime()
 			if runtime and is_instance_valid(runtime.get("node")):
 				face_position((runtime.node as Node3D).global_position)
@@ -280,6 +321,7 @@ func _arrived() -> void:
 			if String(active_task.get("action", "")) == "collect_dishes" and String(active_task.get("travel_stage", "")) != "delivery":
 				if customer != null and customer.has_method("service_task_stage"):
 					customer.call("service_task_stage", "collect_dishes", active_task.get("payload", {}), "pickup")
+				AudioManager.play_sfx("dishes")
 				active_task.travel_stage = "delivery"
 				active_task.carry_model = String(active_task.get("payload", {}).get("carry_model", "res://assets/equipment/plate_dirty.gltf"))
 				_show_task_prop(false)
@@ -288,6 +330,23 @@ func _arrived() -> void:
 					state = "moving"
 					return
 	state = "working"
+
+
+func _play_maintenance_start_audio(action: String) -> void:
+	var event_id := maintenance_audio_event(action)
+	if not event_id.is_empty():
+		AudioManager.play_sfx(event_id)
+
+
+static func maintenance_audio_event(action: String) -> String:
+	match action:
+		"wash_dishes":
+			return "dishes"
+		"clean_spill", "clean_kitchen":
+			return "scrub"
+		"clean_floor":
+			return "sweep"
+	return ""
 
 
 func _consume_pickup_sources() -> void:
@@ -321,7 +380,7 @@ func _finish_task() -> void:
 	_pickup_sources.clear()
 	employee.current_task = ""
 	_thought.visible = false
-	poll_time = randf_range(0.1, 0.25)
+	poll_time = WORK_SEARCH_INTERVAL
 	_begin_return_to_standby()
 
 
@@ -404,13 +463,32 @@ func _active_task_is_actionable() -> bool:
 		_:
 			if not SimulationManager.service_tasks.has(task_id):
 				return false
-			return String(SimulationManager.service_tasks[task_id].get("state", "")) in ["reserved", "in_progress"] and SimulationManager.service_task_is_actionable(SimulationManager.service_tasks[task_id])
+			return String(SimulationManager.service_tasks[task_id].get("state", "")) in ["reserved", "in_progress"] and SimulationManager.service_task_is_actionable(SimulationManager.service_tasks[task_id]) and SimulationManager.service_task_reservation_is_valid(task_id, String(employee.get("id", "")))
 
 
 func _active_task_kind() -> String:
 	if String(active_task.get("task_kind", "")) == "maintenance":
 		return "maintenance"
 	return "kitchen" if active_task.has("order_id") else "service"
+
+
+func _service_interaction_reached() -> bool:
+	if _active_task_kind() != "service" or _travel_stage not in ["delivery", "service_delivery"]:
+		return false
+	if _flat_distance(global_position, _task_destination) > SERVICE_INTERACTION_RANGE:
+		return false
+	# The waiter may interact across the table edge, but never through a wall or
+	# a solid furnishing. Dynamic collision with the seated guest is deliberately
+	# excluded here: reaching the adjacent service stance is the intended end.
+	return world == null or world.can_agent_move(global_position, _task_destination, 0.18)
+
+
+func _maintenance_interaction_reached() -> bool:
+	if _active_task_kind() != "maintenance" or not bool(active_task.get("allow_adjacent_interaction", false)):
+		return false
+	if _flat_distance(global_position, _task_destination) > SERVICE_INTERACTION_RANGE:
+		return false
+	return world == null or world.can_agent_move(global_position, _task_destination, 0.18)
 
 
 func _task_uses_carry_animation() -> bool:

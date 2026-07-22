@@ -1,6 +1,7 @@
 class_name GameFonts
 extends RefCounted
 
+const FREDOKA: FontFile = preload("res://assets/ui/fonts/Fredoka-Variable.ttf")
 const FREDOKA_ONE: FontFile = preload("res://assets/ui/fonts/FredokaOne-Regular.ttf")
 
 static var _medium: FontVariation
@@ -29,20 +30,26 @@ const WEB_UNSAFE_ICON_CODEPOINTS := [
 
 static func medium() -> FontVariation:
 	if _medium == null:
-		_medium = _variation(0.0)
+		_medium = _variation(500)
 	return _medium
 
 
 static func semibold() -> FontVariation:
 	if _semibold == null:
-		_semibold = _variation(0.32)
+		_semibold = _variation(600)
 	return _semibold
 
 
 static func bold() -> FontVariation:
 	if _bold == null:
-		_bold = _variation(0.62)
+		_bold = _variation(700)
 	return _bold
+
+
+static func display() -> FontFile:
+	# Fredoka One remains a deliberately expressive display face.  Body copy,
+	# cards and buttons use the real variable-family weights above.
+	return FREDOKA_ONE
 
 
 static func web_safe_text(value: String) -> String:
@@ -81,7 +88,7 @@ static func unsupported_runtime_characters(value: String) -> PackedInt32Array:
 		var codepoint := value.unicode_at(index)
 		if codepoint < 32 or codepoint in unsupported:
 			continue
-		if codepoint in WEB_UNSAFE_ICON_CODEPOINTS or not FREDOKA_ONE.has_char(codepoint):
+		if codepoint in WEB_UNSAFE_ICON_CODEPOINTS or not FREDOKA.has_char(codepoint):
 			unsupported.append(codepoint)
 	return unsupported
 
@@ -115,8 +122,10 @@ static func sanitize_control_tree(root: Node) -> void:
 		sanitize_control_tree(child)
 
 
-static func _variation(embolden: float) -> FontVariation:
+static func _variation(weight: int) -> FontVariation:
 	var font := FontVariation.new()
-	font.base_font = FREDOKA_ONE
-	font.variation_embolden = embolden
+	font.base_font = FREDOKA
+	# Use the authored variable-font masters; variation_embolden would only
+	# thicken contours after rasterisation and produces uneven Web rendering.
+	font.variation_opentype = {"wght": weight, "wdth": 100}
 	return font

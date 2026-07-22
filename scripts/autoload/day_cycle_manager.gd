@@ -51,18 +51,16 @@ func _exit_tree() -> void:
 func _process(delta: float) -> void:
 	if paused:
 		return
-	var restaurant_state := String(GameState.restaurant_state)
-	if restaurant_state not in ["open", "closing"]:
-		return
-	advance_seconds(delta, _simulation_speed(), restaurant_state)
+	advance_seconds(delta, _simulation_speed(), String(GameState.restaurant_state))
 
 
 func advance_seconds(real_delta: float, speed_override: float = -1.0, restaurant_state_override: String = "") -> void:
 	if paused or real_delta <= 0.0:
 		return
-	var restaurant_state := restaurant_state_override if not restaurant_state_override.is_empty() else String(GameState.restaurant_state)
-	if restaurant_state not in ["open", "closing"]:
-		return
+	# The management clock is authoritative even while the doors are closed:
+	# deliveries, payroll and daily rewards must not be frozen by closing the
+	# restaurant. The state argument remains for API compatibility and logging.
+	var _restaurant_state := restaurant_state_override if not restaurant_state_override.is_empty() else String(GameState.restaurant_state)
 	var speed := speed_override if speed_override >= 0.0 else _simulation_speed()
 	if speed <= 0.0:
 		return

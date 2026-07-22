@@ -28,6 +28,7 @@ func _ready() -> void:
 	_expect(customer_bubble.is_icon_visible() and customer_bubble.current_key == "ordering", "zooming close reveals the mapped customer state")
 	var customer_icon := customer_bubble.get_node("BubbleIcon") as Sprite3D
 	_expect(customer_icon.texture is AtlasTexture and (customer_icon.texture as AtlasTexture).region == Rect2(768, 192, 192, 192), "customer status selects a centered atlas cell")
+	_expect(customer_icon.pixel_size <= 0.005, "the close-zoom bubble remains compact over the character")
 	_set_zoom(main.world, 19.0)
 	customer_bubble.update_bubble(0.1)
 	_expect(customer_bubble.is_icon_visible(), "zoom hysteresis prevents threshold flicker")
@@ -46,6 +47,14 @@ func _ready() -> void:
 	customer_label.visible = true
 	customer_bubble.update_bubble(0.1)
 	_expect(customer_bubble.is_icon_visible(), "a later explicit state event can show the same icon again")
+	customer_label.text = "TROPPA ATTESA"
+	customer_bubble.update_bubble(0.1)
+	_expect(customer_bubble.current_key == "angry", "an urgent mood replaces the routine state")
+	customer_label.text = "MENU"
+	customer_bubble.update_bubble(0.1)
+	_expect(customer_bubble.current_key == "angry" and customer_bubble.get_child_count() == 1, "a lower-priority cue never stacks over an urgent bubble")
+	customer_bubble.update_bubble(3.5)
+	_expect(customer_bubble.current_key == "ordering" and customer_bubble.is_icon_visible(), "the pending routine cue appears after the urgent bubble expires")
 
 	var staff_label := Label3D.new()
 	main.world.add_child(staff_label)

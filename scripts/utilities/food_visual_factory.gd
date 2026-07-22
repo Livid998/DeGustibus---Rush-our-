@@ -79,6 +79,8 @@ static func parts_for_task(task: Dictionary, phase: String) -> Array[Dictionary]
 static func instantiate_parts(parts: Array, scale_multiplier: float = 1.0, maximum_override: int = -1) -> Node3D:
 	var root := Node3D.new()
 	root.name = "FoodVisual"
+	root.set_meta("service_ready", false)
+	root.set_meta("food_stage", "component")
 	var maximum := maximum_override
 	if maximum < 0:
 		maximum = 6 if WebPlatformProfile.low_memory_mode() else 10
@@ -165,7 +167,21 @@ static func instantiate_canonical_serving(recipe_id: String) -> Node3D:
 	root.add_child(food)
 	root.set_meta("recipe_id", recipe_id)
 	root.set_meta("consumption_container", kind)
+	root.set_meta("service_ready", is_service_ready_food(recipe_id))
+	root.set_meta("food_stage", "finished" if is_service_ready_food(recipe_id) else "preparation")
 	return root
+
+
+## A visual is serviceable only when its identifier is an authored recipe,
+## never merely because a preparation happens to reuse the final food model.
+static func is_service_ready_food(food_id: String) -> bool:
+	return not food_id.is_empty() and DataRegistry.recipes_by_id.has(food_id)
+
+
+static func task_output_is_service_ready(task: Dictionary) -> bool:
+	if task.is_empty() or String(task.get("station", "")) != "pass":
+		return false
+	return is_service_ready_food(String(task.get("output", "")))
 
 
 ## Every clean/dirty/table/carried container is normalized against the actual

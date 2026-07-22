@@ -4,6 +4,8 @@ extends Node3D
 signal ambience_changed(snapshot: Dictionary)
 signal pest_warning_changed(active: bool, context: Dictionary)
 signal storage_fill_visuals_changed(snapshot: Dictionary)
+signal layout_object_added(object: PlacedObject)
+signal layout_object_moved(object: PlacedObject, previous_cell: Vector2i)
 
 const GRID_SIZE := Vector2i(18, 14)
 const CELL_SIZE := 2.0
@@ -26,16 +28,27 @@ var placed_objects: Dictionary = {}
 var table_occupants: Dictionary = {}
 var table_dirty_records: Dictionary = {}
 var customer_queue: Array[Node] = []
-var door_owner: Node
+var door_owner: Node:
+	get:
+		return traffic_coordinator.door_owner
+	set(value):
+		if value == null:
+			traffic_coordinator.clear_door()
+		else:
+			traffic_coordinator.try_acquire_door(value)
 var exiting_customers: Dictionary = {}
 var exit_wait_queue: Array[Node] = []
 var staff_agents: Dictionary = {}
 var navigation_agents: Array[AnimatedAgent] = []
+var agent_spatial_index := AgentSpatialIndex.new(CELL_SIZE)
+var agent_destination_index := AgentSpatialIndex.new(CELL_SIZE)
+var runtime_leases := RuntimeLeaseRegistry.new()
+var traffic_coordinator := AgentTrafficCoordinator.new(runtime_leases)
 var navigation_revision := 0
 var waiting_reservations: Dictionary = {}
 var staff_standby_reservations: Dictionary = {}
-var corridor_reservations: Dictionary = {}
-var agent_corridor_reservations: Dictionary = {}
+var corridor_reservations: Dictionary = traffic_coordinator.corridor_owners
+var agent_corridor_reservations: Dictionary = traffic_coordinator.agent_corridors
 var agent_motion_intents: Dictionary = {}
 var agent_avoidance_memory: Dictionary = {}
 var customer_root: Node3D
@@ -74,6 +87,9 @@ var _blocked_edge_uids: Dictionary = {}
 var _grid_path_cache: Dictionary = {}
 var _corridor_key_cache: Dictionary = {}
 var _traffic_epoch := 0
+var _agent_spatial_index_epoch := -1
+var _holding_lease_by_agent: Dictionary = traffic_coordinator.holding_by_agent
+var _standby_lease_by_agent: Dictionary = {}
 var _path_cache_suspended := false
 var cleanup_root: Node3D
 var storage_fill_visualizer: StorageFillVisualizer
@@ -112,6 +128,8 @@ func _ready() -> void:
 
 func _process(delta: float) -> void:
 	_traffic_epoch += 1
+	_refresh_agent_spatial_index()
+	_cleanup_navigation_runtime_state()
 	if camera_rig:
 		var long_press: Variant = camera_rig.consume_long_press()
 		if long_press != null:
@@ -754,6 +772,10 @@ func load_layout() -> void:
 	corridor_reservations.clear()
 	agent_corridor_reservations.clear()
 	agent_motion_intents.clear()
+	runtime_leases.clear()
+	_holding_lease_by_agent.clear()
+	_standby_lease_by_agent.clear()
+	_agent_spatial_index_epoch = -1
 	_loading_layout = true
 	floor_tiles.clear()
 	for y: int in range(LOT_REGION.position.y, LOT_REGION.end.y):
@@ -836,6 +858,8 @@ func add_layout_object(item_id: String, cell: Vector2i, rotation_steps: int, sup
 	_refresh_operational_stations()
 	_rebuild_astar()
 	GameState.layout_changed.emit()
+	if object != null:
+		layout_object_added.emit(object)
 	return object
 
 
@@ -859,6 +883,7 @@ func remove_placed_object(object: PlacedObject, remove_record: bool = true) -> v
 func move_layout_object(object: PlacedObject, cell: Vector2i, rotation_steps: int, support_uid: String = "", attachment_slot: int = -1) -> void:
 	if object == null or not is_instance_valid(object):
 		return
+	var previous_cell := object.grid_cell
 	var rotation_delta := posmod(rotation_steps - object.rotation_steps, 4)
 	set_object_occupancy(object, false)
 	object.set_layout_state(cell, rotation_steps, support_uid, attachment_slot)
@@ -879,6 +904,7 @@ func move_layout_object(object: PlacedObject, cell: Vector2i, rotation_steps: in
 	_refresh_operational_stations()
 	_rebuild_astar()
 	GameState.layout_changed.emit()
+	layout_object_moved.emit(object, previous_cell)
 
 
 func _update_layout_record(object: PlacedObject) -> void:
@@ -1150,6 +1176,107 @@ func restaurant_opening_blockers() -> Array[String]:
 	for station: PlacedObject in unventilated_heat_stations():
 		result.append("%s in cella %d,%d: manca una cappa aspirante" % [String(station.definition.get("name", station.item_id)), station.grid_cell.x, station.grid_cell.y])
 	return result
+
+
+func restaurant_opening_readiness() -> Dictionary:
+	return OpeningReadinessService.evaluate(self)
+
+
+func opening_seating_snapshot() -> Dictionary:
+	var physical_tables := 0
+	var physical_seats := 0
+	var reachable_tables := 0
+	var reachable_seats := 0
+	var unreachable_table_uids: Array[String] = []
+	for object: PlacedObject in placed_objects.values():
+		if object == null or not is_instance_valid(object) or not object.item_id.begins_with("table"):
+			continue
+		physical_tables += 1
+		var seats := _seat_assignments_for_table(object)
+		physical_seats += seats.size()
+		if seats.is_empty() or _table_access_positions(object).is_empty():
+			unreachable_table_uids.append(object.uid)
+			continue
+		reachable_tables += 1
+		reachable_seats += seats.size()
+	return {
+		"physical_tables": physical_tables,
+		"physical_seats": physical_seats,
+		"reachable_tables": reachable_tables,
+		"reachable_seats": reachable_seats,
+		"unreachable_table_uids": unreachable_table_uids,
+	}
+
+
+func opening_access_snapshot() -> Dictionary:
+	var entrance_present := false
+	for object: PlacedObject in placed_objects.values():
+		if object != null and is_instance_valid(object) and object.item_id == "door" and object.grid_cell == entrance_cell:
+			entrance_present = true
+			break
+	var inside_target := Vector2i(-1, -1)
+	for object: PlacedObject in placed_objects.values():
+		if object == null or not is_instance_valid(object) or not object.item_id.begins_with("table"):
+			continue
+		var positions := _table_access_positions(object)
+		if not positions.is_empty():
+			inside_target = world_to_cell(positions[0])
+			break
+	if inside_target == Vector2i(-1, -1):
+		inside_target = _nearest_open_cell(Vector2i(entrance_cell.x, entrance_cell.y + 2))
+	var outside_target := Vector2i(entrance_cell.x, EXIT_ROW)
+	var entrance_open := astar.is_in_boundsv(entrance_cell) and not astar.is_point_solid(entrance_cell)
+	return {
+		"entrance_present": entrance_present,
+		"entrance_reachable": entrance_open and not _grid_path(entrance_cell, inside_target).is_empty(),
+		"exit_reachable": entrance_open and astar.is_in_boundsv(outside_target) and not _grid_path(entrance_cell, outside_target).is_empty(),
+		"entrance_cell": entrance_cell,
+	}
+
+
+func opening_station_snapshot(required_station_ids: Array[String]) -> Dictionary:
+	var missing: Array[String] = []
+	var inoperative: Array[String] = []
+	var unreachable: Array[String] = []
+	var operational: Array[String] = []
+	for station_id: String in required_station_ids:
+		var instances: Array[PlacedObject] = []
+		for object: PlacedObject in placed_objects.values():
+			if object != null and is_instance_valid(object) and object.station_id == station_id:
+				instances.append(object)
+		if instances.is_empty():
+			missing.append(station_id)
+			continue
+		var any_operational := false
+		var any_reachable := false
+		for station: PlacedObject in instances:
+			if not station_is_operational(station):
+				continue
+			any_operational = true
+			for access_cell: Vector2i in station_access_cells(station.definition, station.grid_cell, station.rotation_steps, station.support_uid, station.attachment_slot):
+				if (
+					_station_front_connection_open(station.definition, access_cell, station.rotation_steps)
+					and astar.is_in_boundsv(access_cell)
+					and not astar.is_point_solid(access_cell)
+					and not _grid_path(entrance_cell, access_cell).is_empty()
+				):
+					any_reachable = true
+					break
+			if any_reachable:
+				break
+		if not any_operational:
+			inoperative.append(station_id)
+		elif not any_reachable:
+			unreachable.append(station_id)
+		else:
+			operational.append(station_id)
+	return {
+		"required": required_station_ids.duplicate(),
+		"operational": operational,
+		"missing": missing,
+		"inoperative": inoperative,
+		"unreachable": unreachable,
+	}
 
 
 func _refresh_operational_stations() -> void:
@@ -1498,6 +1625,7 @@ func _rebuild_astar() -> void:
 		if is_instance_valid(object) and is_edge_placement(object.definition) and bool(object.definition.get("blocking", true)):
 			_blocked_edge_uids[edge_key(object.grid_cell, object.rotation_steps)] = object.uid
 	_grid_path_cache.clear()
+	_clear_corridor_runtime_reservations()
 	_corridor_key_cache.clear()
 	navigation_revision += 1
 	for agent: AnimatedAgent in navigation_agents.duplicate():
@@ -1572,25 +1700,25 @@ func _traffic_grid_path(from_cell: Vector2i, to_cell: Vector2i, agent: AnimatedA
 	if from_cell == to_cell:
 		var same_cell: Array[Vector2i] = [from_cell]
 		return same_cell
-	var traffic := _traffic_cell_costs(agent)
+	var traffic := _traffic_cell_costs(agent, from_cell, to_cell)
 	traffic.erase(from_cell)
 	traffic.erase(to_cell)
-	var frontier: Array[Vector2i] = [from_cell]
+	var frontier: Array[Dictionary] = []
+	var insertion_order := 0
+	_traffic_heap_push(frontier, {
+		"cell": from_cell,
+		"score": float(absi(from_cell.x - to_cell.x) + absi(from_cell.y - to_cell.y)),
+		"distance": 0.0,
+		"order": insertion_order,
+	})
 	var came_from: Dictionary = {from_cell: from_cell}
 	var distance: Dictionary = {from_cell: 0.0}
 	var closed: Dictionary = {}
 	while not frontier.is_empty():
-		var best_index := 0
-		var best_score := INF
-		for index: int in frontier.size():
-			var candidate := frontier[index]
-			var heuristic := absi(candidate.x - to_cell.x) + absi(candidate.y - to_cell.y)
-			var score := float(distance.get(candidate, INF)) + float(heuristic)
-			if score < best_score:
-				best_score = score
-				best_index = index
-		var current := frontier[best_index]
-		frontier.remove_at(best_index)
+		var entry := _traffic_heap_pop(frontier)
+		var current := Vector2i(entry.get("cell", from_cell))
+		if float(entry.get("distance", INF)) > float(distance.get(current, INF)) + 0.001:
+			continue
 		if current == to_cell:
 			break
 		if closed.has(current):
@@ -1613,8 +1741,14 @@ func _traffic_grid_path(from_cell: Vector2i, to_cell: Vector2i, agent: AnimatedA
 				continue
 			distance[neighbor] = proposed
 			came_from[neighbor] = current
-			if not frontier.has(neighbor):
-				frontier.append(neighbor)
+			insertion_order += 1
+			var heuristic := absi(neighbor.x - to_cell.x) + absi(neighbor.y - to_cell.y)
+			_traffic_heap_push(frontier, {
+				"cell": neighbor,
+				"score": proposed + float(heuristic),
+				"distance": proposed,
+				"order": insertion_order,
+			})
 	if not came_from.has(to_cell):
 		return empty
 	var result: Array[Vector2i] = []
@@ -1627,7 +1761,52 @@ func _traffic_grid_path(from_cell: Vector2i, to_cell: Vector2i, agent: AnimatedA
 	return result
 
 
-func _traffic_cell_costs(requesting_agent: AnimatedAgent) -> Dictionary:
+func _traffic_heap_push(heap: Array[Dictionary], entry: Dictionary) -> void:
+	heap.append(entry)
+	var index := heap.size() - 1
+	while index > 0:
+		var parent_index: int = floori(float(index - 1) / 2.0)
+		if not _traffic_heap_entry_less(heap[index], heap[parent_index]):
+			break
+		var swap := heap[parent_index]
+		heap[parent_index] = heap[index]
+		heap[index] = swap
+		index = parent_index
+
+
+func _traffic_heap_pop(heap: Array[Dictionary]) -> Dictionary:
+	var result := heap[0]
+	var tail: Dictionary = heap.pop_back()
+	if heap.is_empty():
+		return result
+	heap[0] = tail
+	var index := 0
+	while true:
+		var left := index * 2 + 1
+		if left >= heap.size():
+			break
+		var right := left + 1
+		var smallest := left
+		if right < heap.size() and _traffic_heap_entry_less(heap[right], heap[left]):
+			smallest = right
+		if not _traffic_heap_entry_less(heap[smallest], heap[index]):
+			break
+		var swap := heap[index]
+		heap[index] = heap[smallest]
+		heap[smallest] = swap
+		index = smallest
+	return result
+
+
+func _traffic_heap_entry_less(first: Dictionary, second: Dictionary) -> bool:
+	var first_score := float(first.get("score", INF))
+	var second_score := float(second.get("score", INF))
+	if not is_equal_approx(first_score, second_score):
+		return first_score < second_score
+	return int(first.get("order", 0)) < int(second.get("order", 0))
+
+
+func _traffic_cell_costs(requesting_agent: AnimatedAgent, from_cell: Vector2i, to_cell: Vector2i) -> Dictionary:
 	var costs: Dictionary = {}
 	for key: String in corridor_reservations:
 		if int(corridor_reservations.get(key, 0)) == requesting_agent.get_instance_id():
@@ -1636,7 +1815,11 @@ func _traffic_cell_costs(requesting_agent: AnimatedAgent) -> Dictionary:
 			var coordinates := encoded_cell.split(",", false)
 			if coordinates.size() == 2:
 				_add_traffic_cost(costs, Vector2i(int(coordinates[0]), int(coordinates[1])), 18.0)
-	for other: AnimatedAgent in navigation_agents:
+	var from_world := cell_to_world(from_cell)
+	var to_world := cell_to_world(to_cell)
+	var query_center := from_world.lerp(to_world, 0.5)
+	var query_radius := from_world.distance_to(to_world) * 0.5 + CELL_SIZE * 3.0
+	for other: AnimatedAgent in _nearby_navigation_agents(query_center, query_radius, requesting_agent):
 		if other == requesting_agent or not is_instance_valid(other) or other.is_queued_for_deletion() or not other.is_collision_enabled():
 			continue
 		for point: Vector3 in other.get_avoidance_points():
@@ -1755,21 +1938,156 @@ func _simplify_world_path(points: PackedVector3Array) -> PackedVector3Array:
 func register_navigation_agent(agent: AnimatedAgent) -> void:
 	if not navigation_agents.has(agent):
 		navigation_agents.append(agent)
+		_agent_spatial_index_epoch = -1
 
 
 func unregister_navigation_agent(agent: AnimatedAgent) -> void:
 	navigation_agents.erase(agent)
+	_agent_spatial_index_epoch = -1
 	agent_motion_intents.erase(agent.get_instance_id())
 	agent_avoidance_memory.erase(agent.get_instance_id())
 	release_waiting_position(agent)
 	staff_standby_reservations.erase(agent.get_instance_id())
+	_release_agent_holding(agent)
+	_release_agent_standby(agent)
 	_release_agent_corridor(agent)
+	runtime_leases.release_all(agent)
+
+
+func _refresh_agent_spatial_index() -> void:
+	if _agent_spatial_index_epoch == _traffic_epoch:
+		return
+	var live_agents: Array = []
+	var moving_agents: Array = []
+	for agent: AnimatedAgent in navigation_agents:
+		if agent == null or not is_instance_valid(agent) or agent.is_queued_for_deletion():
+			continue
+		live_agents.append(agent)
+		if agent.navigation_active:
+			moving_agents.append(agent)
+	agent_spatial_index.rebuild(live_agents)
+	agent_destination_index.rebuild(moving_agents, Callable(self, "_navigation_agent_destination"))
+	_agent_spatial_index_epoch = _traffic_epoch
+	RuntimeDiagnostics.set_gauge("navigation_agents", agent_spatial_index.size())
+	RuntimeDiagnostics.set_gauge("navigation_spatial_buckets", agent_spatial_index.bucket_count())
+	RuntimeDiagnostics.set_gauge("navigation_destination_buckets", agent_destination_index.bucket_count())
+
+
+func _navigation_agent_destination(value: Object) -> Vector3:
+	if value is AnimatedAgent:
+		return (value as AnimatedAgent).destination
+	return Vector3(INF, 0.0, INF)
+
+
+func _nearby_navigation_agents(center: Vector3, radius: float, exclude: AnimatedAgent = null) -> Array[AnimatedAgent]:
+	_refresh_agent_spatial_index()
+	RuntimeDiagnostics.record_neighbor_query()
+	var result: Array[AnimatedAgent] = []
+	for value: Object in agent_spatial_index.query_radius(center, maxf(radius, 0.0), exclude):
+		if value is AnimatedAgent:
+			var agent := value as AnimatedAgent
+			if is_instance_valid(agent) and not agent.is_queued_for_deletion():
+				result.append(agent)
+	RuntimeDiagnostics.record_counter("neighbor_candidates", result.size())
+	return result
+
+
+func _nearby_destination_agents(center: Vector3, radius: float, exclude: AnimatedAgent = null) -> Array[AnimatedAgent]:
+	_refresh_agent_spatial_index()
+	RuntimeDiagnostics.record_neighbor_query()
+	var result: Array[AnimatedAgent] = []
+	for value: Object in agent_destination_index.query_radius(center, maxf(radius, 0.0), exclude):
+		if value is AnimatedAgent:
+			var agent := value as AnimatedAgent
+			if is_instance_valid(agent) and not agent.is_queued_for_deletion() and agent.navigation_active:
+				result.append(agent)
+	RuntimeDiagnostics.record_counter("destination_candidates", result.size())
+	return result
+
+
+func _cleanup_navigation_runtime_state() -> void:
+	runtime_leases.cleanup()
+	for agent_id: int in _holding_lease_by_agent.keys():
+		var owner := instance_from_id(agent_id) as AnimatedAgent
+		if owner == null or not is_instance_valid(owner) or owner.is_queued_for_deletion():
+			traffic_coordinator.forget_dead_holding_owner(agent_id)
+			continue
+		if not owner._traffic_pullout_active:
+			_release_agent_holding(owner)
+	for agent_id: int in _standby_lease_by_agent.keys():
+		var owner := instance_from_id(agent_id) as AnimatedAgent
+		if owner == null or not is_instance_valid(owner) or owner.is_queued_for_deletion():
+			_standby_lease_by_agent.erase(agent_id)
+	RuntimeDiagnostics.set_gauge("navigation_leases", runtime_leases.active_count())
+
+
+func _holding_lease_id(cell: Vector2i) -> StringName:
+	return traffic_coordinator.holding_lease_id(cell)
+
+
+func _standby_lease_id(cell: Vector2i) -> StringName:
+	return StringName("standby:%d,%d" % [cell.x, cell.y])
+
+
+func _corridor_lease_id(key: String) -> StringName:
+	return traffic_coordinator.corridor_lease_id(key)
+
+
+func _acquire_agent_holding(agent: AnimatedAgent, cell: Vector2i) -> bool:
+	if not traffic_coordinator.try_acquire_holding(agent, cell):
+		RuntimeDiagnostics.record_lease_conflict()
+		return false
+	return true
+
+
+func _release_agent_holding(agent: AnimatedAgent) -> void:
+	traffic_coordinator.release_holding(agent)
+
+
+func _release_agent_standby(agent: AnimatedAgent) -> void:
+	if agent == null or not is_instance_valid(agent):
+		return
+	var agent_id := agent.get_instance_id()
+	var lease_id := StringName(_standby_lease_by_agent.get(agent_id, &""))
+	if not lease_id.is_empty():
+		runtime_leases.release(lease_id, agent)
+	_standby_lease_by_agent.erase(agent_id)
+	staff_standby_reservations.erase(agent_id)
 
 
 func finish_agent_navigation(agent: AnimatedAgent) -> void:
+	_release_agent_holding(agent)
 	var key := String(agent_corridor_reservations.get(agent.get_instance_id(), ""))
 	if key.is_empty() or not _agent_is_inside_corridor(agent, key):
 		_release_agent_corridor(agent)
+
+
+func prepare_agent_repath(agent: AnimatedAgent) -> void:
+	_release_agent_holding(agent)
+	var key := String(agent_corridor_reservations.get(agent.get_instance_id(), ""))
+	if not key.is_empty() and not _agent_is_inside_corridor(agent, key):
+		_release_agent_corridor(agent)
+
+
+func cancel_agent_navigation(agent: AnimatedAgent) -> void:
+	if agent == null or not is_instance_valid(agent):
+		return
+	# Cancellation is the terminal counterpart of a managed wait. Release every
+	# navigation-scoped reservation, including an idle/holding lease that may no
+	# longer match the path after repeated repaths. All helpers are deliberately
+	# idempotent because controllers may acknowledge the failed route again.
+	release_waiting_position(agent)
+	_release_agent_holding(agent)
+	_release_agent_standby(agent)
+	_release_agent_corridor(agent)
+	runtime_leases.release_all(agent)
+
+
+func agent_has_managed_traffic_wait(agent: AnimatedAgent) -> bool:
+	if traffic_coordinator.has_holding(agent):
+		return true
+	var corridor_key := _upcoming_corridor_key(agent, agent.path, agent.path_index)
+	return not corridor_key.is_empty()
 
 
 func can_agent_advance_route(agent: AnimatedAgent, route: PackedVector3Array, route_index: int) -> bool:
@@ -1785,7 +2103,7 @@ func can_agent_advance_route(agent: AnimatedAgent, route: PackedVector3Array, ro
 		_release_agent_corridor(agent)
 	var contenders: Array[AnimatedAgent] = []
 	var inside: Array[AnimatedAgent] = []
-	for other: AnimatedAgent in navigation_agents:
+	for other: AnimatedAgent in _agents_near_corridor(requested_key):
 		if not is_instance_valid(other) or other.is_queued_for_deletion() or not other.is_collision_enabled():
 			continue
 		if _agent_is_inside_corridor(other, requested_key):
@@ -1806,8 +2124,9 @@ func can_agent_advance_route(agent: AnimatedAgent, route: PackedVector3Array, ro
 		winner = owner
 	if winner != agent:
 		return false
-	corridor_reservations[requested_key] = agent_id
-	agent_corridor_reservations[agent_id] = requested_key
+	if not traffic_coordinator.try_acquire_corridor(agent, requested_key):
+		RuntimeDiagnostics.record_lease_conflict()
+		return false
 	return true
 
 
@@ -1839,14 +2158,20 @@ func _agent_has_right_of_way(candidate: AnimatedAgent, incumbent: AnimatedAgent,
 		var incumbent_remaining := _remaining_corridor_steps(incumbent, corridor_key)
 		if candidate_remaining != incumbent_remaining:
 			return candidate_remaining < incumbent_remaining
-	if candidate.navigation_priority != incumbent.navigation_priority:
-		return candidate.navigation_priority < incumbent.navigation_priority
+	var candidate_priority := _effective_navigation_priority(candidate)
+	var incumbent_priority := _effective_navigation_priority(incumbent)
+	if candidate_priority != incumbent_priority:
+		return candidate_priority < incumbent_priority
 	# Route tickets are monotonically assigned by move_to(). FIFO is stable
 	# across frame/process order and prevents the same low instance id from
 	# winning every successive bottleneck forever.
 	if candidate.route_ticket != incumbent.route_ticket:
 		return candidate.route_ticket < incumbent.route_ticket
 	return candidate.get_instance_id() < incumbent.get_instance_id()
+
+
+func _effective_navigation_priority(agent: AnimatedAgent) -> int:
+	return traffic_coordinator.effective_priority(agent)
 
 
 func _remaining_corridor_steps(agent: AnimatedAgent, corridor_key: String) -> int:
@@ -1923,11 +2248,7 @@ func _agent_is_inside_corridor(agent: AnimatedAgent, key: String) -> bool:
 
 
 func _release_agent_corridor(agent: AnimatedAgent) -> void:
-	var agent_id := agent.get_instance_id()
-	var key := String(agent_corridor_reservations.get(agent_id, ""))
-	if not key.is_empty() and int(corridor_reservations.get(key, 0)) == agent_id:
-		corridor_reservations.erase(key)
-	agent_corridor_reservations.erase(agent_id)
+	traffic_coordinator.release_corridor(agent)
 
 
 func _cleanup_corridor_reservations() -> void:
@@ -1935,15 +2256,35 @@ func _cleanup_corridor_reservations() -> void:
 		var owner_id := int(corridor_reservations.get(key, 0))
 		var owner := instance_from_id(owner_id) as AnimatedAgent if owner_id != 0 else null
 		if owner == null or not is_instance_valid(owner) or owner.is_queued_for_deletion():
+			# `owner_of` performs stale-owner cleanup even though the freed Object can
+			# no longer be passed to `release`.
+			runtime_leases.owner_of(_corridor_lease_id(key))
 			corridor_reservations.erase(key)
 			agent_corridor_reservations.erase(owner_id)
+		elif String(agent_corridor_reservations.get(owner_id, "")) != key:
+			runtime_leases.release(_corridor_lease_id(key), owner)
+			corridor_reservations.erase(key)
+		elif not owner.navigation_active and not _agent_is_inside_corridor(owner, key):
+			_release_agent_corridor(owner)
+
+
+func _clear_corridor_runtime_reservations() -> void:
+	for key: String in corridor_reservations.keys():
+		var owner_id := int(corridor_reservations.get(key, 0))
+		var owner := instance_from_id(owner_id) as AnimatedAgent if owner_id != 0 else null
+		if owner != null and is_instance_valid(owner) and not owner.is_queued_for_deletion():
+			runtime_leases.release(_corridor_lease_id(key), owner)
+		else:
+			runtime_leases.owner_of(_corridor_lease_id(key))
+	corridor_reservations.clear()
+	agent_corridor_reservations.clear()
 
 
 func agent_is_inside_contested_corridor(agent: AnimatedAgent) -> bool:
 	var key := _corridor_key(world_to_cell(agent.global_position))
 	if key.is_empty():
 		return false
-	for other: AnimatedAgent in navigation_agents:
+	for other: AnimatedAgent in _agents_near_corridor(key):
 		if other == agent or not is_instance_valid(other) or other.is_queued_for_deletion() or not other.is_collision_enabled():
 			continue
 		if _agent_is_inside_corridor(other, key) or (other.navigation_active and _upcoming_corridor_key(other, other.path, other.path_index) == key):
@@ -2024,11 +2365,19 @@ func find_agent_recovery_detour(agent: AnimatedAgent, final_destination: Vector3
 	var release_index := first_world.size()
 	for point: Vector3 in continuation:
 		first_world.append(point)
+	if not _acquire_agent_holding(agent, best_cell):
+		return {}
 	return {"path": first_world, "release_index": release_index, "pullout": cell_to_world(best_cell)}
 
 
 func _traffic_holding_position_is_free(agent: AnimatedAgent, candidate: Vector3) -> bool:
-	for other: AnimatedAgent in navigation_agents:
+	if not traffic_coordinator.holding_is_available(agent, world_to_cell(candidate)):
+		RuntimeDiagnostics.record_lease_conflict()
+		return false
+	# A recovery path reaches its bay from at most three grid rings away. Querying
+	# six rings covers both the owner and every path segment considered below,
+	# without turning every probe back into a full crowd scan.
+	for other: AnimatedAgent in _nearby_navigation_agents(candidate, CELL_SIZE * 6.0 + 2.0, agent):
 		if other == agent or not is_instance_valid(other) or other.is_queued_for_deletion() or not other.is_collision_enabled():
 			continue
 		var required := agent.agent_radius + other.agent_radius + 0.32
@@ -2060,7 +2409,7 @@ func _nearest_conflicting_agent(agent: AnimatedAgent) -> AnimatedAgent:
 	var forward := Vector3.ZERO
 	if agent.path_index < agent.path.size():
 		forward = agent.global_position.direction_to(agent.path[agent.path_index])
-	for other: AnimatedAgent in navigation_agents:
+	for other: AnimatedAgent in _nearby_navigation_agents(agent.global_position, CELL_SIZE * 6.0 + 2.0, agent):
 		if other == agent or not is_instance_valid(other) or other.is_queued_for_deletion() or not other.is_collision_enabled():
 			continue
 		var other_corridor := _corridor_key(world_to_cell(other.global_position))
@@ -2096,6 +2445,26 @@ func _decode_corridor_cells(key: String) -> Array[Vector2i]:
 	return result
 
 
+func _agents_near_corridor(key: String) -> Array[AnimatedAgent]:
+	var cells := _decode_corridor_cells(key)
+	if cells.is_empty():
+		return []
+	var minimum := cells[0]
+	var maximum := cells[0]
+	for cell: Vector2i in cells:
+		minimum.x = mini(minimum.x, cell.x)
+		minimum.y = mini(minimum.y, cell.y)
+		maximum.x = maxi(maximum.x, cell.x)
+		maximum.y = maxi(maximum.y, cell.y)
+	var minimum_world := cell_to_world(minimum)
+	var maximum_world := cell_to_world(maximum)
+	var center := minimum_world.lerp(maximum_world, 0.5)
+	# `_upcoming_corridor_key` looks six waypoints ahead. The same six-cell
+	# margin includes every contender which can request this component now.
+	var radius := minimum_world.distance_to(maximum_world) * 0.5 + CELL_SIZE * 6.0
+	return _nearby_navigation_agents(center, radius)
+
+
 func can_agent_move(from_position: Vector3, to_position: Vector3, radius: float = 0.34) -> bool:
 	var distance := Vector2(from_position.x, from_position.z).distance_to(Vector2(to_position.x, to_position.z))
 	var checks := maxi(ceili(distance / 0.18), 1)
@@ -2122,7 +2491,9 @@ func can_agent_step(agent: AnimatedAgent, from_position: Vector3, to_position: V
 	var own_points := agent.get_avoidance_points()
 	if own_points.is_empty():
 		own_points.append(from_position)
-	for other: AnimatedAgent in navigation_agents:
+	var query_center := from_position.lerp(to_position, 0.5)
+	var query_radius := from_position.distance_to(to_position) * 0.5 + agent.agent_radius + 1.35
+	for other: AnimatedAgent in _nearby_navigation_agents(query_center, query_radius, agent):
 		if other == agent or not is_instance_valid(other) or other.is_queued_for_deletion() or not other.is_collision_enabled():
 			continue
 		var minimum := agent.agent_radius + other.agent_radius + 0.08
@@ -2169,7 +2540,7 @@ func compute_agent_velocity(agent: AnimatedAgent, desired_velocity: Vector3) -> 
 	var desired_direction := desired_velocity.normalized()
 	var neighbors: Array[Dictionary] = []
 	var imminent_conflict := false
-	for other: AnimatedAgent in navigation_agents.duplicate():
+	for other: AnimatedAgent in _nearby_navigation_agents(agent.global_position, agent.agent_radius * 2.0 + 3.6, agent):
 		if other == agent or not is_instance_valid(other) or other.is_queued_for_deletion() or not other.is_collision_enabled():
 			continue
 		var offset := Vector3.ZERO
@@ -2360,7 +2731,7 @@ func find_safe_agent_position(preferred: Vector3, agent: AnimatedAgent = null) -
 				break
 		if not free:
 			continue
-		for other: AnimatedAgent in navigation_agents:
+		for other: AnimatedAgent in _nearby_navigation_agents(position, 2.2, agent):
 			if other == agent or not is_instance_valid(other) or not other.is_collision_enabled():
 				continue
 			var required := (agent.agent_radius if agent != null else 0.34) + other.agent_radius + 0.18
@@ -2382,12 +2753,18 @@ func find_safe_agent_position(preferred: Vector3, agent: AnimatedAgent = null) -
 func staff_standby_position(agent: AnimatedAgent, role: String, force_refresh: bool = false) -> Vector3:
 	var key := agent.get_instance_id()
 	if force_refresh:
-		staff_standby_reservations.erase(key)
+		_release_agent_standby(agent)
 	if staff_standby_reservations.has(key):
 		var reserved_cell := Vector2i(staff_standby_reservations[key])
-		if astar.is_in_boundsv(reserved_cell) and not astar.is_point_solid(reserved_cell):
+		var reserved_lease := _standby_lease_id(reserved_cell)
+		if (
+			astar.is_in_boundsv(reserved_cell)
+			and not astar.is_point_solid(reserved_cell)
+			and runtime_leases.try_acquire(reserved_lease, agent, -1.0, 0.0, {"kind": "standby", "cell": reserved_cell})
+		):
+			_standby_lease_by_agent[key] = reserved_lease
 			return cell_to_world(reserved_cell)
-		staff_standby_reservations.erase(key)
+		_release_agent_standby(agent)
 	var service_cells := _staff_service_cells()
 	var best_cell := _nearest_open_cell(world_to_cell(agent.global_position))
 	var best_score := INF
@@ -2430,6 +2807,9 @@ func staff_standby_position(agent: AnimatedAgent, role: String, force_refresh: b
 						break
 				if reserved:
 					continue
+				var standby_owner: Variant = runtime_leases.owner_of(_standby_lease_id(cell))
+				if standby_owner != null and standby_owner != agent:
+					continue
 				var wrong_zone := false
 				if role == "waiter" and waiter_zone != "pass":
 					wrong_zone = y >= 8
@@ -2451,7 +2831,12 @@ func staff_standby_position(agent: AnimatedAgent, role: String, force_refresh: b
 					best_cell = cell
 		if best_score < INF:
 			break
-	staff_standby_reservations[key] = best_cell
+	var best_lease := _standby_lease_id(best_cell)
+	if runtime_leases.try_acquire(best_lease, agent, -1.0, 0.0, {"kind": "standby", "cell": best_cell}):
+		staff_standby_reservations[key] = best_cell
+		_standby_lease_by_agent[key] = best_lease
+	else:
+		RuntimeDiagnostics.record_lease_conflict()
 	return cell_to_world(best_cell)
 
 
@@ -2507,7 +2892,11 @@ func _open_neighbor_count(cell: Vector2i) -> int:
 func is_work_position_available(position: Vector3, employee_id: String) -> bool:
 	# A station reservation is not enough: the previous worker may still be
 	# physically leaving, or another station can expose the same access cell.
-	for other: AnimatedAgent in navigation_agents:
+	var candidates := _nearby_navigation_agents(position, 1.6)
+	for destination_agent: AnimatedAgent in _nearby_destination_agents(position, 1.6):
+		if not candidates.has(destination_agent):
+			candidates.append(destination_agent)
+	for other: AnimatedAgent in candidates:
 		if not (other is EmployeeAgent) or not is_instance_valid(other) or other.is_queued_for_deletion():
 			continue
 		var worker := other as EmployeeAgent
@@ -2535,7 +2924,9 @@ func can_visual_person_step(owner: AnimatedAgent, from_position: Vector3, to_pos
 		var sibling_candidate := Vector2(to_position.x, to_position.z).distance_to(Vector2(sibling_point.x, sibling_point.z))
 		if sibling_candidate < sibling_required and sibling_candidate <= sibling_current + 0.004:
 			return false
-	for other: AnimatedAgent in navigation_agents:
+	var query_center := from_position.lerp(to_position, 0.5)
+	var query_radius := from_position.distance_to(to_position) * 0.5 + radius + 1.25
+	for other: AnimatedAgent in _nearby_navigation_agents(query_center, query_radius, owner):
 		if other == owner or not is_instance_valid(other) or other.is_queued_for_deletion() or not other.is_collision_enabled():
 			continue
 		var required := radius + other.agent_radius + 0.06
@@ -2697,14 +3088,11 @@ func try_begin_customer_entry(customer: Node) -> bool:
 			break
 	if next_reserved != customer:
 		return false
-	if door_owner == null:
-		door_owner = customer
-	return door_owner == customer
+	return traffic_coordinator.try_acquire_door(customer)
 
 
 func finish_customer_entry(customer: Node) -> void:
-	if door_owner == customer:
-		door_owner = null
+	traffic_coordinator.release_door(customer)
 
 
 func register_customer_exit(customer: Node) -> void:
@@ -2717,17 +3105,16 @@ func register_customer_exit(customer: Node) -> void:
 func try_begin_customer_exit(customer: Node) -> bool:
 	register_customer_exit(customer)
 	_cleanup_customer_flow()
-	if door_owner == null and not exit_wait_queue.is_empty() and exit_wait_queue[0] == customer:
-		door_owner = customer
-	return door_owner == customer
+	if not exit_wait_queue.is_empty() and exit_wait_queue[0] == customer:
+		return traffic_coordinator.try_acquire_door(customer)
+	return false
 
 
 func finish_customer_exit(customer: Node) -> void:
 	if customer != null:
 		exiting_customers.erase(customer.get_instance_id())
 		exit_wait_queue.erase(customer)
-	if door_owner == customer:
-		door_owner = null
+	traffic_coordinator.release_door(customer)
 
 
 func _cleanup_customer_flow() -> void:
@@ -2741,8 +3128,7 @@ func _cleanup_customer_flow() -> void:
 	for candidate: Node in exit_wait_queue.duplicate():
 		if candidate == null or not is_instance_valid(candidate) or candidate.is_queued_for_deletion() or not exiting_customers.has(candidate.get_instance_id()):
 			exit_wait_queue.erase(candidate)
-	if door_owner != null and (not is_instance_valid(door_owner) or door_owner.is_queued_for_deletion()):
-		door_owner = null
+	traffic_coordinator.cleanup_door()
 
 
 func _random_customer_group_size() -> int:

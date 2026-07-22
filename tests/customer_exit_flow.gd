@@ -2,6 +2,7 @@ extends Node
 
 const STEP := 0.10
 const MAX_DEPARTURE_SECONDS := 30.0
+const SERVICE_STRESS_FIXTURE := preload("res://tests/fixtures/service_stress_fixture.gd")
 
 var failures: Array[String] = []
 
@@ -10,6 +11,7 @@ func _ready() -> void:
 	SaveManager.writes_enabled = false
 	seed(20260716)
 	GameState.reset_to_defaults(false)
+	SERVICE_STRESS_FIXTURE.apply()
 	var main_scene: PackedScene = load("res://scenes/main/main.tscn")
 	var main := main_scene.instantiate()
 	add_child(main)
@@ -34,6 +36,10 @@ func _ready() -> void:
 			lanes_are_unique = lanes_are_unique and gates[first].distance_to(gates[second]) >= CustomerAgent.EXIT_LANE_SPACING - 0.01
 	_expect(lanes_are_unique, "all four diners own separate sidewalk lanes and gate coordinates")
 	customer._begin_leaving(false)
+	_expect(customer.lifecycle_state == CustomerAgent.LIFECYCLE_LEAVING, "departure enters the canonical terminal lifecycle exactly once")
+	var departure_state := customer.state
+	customer._set_state("waiting_order")
+	_expect(customer.state == departure_state and customer.lifecycle_state == CustomerAgent.LIFECYCLE_LEAVING, "a leaving party cannot return to ordering or seated service")
 	customer._process(0.0)
 	var stand_started_at: Dictionary = {}
 	var first_departed_at := -1.0
@@ -62,10 +68,33 @@ func _ready() -> void:
 	_expect(latest_stand <= 0.75, "the entire party starts standing within one short overlapping launch window")
 	_expect(observed_individual_despawn and first_departed_at > 0.0, "a diner is hidden and queued for removal while later party members are still walking")
 	_expect(customer._departed_members.size() == customer.group_size and customer.is_queued_for_deletion(), "the controller ends exactly when the last member reaches their gate")
+	_expect(customer.lifecycle_state == CustomerAgent.LIFECYCLE_DESPAWN, "the last independent guest advances the controller to canonical despawn")
 	_expect(elapsed < MAX_DEPARTURE_SECONDS, "a four-person exit completes inside the bounded parallel-flow budget")
+	var recovery_customer := CustomerAgent.new()
+	main.world.customer_root.add_child(recovery_customer)
+	recovery_customer.setup(main.world, 1)
+	var recovery_person := recovery_customer.people[0]
+	var recovery_origin := recovery_person.global_position
+	var blocked_checkpoint: Vector3 = main.world.cell_to_world(Vector2i(main.world.entrance_cell.x, RestaurantWorld.ROAD_ROWS[0]))
+	recovery_customer._force_person_checkpoint(recovery_person, blocked_checkpoint, "recovery_probe")
+	_expect(recovery_person.global_position.is_equal_approx(recovery_origin) and recovery_person.phase != "arrived", "route recovery never teleports a guest or reports synthetic arrival")
+	SimulationManager.unregister_customer(recovery_customer, false)
+	recovery_customer._registered = false
+	recovery_customer.queue_free()
+	var closing_customer := CustomerAgent.new()
+	main.world.customer_root.add_child(closing_customer)
+	closing_customer.setup(main.world, 2)
+	GameState.set_restaurant_state("closing")
+	closing_customer._process(STEP)
+	_expect(closing_customer.lifecycle_state == CustomerAgent.LIFECYCLE_LEAVING and closing_customer.people.all(func(person: CustomerPersonAgent): return person.target_tag.begins_with("exit_despawn_")), "closing immediately routes every unseated guest to an individual exterior gate")
+	for person: CustomerPersonAgent in closing_customer.people:
+		person.global_position = person.destination
+		person.phase = "arrived"
+	closing_customer._process(STEP)
+	_expect(closing_customer.lifecycle_state == CustomerAgent.LIFECYCLE_DESPAWN and closing_customer.is_queued_for_deletion(), "controlled closing completes only after every physical guest reaches its own gate")
 	var result := "CUSTOMER EXIT FLOW: %s checks=%d failures=%d elapsed=%.2f first_despawn=%.2f latest_stand=%.2f\n" % [
 		"PASS" if failures.is_empty() else "FAIL",
-		6,
+		12,
 		failures.size(),
 		elapsed,
 		first_departed_at,

@@ -73,6 +73,27 @@ func walk_to_position(target: Vector3, tag: String, delay: float = 0.0, ignore_f
 	return accepted
 
 
+func cancel_destination(reason: String = "controller_cancelled") -> void:
+	# Cancelling a route never changes the physical transform. The party
+	# controller may schedule a later retry or transition to a different legal
+	# destination, while traffic leases are released immediately.
+	shutdown_navigation()
+	navigation_failed = false
+	path.clear()
+	path_index = 0
+	destination = global_position
+	target_tag = ""
+	phase = "route_cancelled"
+	velocity = Vector3.ZERO
+	play_animation("Idle")
+	RuntimeDiagnostics.record_event("customer_destination_cancelled", {
+		"party": String(party.name) if party != null else "",
+		"member": member_index,
+		"reason": reason,
+		"position": [global_position.x, global_position.y, global_position.z],
+	})
+
+
 func tick_motion(delta: float) -> void:
 	match phase:
 		"walking":
@@ -116,6 +137,9 @@ func tick_motion(delta: float) -> void:
 				phase = "standing_ready"
 				seated = false
 				play_animation("Idle")
+		"route_cancelled":
+			velocity = Vector3.ZERO
+			play_animation("Idle")
 
 
 func begin_seating(assignment: Dictionary, table_center: Vector3) -> void:
@@ -276,6 +300,7 @@ func _update_eating_gesture(delta: float) -> void:
 			_bite_elapsed = 0.0
 			_bite_duration = randf_range(0.88, 1.24)
 			_bite_count += 1
+			AudioManager.play_sfx("eat_bite", randf_range(0.92, 1.08))
 	if not _bite_active:
 		# A quiet seated idle between bites: breathing and a tiny glance, not a
 		# permanent loop of the same eating motion.

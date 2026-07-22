@@ -77,6 +77,7 @@ func _test_handyman_navigation_completion() -> void:
 	var main := main_scene.instantiate()
 	add_child(main)
 	GameState.reset_to_defaults(false)
+	GameState.layout.append({"uid":"plant_1", "item":"plant", "cell":[15,3], "rotation":0})
 	main.world.load_layout()
 	var default_plant := main.world.placed_objects.get("plant_1") as PlacedObject
 	var plant_has_collider := false

@@ -2,6 +2,26 @@ class_name ModelFactory
 extends RefCounted
 
 static var _cache: Dictionary = {}
+const RigCarryMarkerScript := preload("res://scripts/utilities/rig_carry_marker.gd")
+
+## Stable attachment contract shared by every humanoid rig.  Imported KayKit
+## scenes do not expose identically named sockets, so gameplay code must never
+## depend on a pack-specific bone name such as `Fist.R`.
+const RIG_MARKER_NAMES: Array[StringName] = [
+	&"Hand_L", &"Hand_R", &"Carry", &"Work", &"Seat", &"Table"
+]
+const _RIG_BONE_ALIASES := {
+	"Hand_L": ["Fist.L", "Hand.L", "hand_l", "LeftHand", "mixamorig:LeftHand"],
+	"Hand_R": ["Fist.R", "Hand.R", "hand_r", "RightHand", "mixamorig:RightHand"],
+}
+const _RIG_MARKER_FALLBACKS := {
+	"Hand_L": Vector3(-0.42, 1.52, -0.08),
+	"Hand_R": Vector3(0.42, 1.52, -0.08),
+	"Carry": Vector3(0.0, 1.38, -0.42),
+	"Work": Vector3(0.0, 1.18, -0.58),
+	"Seat": Vector3(0.0, 0.0, 0.0),
+	"Table": Vector3(0.0, 1.02, -0.58),
+}
 
 
 static func instantiate_model(path: String, scale_factor: float = 1.0) -> Node3D:
@@ -49,6 +69,69 @@ static func find_animation_players(root: Node) -> Array[AnimationPlayer]:
 	for child: Node in root.get_children():
 		result.append_array(find_animation_players(child))
 	return result
+
+
+## Adds (or adopts) the six canonical marker nodes without modifying the
+## imported resource. Hand markers bind to real bones when available; every
+## other marker has a conservative local fallback so all supplied rigs expose
+## the same API even if a future asset pack uses different bone names.
+static func ensure_rig_markers(root: Node3D) -> Dictionary:
+	var result: Dictionary = {}
+	if root == null:
+		return result
+	var skeleton := find_skeleton(root)
+	for marker_name: StringName in RIG_MARKER_NAMES:
+		var key := String(marker_name)
+		var marker := root.find_child(key, true, false) as Node3D
+		if marker == null and key == "Carry" and result.has("Hand_L") and result.has("Hand_R"):
+			var carry_marker := RigCarryMarkerScript.new()
+			carry_marker.name = marker_name
+			carry_marker.set_meta("rig_marker_source", "hands_midpoint")
+			root.add_child(carry_marker)
+			carry_marker.configure(result.Hand_L as Node3D, result.Hand_R as Node3D)
+			marker = carry_marker
+		if marker == null and skeleton != null and _RIG_BONE_ALIASES.has(key):
+			var bone_index := _find_bone_alias(skeleton, _RIG_BONE_ALIASES[key])
+			if bone_index >= 0:
+				var attachment := BoneAttachment3D.new()
+				attachment.name = marker_name
+				attachment.bone_name = skeleton.get_bone_name(bone_index)
+				attachment.set_meta("rig_marker_source", "bone:%s" % attachment.bone_name)
+				skeleton.add_child(attachment)
+				marker = attachment
+		if marker == null:
+			marker = Node3D.new()
+			marker.name = marker_name
+			marker.position = Vector3(_RIG_MARKER_FALLBACKS.get(key, Vector3.ZERO))
+			marker.set_meta("rig_marker_source", "fallback")
+			root.add_child(marker)
+		marker.set_meta("rig_marker", true)
+		marker.set_meta("rig_marker_name", key)
+		result[key] = marker
+	root.set_meta("rig_marker_contract", 1)
+	return result
+
+
+static func find_skeleton(root: Node) -> Skeleton3D:
+	if root is Skeleton3D:
+		return root as Skeleton3D
+	for candidate: Node in root.find_children("*", "Skeleton3D", true, false):
+		return candidate as Skeleton3D
+	return null
+
+
+static func _find_bone_alias(skeleton: Skeleton3D, aliases: Array) -> int:
+	for alias: Variant in aliases:
+		var exact := skeleton.find_bone(String(alias))
+		if exact >= 0:
+			return exact
+	for bone_index: int in skeleton.get_bone_count():
+		var normalized := String(skeleton.get_bone_name(bone_index)).to_lower().replace("_", "").replace(".", "").replace(":", "")
+		for alias: Variant in aliases:
+			var candidate := String(alias).to_lower().replace("_", "").replace(".", "").replace(":", "")
+			if normalized == candidate:
+				return bone_index
+	return -1
 
 
 static func calculate_visual_bounds(root: Node3D, include_root_transform: bool = false) -> AABB:

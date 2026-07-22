@@ -24,7 +24,8 @@ func _ready() -> void:
 
 
 func apply_quality(preset: String) -> void:
-	if preset not in ["auto", "low", "balanced", "high", "ultra"]:
+	preset = normalize_preset(preset)
+	if preset not in ["auto", "low", "medium", "high"]:
 		preset = "auto"
 	current_quality = preset
 	_adaptive_quality = preset == "auto" and OS.has_feature("web")
@@ -36,17 +37,12 @@ func apply_quality(preset: String) -> void:
 		"low":
 			_quality_ceiling = 0.62 if not OS.has_feature("web") else 0.54
 			Engine.max_fps = 30
-		"balanced":
+		"medium":
 			_quality_ceiling = 0.82 if not OS.has_feature("web") else 0.68
 			viewport.screen_space_aa = Viewport.SCREEN_SPACE_AA_FXAA
 			Engine.max_fps = 60 if not mobile_browser else 30
 		"high":
-			_quality_ceiling = 1.0 if not OS.has_feature("web") else 0.82
-			viewport.msaa_3d = Viewport.MSAA_2X
-			viewport.use_debanding = true
-			Engine.max_fps = 90 if not OS.has_feature("web") else 60
-		"ultra":
-			_quality_ceiling = 1.0 if not OS.has_feature("web") else 0.9
+			_quality_ceiling = 1.0 if not OS.has_feature("web") else 0.86
 			viewport.msaa_3d = Viewport.MSAA_4X if not OS.has_feature("web") else Viewport.MSAA_2X
 			viewport.use_debanding = true
 			Engine.max_fps = 120 if not OS.has_feature("web") else 60
@@ -104,7 +100,15 @@ func shadows_enabled() -> bool:
 
 
 func shadow_distance() -> float:
-	return {"low": 0.0, "balanced": 38.0, "high": 58.0, "ultra": 72.0}.get(current_quality, 55.0)
+	return {"low": 0.0, "medium": 38.0, "high": 68.0}.get(current_quality, 55.0)
+
+
+func normalize_preset(preset: String) -> String:
+	if preset == "balanced":
+		return "medium"
+	if preset == "ultra":
+		return "high"
+	return preset if preset in ["auto", "low", "medium", "high"] else "auto"
 
 
 func _query_browser_flag(expression: String) -> bool:

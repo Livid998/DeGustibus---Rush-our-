@@ -31,6 +31,7 @@ var _mechanism_nodes: Array[Node3D] = []
 var _mechanism_rest_rotations: Array[Vector3] = []
 var _access_animation_time := -1.0
 var _burner_glow: Node3D
+var _interaction_markers: Dictionary = {}
 
 
 func _process(delta: float) -> void:
@@ -51,6 +52,7 @@ func setup(value_uid: String, item: Dictionary, cell: Vector2i, rotation_value: 
 	visual_model.name = "VisualModel"
 	ModelFactory.align_visual_to_grid_origin(visual_model)
 	add_child(visual_model)
+	_create_interaction_markers()
 	_configure_equipment_feedback()
 	_create_invisible_collision()
 	if not station_id.is_empty():
@@ -133,15 +135,17 @@ func show_task(task: Dictionary) -> void:
 	_status_label.visible = true
 	_status_label.text = "%s  0%%" % task.recipe_step_id.capitalize()
 	var input_parts := FoodVisualFactory.parts_for_task(task, "input")
-	if input_parts.is_empty() and not _task_output_model_path.is_empty():
-		input_parts = FoodVisualFactory.parts_for_task(task, "output")
-		_task_visual_phase = "output"
-	_set_food_parts(input_parts)
+	if input_parts.is_empty():
+		# A dependency-only step may have no loose input in the current frame.
+		# Its process container is safe to show; the finished dish is not.
+		input_parts = FoodVisualFactory.parts_for_task(task, "process")
+	_set_food_parts(input_parts, task, _task_visual_phase)
+	_play_task_start_sfx(task)
 	if station_id in ["oven", "pizza_oven"]:
 		play_access_animation()
-	_set_burner_active(station_id in ["stove", "multi_stove"])
+	_set_burner_active(station_id in ["stove", "multi_stove"] and _task_generates_heat(task))
 	if _steam:
-		_steam.emitting = true
+		_steam.emitting = _task_generates_heat(task)
 
 
 func update_task_progress(task: Dictionary) -> void:
@@ -154,12 +158,16 @@ func update_task_progress(task: Dictionary) -> void:
 	# finished dish settles before the task completes.
 	var process_threshold := 0.18 if _task_visual_style in ["bake", "cook", "fry", "sear", "simmer", "roast"] else 0.24
 	var output_threshold := 0.80 if _task_visual_style in ["bake", "cook", "fry", "sear", "simmer", "roast"] else 0.72
+	if FoodVisualFactory.task_output_is_service_ready(task):
+		# The pass cannot visually advertise a serviceable dish while the final
+		# assembly task is still in progress.
+		output_threshold = 1.01
 	if _task_visual_phase == "input" and _task_progress_ratio >= process_threshold:
 		_task_visual_phase = "process"
-		_set_food_parts(FoodVisualFactory.parts_for_task(task, "process"))
+		_set_food_parts(FoodVisualFactory.parts_for_task(task, "process"), task, _task_visual_phase)
 	if _task_visual_phase == "process" and _task_progress_ratio >= output_threshold and not _task_output_model_path.is_empty():
 		_task_visual_phase = "output"
-		_set_food_parts(FoodVisualFactory.parts_for_task(task, "output"))
+		_set_food_parts(FoodVisualFactory.parts_for_task(task, "output"), task, _task_visual_phase)
 	var displayed_percent := clampi((percent / 5) * 5, 0, 100)
 	if displayed_percent == _last_progress_percent:
 		return
@@ -185,7 +193,10 @@ func complete_task_visual(task: Dictionary) -> void:
 	_task_visual_phase = "output"
 	_task_progress_ratio = 1.0
 	_status_label.visible = false
-	_set_food_parts(FoodVisualFactory.parts_for_task(task, "output"))
+	_set_food_parts(FoodVisualFactory.parts_for_task(task, "output"), task, _task_visual_phase)
+	if FoodVisualFactory.task_output_is_service_ready(task):
+		AudioManager.play_sfx("plate_place")
+		AudioManager.play_sfx("dish_serve")
 	_set_burner_active(false)
 	if station_id in ["oven", "pizza_oven"]:
 		play_access_animation()
@@ -197,6 +208,8 @@ func take_completed_output(task_id: String) -> void:
 	if task_id.is_empty() or _completed_task_id != task_id:
 		return
 	_completed_task_id = ""
+	if _food_visual_root != null and bool(_food_visual_root.get_meta("service_ready", false)):
+		AudioManager.play_sfx("plate_pickup")
 	if station_id in ["oven", "pizza_oven", "fridge"]:
 		play_access_animation()
 	_clear_food_models()
@@ -206,6 +219,7 @@ func play_access_animation() -> void:
 	if _mechanism_nodes.is_empty():
 		return
 	_access_animation_time = 0.0
+	AudioManager.play_sfx("fridge_open" if station_id == "fridge" else "oven_open")
 
 
 func _configure_equipment_feedback() -> void:
@@ -237,6 +251,7 @@ func _update_access_animation(delta: float) -> void:
 		for index: int in _mechanism_nodes.size():
 			_mechanism_nodes[index].rotation = _mechanism_rest_rotations[index]
 		_access_animation_time = -1.0
+		AudioManager.play_sfx("fridge_close" if station_id == "fridge" else "oven_close")
 
 
 func _create_burner_glow() -> void:
@@ -269,19 +284,80 @@ func _create_burner_glow() -> void:
 
 func _set_burner_active(active: bool) -> void:
 	if _burner_glow != null:
+		var changed := _burner_glow.visible != active
 		_burner_glow.visible = active
+		if changed and active:
+			AudioManager.play_sfx("burner_ignite")
+			AudioManager.play_sfx("sizzle")
 
 
-func _set_food_parts(parts: Array) -> void:
+func _set_food_parts(parts: Array, task: Dictionary = {}, phase: String = "component") -> void:
 	_clear_food_models()
-	_food_visual_root = FoodVisualFactory.instantiate_parts(parts, 1.0)
+	var final_service := phase == "output" and FoodVisualFactory.task_output_is_service_ready(task)
+	if final_service:
+		_food_visual_root = FoodVisualFactory.instantiate_canonical_serving(String(task.get("output", "")))
+	else:
+		_food_visual_root = FoodVisualFactory.instantiate_parts(parts, 1.0)
 	_food_visual_root.name = "TaskFoodVisual"
+	_food_visual_root.set_meta("task_phase", phase)
+	_food_visual_root.set_meta("task_id", String(task.get("id", "")))
+	_food_visual_root.set_meta("service_ready", final_service)
 	_food_anchor.add_child(_food_visual_root)
 	for child: Node in _food_visual_root.get_children():
 		if child is Node3D:
 			_food_models.append(child as Node3D)
 	_food_model = _food_models[0] if not _food_models.is_empty() else null
 	_animate_task_food()
+
+
+func task_visual_snapshot() -> Dictionary:
+	return {
+		"task_id": String(current_task.get("id", _completed_task_id)),
+		"phase": _task_visual_phase,
+		"service_ready": bool(_food_visual_root.get_meta("service_ready", false)) if _food_visual_root != null else false,
+		"burner_active": _burner_glow != null and _burner_glow.visible,
+		"steam_active": _steam != null and _steam.emitting,
+		"access_active": _access_animation_time >= 0.0,
+	}
+
+
+func interaction_marker(marker_name: String) -> Node3D:
+	return _interaction_markers.get(marker_name) as Node3D
+
+
+func _task_generates_heat(task: Dictionary) -> bool:
+	return FoodVisualFactory.task_style(task, station_id) in ["bake", "cook", "fry", "sear", "simmer", "roast"]
+
+
+func _play_task_start_sfx(task: Dictionary) -> void:
+	match FoodVisualFactory.task_style(task, station_id):
+		"chop", "slice", "grate": AudioManager.play_sfx("chop")
+		"mix", "sauce", "toss": AudioManager.play_sfx("mix")
+		"knead": AudioManager.play_sfx("knead")
+
+
+func _create_interaction_markers() -> void:
+	var bounds := ModelFactory.calculate_visual_bounds(visual_model, true)
+	var top := clampf(bounds.end.y + 0.02, 0.0, 3.0) if not bounds.size.is_zero_approx() else 1.0
+	var raw_work: Variant = definition.get("work_anchor", [])
+	var work_position := Vector3(0.0, top, 0.0)
+	if raw_work is Array and raw_work.size() >= 3:
+		work_position = Vector3(float(raw_work[0]), float(raw_work[1]), float(raw_work[2]))
+	if not station_id.is_empty():
+		_add_interaction_marker("Work", work_position)
+	if String(definition.get("support_kind", "")) == "dining_table":
+		_add_interaction_marker("Table", Vector3(0.0, top, 0.0))
+	if String(definition.get("placement", "")) == "seat":
+		_add_interaction_marker("Seat", Vector3(0.0, minf(top * 0.52, 0.62), 0.0))
+
+
+func _add_interaction_marker(marker_name: String, local_position: Vector3) -> void:
+	var marker := Node3D.new()
+	marker.name = marker_name
+	marker.position = local_position
+	marker.set_meta("interaction_marker", true)
+	add_child(marker)
+	_interaction_markers[marker_name] = marker
 
 
 func _clear_food_models() -> void:
@@ -300,6 +376,11 @@ func _animate_task_food() -> void:
 		var model := _food_models[index]
 		if not is_instance_valid(model):
 			continue
+		# Canonical serving children carry authored normalization directly on
+		# their root. Resetting their scale to ONE would silently turn the pass
+		# plate back into the raw 0.95 m source mesh.
+		if _task_visual_phase == "output" or model.has_meta("canonical_container_kind"):
+			continue
 		var phase := float(index) * TAU / maxf(float(count), 1.0)
 		var base: Vector3 = model.get_meta("base_position", model.position)
 		var base_rotation: Vector3 = model.get_meta("base_rotation", model.rotation)
@@ -307,7 +388,7 @@ func _animate_task_food() -> void:
 		model.scale = Vector3.ONE
 		model.position = base
 		model.rotation = base_rotation
-		if role == "container" or _task_visual_phase == "output":
+		if role == "container":
 			continue
 		match _task_visual_style:
 			"chop", "slice", "grate":
@@ -368,6 +449,9 @@ func _create_station_feedback() -> void:
 	var raw_anchor: Variant = definition.get("work_anchor", [])
 	if raw_anchor is Array and raw_anchor.size() >= 3:
 		anchor_position = Vector3(float(raw_anchor[0]), float(raw_anchor[1]), float(raw_anchor[2]))
+	var work_marker := interaction_marker("Work")
+	if work_marker != null:
+		anchor_position = work_marker.position
 	_food_anchor = Node3D.new()
 	_food_anchor.name = "TaskFoodAnchor"
 	_food_anchor.position = anchor_position

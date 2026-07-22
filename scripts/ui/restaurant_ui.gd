@@ -14,6 +14,9 @@ var debug_content: VBoxContainer
 var toast_label: Label
 var tutorial_panel: PanelContainer
 var tutorial_label: Label
+var readiness_dialog: ConfirmationDialog
+var readiness_cta_button: Button
+var _readiness_cta_action := ""
 var money_label: Label
 var reputation_label: Label
 var state_button: Button
@@ -84,17 +87,6 @@ const QUALITY_DEFECT_LABELS := {
 	"burned": "Piatto bruciato",
 	"poor_presentation": "Presentazione debole",
 }
-const TUTORIAL_STEPS := [
-	"Sposta un tavolo in modalità costruzione.",
-	"Aggiungi una sedia alla sala.",
-	"Controlla e bilancia il menu attivo.",
-	"Attiva il riordino automatico del pomodoro.",
-	"Apri il ristorante.",
-	"Osserva il primo ticket al pass.",
-	"Controlla il carico delle postazioni."
-]
-
-
 func _ready() -> void:
 	process_mode = Node.PROCESS_MODE_ALWAYS
 	_build_theme()
@@ -110,10 +102,22 @@ func setup(value_world: RestaurantWorld) -> void:
 	world = value_world
 	world.build_system.selection_changed.connect(_on_selection_changed)
 	world.build_system.preview_changed.connect(_on_preview_changed)
+	world.layout_object_moved.connect(_on_layout_object_moved)
+	world.layout_object_added.connect(_on_layout_object_added)
 	world.camera_rig.view_changed.connect(func(_quadrant: int): _refresh_camera_controls())
 	build_hud.setup(self, world)
 	_refresh_camera_controls()
 	show_screen("Ristorante")
+
+
+func _on_layout_object_moved(object: PlacedObject, previous_cell: Vector2i) -> void:
+	if object != null and is_instance_valid(object) and object.item_id.begins_with("table") and object.grid_cell != previous_cell:
+		TutorialManager.record_event("table_moved", {"uid": object.uid})
+
+
+func _on_layout_object_added(object: PlacedObject) -> void:
+	if object != null and is_instance_valid(object) and object.item_id in ["chair", "stool"] and not object.support_uid.is_empty():
+		TutorialManager.record_event("chair_placed", {"uid": object.uid, "table_uid": object.support_uid})
 
 
 func _process(delta: float) -> void:
@@ -142,7 +146,7 @@ func _process(delta: float) -> void:
 		var visible_market_page: VBoxContainer = _screen_pages.get("Mercato")
 		if visible_market_page != null:
 			ManagementScreens.update_market_countdowns(visible_market_page, market_provider)
-	if Input.is_action_just_pressed("toggle_debug"):
+	if OS.is_debug_build() and debug_panel != null and Input.is_action_just_pressed("toggle_debug"):
 		debug_panel.visible = not debug_panel.visible
 	if Input.is_action_just_pressed("speed_1"):
 		_select_simulation_speed(1.0)
@@ -174,17 +178,19 @@ func show_screen(screen_name: String, sound: bool = true) -> void:
 	screen_title_label.text = screen_name.to_upper()
 	var animate_open := sound or not screen_panel.visible
 	screen_panel.visible = true
-	if animate_open:
+	if animate_open and not reduced_motion_enabled():
 		screen_panel.modulate.a = 0.0
 		create_tween().tween_property(screen_panel, "modulate:a", 1.0, 0.16).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	else:
+		screen_panel.modulate.a = 1.0
 	_update_nav_selection()
 	_update_world_actions()
 	_update_pass()
 	_restore_current_scroll(screen_name)
 	if sound:
-		AudioManager.play_feedback()
-	if screen_name == "Statistiche" and not GameState.tutorial.complete:
-		advance_tutorial_to(6)
+		AudioManager.play_ui("page")
+	if screen_name == "Statistiche":
+		TutorialManager.record_event("station_load_viewed")
 
 
 func close_screen() -> void:
@@ -244,6 +250,7 @@ func _ensure_screen_page(screen_name: String) -> VBoxContainer:
 	screen_content.add_child(page)
 	ManagementScreens.populate(screen_name, page, self)
 	GameFonts.sanitize_control_tree(page)
+	_enforce_touch_targets(page)
 	_screen_pages[screen_name] = page
 	_screen_build_counts[screen_name] = int(_screen_build_counts.get(screen_name, 0)) + 1
 	return page
@@ -255,6 +262,7 @@ func _refresh_screen_page(screen_name: String, page: VBoxContainer) -> void:
 	ManagementScreens.refresh(screen_name, page, self)
 	GameFonts.sanitize_control_tree(page)
 	ManagementScreens.apply_responsive_layout(page, self)
+	_enforce_touch_targets(page)
 
 
 func _show_only_screen_page(page: VBoxContainer) -> void:
@@ -297,6 +305,8 @@ func make_button(text: String, callback: Callable, tone: String = "blue") -> But
 	set_button_content(button, text)
 	button.custom_minimum_size = Vector2(112, 48)
 	button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	button.set_meta("ui_tone", tone)
+	button.pressed.connect(func(): AudioManager.play_ui("tap"))
 	button.pressed.connect(callback)
 	button.add_theme_stylebox_override("normal", _button_style(tone))
 	button.add_theme_stylebox_override("hover", _button_style("green" if tone != "red" else "yellow"))
@@ -346,16 +356,8 @@ func make_section(title: String, subtitle: String = "") -> VBoxContainer:
 func make_card() -> PanelContainer:
 	var panel := PanelContainer.new()
 	panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	var style := StyleBoxFlat.new()
-	style.bg_color = Color("f5f0e7")
-	style.border_color = Color("d4c9b7")
-	style.set_border_width_all(1)
-	style.set_corner_radius_all(12)
-	style.content_margin_left = 12
-	style.content_margin_right = 12
-	style.content_margin_top = 10
-	style.content_margin_bottom = 10
-	panel.add_theme_stylebox_override("panel", style)
+	panel.set_meta("accessible_card", true)
+	panel.add_theme_stylebox_override("panel", _card_style())
 	return panel
 
 
@@ -369,19 +371,15 @@ func show_toast(message: String, tone: String = "info") -> void:
 	if _toast_tween:
 		_toast_tween.kill()
 	_toast_tween = create_tween()
-	_toast_tween.tween_interval(1.8)
-	_toast_tween.tween_property(toast_label, "modulate:a", 0.0, 0.45)
+	AudioManager.play_event({"income":"income", "warning":"warning", "cost":"warning"}.get(tone, "notification"))
+	_toast_tween.tween_interval(2.25 if reduced_motion_enabled() else 1.8)
+	if not reduced_motion_enabled():
+		_toast_tween.tween_property(toast_label, "modulate:a", 0.0, 0.45)
 	_toast_tween.tween_callback(func(): toast_label.visible = false)
 
 
 func advance_tutorial_to(step: int) -> void:
-	if bool(GameState.tutorial.get("skipped", false)) or bool(GameState.tutorial.get("complete", false)):
-		return
-	if step >= int(GameState.tutorial.step):
-		GameState.tutorial.step = mini(step + 1, TUTORIAL_STEPS.size())
-		if int(GameState.tutorial.step) >= TUTORIAL_STEPS.size():
-			GameState.tutorial.complete = true
-		_update_tutorial()
+	TutorialManager.record_legacy_step(step)
 
 
 func _build_shell() -> void:
@@ -396,9 +394,11 @@ func _build_shell() -> void:
 	_build_screen_panel()
 	_build_world_actions()
 	_build_pass_panel()
-	_build_debug_panel()
+	if OS.is_debug_build():
+		_build_debug_panel()
 	_build_toast()
 	_build_tutorial()
+	_build_readiness_dialog()
 	build_hud = BuildHUD.new()
 	root.add_child(build_hud)
 	_build_camera_controls()
@@ -885,10 +885,52 @@ func _build_tutorial() -> void:
 	tutorial_label.add_theme_font_size_override("font_size", 14)
 	tutorial_label.add_theme_color_override("font_color", Color("263f42"))
 	box.add_child(tutorial_label)
-	var skip := make_button("Salta", func(): GameState.tutorial.skipped = true; _update_tutorial(), "ghost")
+	var skip := make_button("Salta", TutorialManager.skip, "ghost")
 	skip.custom_minimum_size = Vector2(68, 34)
 	skip.size_flags_horizontal = Control.SIZE_SHRINK_END
 	box.add_child(skip)
+
+
+func _build_readiness_dialog() -> void:
+	readiness_dialog = ConfirmationDialog.new()
+	readiness_dialog.title = "Checklist prima dell'apertura"
+	readiness_dialog.exclusive = true
+	readiness_dialog.get_ok_button().text = "Chiudi"
+	readiness_dialog.get_cancel_button().visible = false
+	readiness_cta_button = readiness_dialog.add_button("Risolvi il primo problema", true)
+	readiness_cta_button.pressed.connect(_activate_readiness_cta)
+	root.add_child(readiness_dialog)
+
+
+func _show_opening_readiness(readiness: Dictionary) -> void:
+	if readiness_dialog == null:
+		return
+	var lines := PackedStringArray(["Prima di aprire risolvi questi punti:"])
+	var blockers: Array = readiness.get("blockers", [])
+	for issue: Dictionary in blockers:
+		lines.append("- %s" % String(issue.get("message", "Problema non specificato")))
+	var warnings: Array = readiness.get("warnings", [])
+	if not warnings.is_empty():
+		lines.append("")
+		lines.append("Avvisi non bloccanti:")
+		for issue: Dictionary in warnings:
+			lines.append("- %s" % String(issue.get("message", "")))
+	readiness_dialog.dialog_text = "\n".join(lines)
+	_readiness_cta_action = ""
+	if not blockers.is_empty():
+		var cta: Dictionary = (blockers[0] as Dictionary).get("cta", {})
+		_readiness_cta_action = String(cta.get("action", ""))
+		readiness_cta_button.text = String(cta.get("label", "Risolvi il primo problema"))
+	readiness_cta_button.visible = not _readiness_cta_action.is_empty()
+	readiness_dialog.popup_centered(Vector2i(580, 420))
+
+
+func _activate_readiness_cta() -> void:
+	readiness_dialog.hide()
+	if _readiness_cta_action == "builder":
+		open_builder()
+	elif _readiness_cta_action in SCREENS:
+		show_screen(_readiness_cta_action)
 
 
 func _build_debug_actions() -> void:
@@ -916,8 +958,7 @@ func _build_debug_actions() -> void:
 func _toggle_restaurant() -> void:
 	match GameState.restaurant_state:
 		"closed":
-			if SimulationManager.open_restaurant():
-				advance_tutorial_to(4)
+			SimulationManager.open_restaurant()
 		"open":
 			SimulationManager.request_close()
 		"closing":
@@ -1104,10 +1145,20 @@ func _update_pass() -> void:
 func _update_tutorial() -> void:
 	if tutorial_panel == null:
 		return
-	var step := int(GameState.tutorial.get("step", 0))
-	tutorial_panel.visible = not bool(GameState.tutorial.get("skipped", false)) and not bool(GameState.tutorial.get("complete", false)) and step < TUTORIAL_STEPS.size()
+	var tutorial := TutorialManager.snapshot()
+	var current_index := int(tutorial.get("current_index", 0))
+	tutorial_panel.visible = (
+		not bool(tutorial.get("skipped", false))
+		and not bool(tutorial.get("complete", false))
+		and current_index < int(tutorial.get("total_steps", 0))
+	)
 	if tutorial_panel.visible:
-		tutorial_label.text = "ONBOARDING %d/%d  ·  %s" % [step + 1, TUTORIAL_STEPS.size(), TUTORIAL_STEPS[step]]
+		var current: Dictionary = tutorial.get("current", {})
+		tutorial_label.text = "ONBOARDING %d/%d - %s" % [
+			current_index + 1,
+			int(tutorial.get("total_steps", 0)),
+			String(current.get("text", "")),
+		]
 
 
 func _connect_state() -> void:
@@ -1143,8 +1194,10 @@ func _connect_state() -> void:
 	# entire management screen after every hire or dismissal.
 	GameState.restaurant_profile_changed.connect(func(_value: Dictionary): _update_profile_summary())
 	GameState.toast_requested.connect(show_toast)
-	SimulationManager.order_created.connect(func(_order: Dictionary): advance_tutorial_to(5); _update_pass())
-	SimulationManager.dish_ready.connect(func(_order: Dictionary): _update_pass())
+	SimulationManager.order_created.connect(func(_order: Dictionary): _update_pass())
+	SimulationManager.dish_ready.connect(func(_order: Dictionary): TutorialManager.record_event("first_dish_ready"); _update_pass())
+	SimulationManager.restaurant_opening_blocked.connect(_show_opening_readiness)
+	TutorialManager.state_changed.connect(func(_snapshot: Dictionary): _update_tutorial())
 
 
 func _on_selection_changed(object: PlacedObject) -> void:
@@ -1257,6 +1310,7 @@ func _apply_responsive_layout(viewport_size: Vector2 = Vector2.ZERO) -> void:
 	_orientation_initialized = true
 	_update_top_bar()
 	_update_nav_selection()
+	_enforce_touch_targets(root)
 
 
 func _detected_viewport_size() -> Vector2:
@@ -1269,7 +1323,42 @@ func _detected_viewport_size() -> Vector2:
 	return Vector2(1280, 720)
 
 
+func reduced_motion_enabled() -> bool:
+	return bool(GameState.settings.get("reduced_motion", false))
+
+
+func apply_accessibility_settings() -> void:
+	_build_theme()
+	if root == null:
+		return
+	root.theme = _theme
+	_refresh_accessible_styles(root)
+	_enforce_touch_targets(root)
+
+
+func _refresh_accessible_styles(node: Node) -> void:
+	if node is Button and node.has_meta("ui_tone"):
+		var button := node as Button
+		var tone := String(button.get_meta("ui_tone", "blue"))
+		button.add_theme_stylebox_override("normal", _button_style(tone))
+		button.add_theme_stylebox_override("hover", _button_style("green" if tone != "red" else "yellow"))
+		button.add_theme_stylebox_override("pressed", _button_style("yellow"))
+	if node is PanelContainer and node.has_meta("accessible_card"):
+		(node as PanelContainer).add_theme_stylebox_override("panel", _card_style())
+	for child: Node in node.get_children():
+		_refresh_accessible_styles(child)
+
+
+func _enforce_touch_targets(node: Node) -> void:
+	if node is BaseButton or node is LineEdit or node is SpinBox or node is HSlider or node is VSlider:
+		var control := node as Control
+		control.custom_minimum_size.y = maxf(control.custom_minimum_size.y, 44.0)
+	for child: Node in node.get_children():
+		_enforce_touch_targets(child)
+
+
 func _build_theme() -> void:
+	var high_contrast := bool(GameState.settings.get("high_contrast", false))
 	_theme = Theme.new()
 	_theme.default_font = GameFonts.medium()
 	_theme.default_font_size = 16
@@ -1277,39 +1366,72 @@ func _build_theme() -> void:
 	_theme.set_font("font", "OptionButton", GameFonts.semibold())
 	_theme.set_font("font", "CheckBox", GameFonts.semibold())
 	_theme.set_font("font", "TabBar", GameFonts.semibold())
-	_theme.set_color("font_color", "Label", Color("29464b"))
+	_theme.set_color("font_color", "Label", Color("10292e") if high_contrast else Color("29464b"))
 	_theme.set_color("font_color", "Button", Color("fffaf0"))
-	_theme.set_color("font_color", "CheckBox", Color("304e52"))
-	_theme.set_color("font_hover_color", "CheckBox", Color("1d777f"))
-	_theme.set_color("font_pressed_color", "CheckBox", Color("1d777f"))
+	_theme.set_color("font_color", "CheckBox", Color("10292e") if high_contrast else Color("304e52"))
+	_theme.set_color("font_hover_color", "CheckBox", Color("075f68") if high_contrast else Color("1d777f"))
+	_theme.set_color("font_pressed_color", "CheckBox", Color("075f68") if high_contrast else Color("1d777f"))
 	_theme.set_font_size("font_size", "Button", 17)
 	_theme.set_font_size("font_size", "OptionButton", 16)
 	_theme.set_constant("separation", "VBoxContainer", 8)
 	var default_panel := StyleBoxFlat.new()
-	default_panel.bg_color = Color("fffaf0e8")
-	default_panel.border_color = Color("c9d9d7")
-	default_panel.set_border_width_all(1)
+	default_panel.bg_color = Color("fffdf7f5") if high_contrast else Color("fffaf0e8")
+	default_panel.border_color = Color("173f45") if high_contrast else Color("c9d9d7")
+	default_panel.set_border_width_all(2 if high_contrast else 1)
 	default_panel.set_corner_radius_all(12)
 	_theme.set_stylebox("panel", "PanelContainer", default_panel)
+	var focus := StyleBoxFlat.new()
+	focus.bg_color = Color("00000000")
+	focus.border_color = Color("fff1a8") if high_contrast else Color("8de0d4")
+	focus.set_border_width_all(3)
+	focus.set_corner_radius_all(10)
+	focus.expand_margin_left = 2
+	focus.expand_margin_right = 2
+	focus.expand_margin_top = 2
+	focus.expand_margin_bottom = 2
+	_theme.set_stylebox("focus", "Button", focus)
+	_theme.set_stylebox("focus", "OptionButton", focus)
+	_theme.set_stylebox("focus", "CheckBox", focus)
 
 
 func _button_style(tone: String) -> StyleBox:
-	var colors := {
+	var high_contrast := bool(GameState.settings.get("high_contrast", false))
+	var colors := ({
+		"blue": Color("075f68"),
+		"green": Color("087247"),
+		"red": Color("9f2438"),
+		"yellow": Color("9b5a00"),
+		"ghost": Color("243f44")
+	} if high_contrast else {
 		"blue": Color("277985"),
 		"green": Color("1d9b72"),
 		"red": Color("c95360"),
 		"yellow": Color("d59535"),
 		"ghost": Color("44666b")
-	}
+	})
 	var style := StyleBoxFlat.new()
 	style.bg_color = colors.get(tone, colors.blue)
-	style.border_color = Color("ffffff24")
-	style.set_border_width_all(1)
+	style.border_color = Color("fff8df") if high_contrast else Color("ffffff24")
+	style.set_border_width_all(2 if high_contrast else 1)
 	style.set_corner_radius_all(9)
 	style.content_margin_left = 12
 	style.content_margin_right = 12
 	style.content_margin_top = 8
 	style.content_margin_bottom = 8
+	return style
+
+
+func _card_style() -> StyleBoxFlat:
+	var high_contrast := bool(GameState.settings.get("high_contrast", false))
+	var style := StyleBoxFlat.new()
+	style.bg_color = Color("fffdf7") if high_contrast else Color("f5f0e7")
+	style.border_color = Color("173f45") if high_contrast else Color("d4c9b7")
+	style.set_border_width_all(2 if high_contrast else 1)
+	style.set_corner_radius_all(12)
+	style.content_margin_left = 12
+	style.content_margin_right = 12
+	style.content_margin_top = 10
+	style.content_margin_bottom = 10
 	return style
 
 

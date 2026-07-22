@@ -1,38 +1,63 @@
-name: Pubblica PWA
+name: Verifica e pubblica PWA
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
     paths:
       - assets/**
       - data/**
       - scenes/**
       - scripts/**
+      - tests/**
+      - tools/release/**
       - web/**
       - project.godot
       - export_presets.cfg
+      - BUILD_PWA.ps1
+      - PWA.md
       - .github/workflows/deploy-pwa.yml
   workflow_dispatch:
+    inputs:
+      release:
+        description: Identificatore release (es. closed-beta-0.3.0)
+        required: true
+        default: closed-beta-candidate
+        type: string
+      publish:
+        description: Pubblica su Pages dopo tutti i gate automatici
+        required: true
+        default: false
+        type: boolean
+      ipad_evidence:
+        description: Link/ID evidence del test fisico iPad di 60 minuti
+        required: false
+        type: string
+      rollback_run_id:
+        description: Run ID precedente da ripubblicare senza ricompilare
+        required: false
+        type: string
 
 permissions:
+  actions: read
   contents: read
   pages: write
   id-token: write
 
 concurrency:
-  group: github-pages
-  cancel-in-progress: true
+  group: pwa-release-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   GODOT_VERSION: 4.7-stable
   GODOT_TEMPLATE_DIR: 4.7.stable
+  GODOT_LINUX: .godot-bin/Godot_v4.7-stable_linux.x86_64
+  RELEASE_ARTIFACT: pwa-release-ready
 
 jobs:
-  build:
-    name: Esporta per Web
+  verify:
+    name: 1 · Test M0–M3 e soak
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
 
     steps:
       - name: Scarica il repository
@@ -50,243 +75,223 @@ jobs:
         shell: bash
         run: |
           mkdir -p .godot-bin
-          curl --fail --location --retry 3 \
-            --output /tmp/godot.zip \
+          curl --fail --location --retry 3 --output /tmp/godot.zip \
             "https://github.com/godotengine/godot-builds/releases/download/${GODOT_VERSION}/Godot_v${GODOT_VERSION}_linux.x86_64.zip"
           unzip -q /tmp/godot.zip -d .godot-bin
 
-      - name: Prepara Godot
+      - name: Importa gli asset
         shell: bash
-        run: chmod +x ".godot-bin/Godot_v${GODOT_VERSION}_linux.x86_64"
+        run: |
+          chmod +x "$GODOT_LINUX"
+          "$GODOT_LINUX" --headless --path . --import
 
-      - name: Cache del template Web
+      - name: Smoke degli strumenti release
+        run: python3 tools/release/release_tools_smoke.py
+
+      - name: Matrice autorevole core e milestone
+        shell: bash
+        run: |
+          python3 tools/release/run_godot_matrix.py \
+            --godot "$GODOT_LINUX" --project . \
+            --groups core,m0,m1,m2,m3,release \
+            --isolate-test-results \
+            --logs "$RUNNER_TEMP/release-evidence/godot"
+
+      - name: Soak breve e 10 fresh-run fino al giorno 3
+        shell: bash
+        run: |
+          python3 tools/release/run_godot_matrix.py \
+            --godot "$GODOT_LINUX" --project . --groups soak \
+            --isolate-test-results \
+            --timeout 900 --logs "$RUNNER_TEMP/release-evidence/soak"
+
+      - name: Conserva evidence di verifica
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pwa-verification-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-evidence
+          if-no-files-found: error
+          retention-days: 90
+
+  export:
+    name: 2 · Export clean e budget
+    needs: verify
+    if: github.event_name != 'workflow_dispatch' || inputs.rollback_run_id == ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Scarica esattamente il commit verificato
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Verifica repository sorgente pulito
+        shell: bash
+        run: |
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git status --porcelain --untracked-files=normal)"
+
+      - name: Cache di Godot
+        id: godot-cache
+        uses: actions/cache@v4
+        with:
+          path: .godot-bin
+          key: godot-linux-${{ env.GODOT_VERSION }}
+
+      - name: Installa Godot
+        if: steps.godot-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          mkdir -p .godot-bin
+          curl --fail --location --retry 3 --output /tmp/godot.zip \
+            "https://github.com/godotengine/godot-builds/releases/download/${GODOT_VERSION}/Godot_v${GODOT_VERSION}_linux.x86_64.zip"
+          unzip -q /tmp/godot.zip -d .godot-bin
+
+      - name: Cache template Web no-thread
         id: template-cache
         uses: actions/cache@v4
         with:
           path: ~/.local/share/godot/export_templates/${{ env.GODOT_TEMPLATE_DIR }}
           key: godot-web-nothreads-${{ env.GODOT_VERSION }}
 
-      - name: Installa il template Web
+      - name: Installa template Web no-thread
         if: steps.template-cache.outputs.cache-hit != 'true'
         shell: bash
         run: |
-          curl --fail --location --retry 3 \
-            --output /tmp/godot-templates.tpz \
+          curl --fail --location --retry 3 --output /tmp/godot-templates.tpz \
             "https://github.com/godotengine/godot-builds/releases/download/${GODOT_VERSION}/Godot_v${GODOT_VERSION}_export_templates.tpz"
-          mkdir -p /tmp/godot-template ~/.local/share/godot/export_templates/${GODOT_TEMPLATE_DIR}
+          mkdir -p /tmp/godot-template "$HOME/.local/share/godot/export_templates/$GODOT_TEMPLATE_DIR"
           unzip -q /tmp/godot-templates.tpz \
-            templates/version.txt \
-            templates/web_nothreads_release.zip \
+            templates/version.txt templates/web_nothreads_release.zip \
             -d /tmp/godot-template
-          mv /tmp/godot-template/templates/* ~/.local/share/godot/export_templates/${GODOT_TEMPLATE_DIR}/
+          mv /tmp/godot-template/templates/* "$HOME/.local/share/godot/export_templates/$GODOT_TEMPLATE_DIR/"
 
-      - name: Importa gli asset
+      - name: Esporta una sola volta
         shell: bash
-        run: ".godot-bin/Godot_v${GODOT_VERSION}_linux.x86_64 --headless --path . --import"
-
-      - name: Esegui unit e smoke test
-        shell: bash
+        env:
+          RELEASE_ID: ${{ github.event.inputs.release || format('ci-{0}.{1}', github.run_number, github.run_attempt) }}
         run: |
-          GODOT=".godot-bin/Godot_v${GODOT_VERSION}_linux.x86_64"
-          "$GODOT" --headless --path . res://tests/test_runner.tscn
-          "$GODOT" --headless --path . res://tests/casual_state_migration.tscn
-          "$GODOT" --headless --path . res://tests/album_unlock_smoke.tscn
-          "$GODOT" --headless --path . res://tests/storage_delivery_reservation_smoke.tscn
-          "$GODOT" --headless --path . res://tests/day_cycle_smoke.tscn
-          "$GODOT" --headless --path . res://tests/review_quality_smoke.tscn
-          "$GODOT" --headless --path . res://tests/review_runtime_integration_smoke.tscn
-          "$GODOT" --headless --path . res://tests/reviews_screen_smoke.tscn
-          "$GODOT" --headless --path . res://tests/restaurant_ambience_smoke.tscn
-          "$GODOT" --headless --path . res://tests/ambience_runtime_smoke.tscn
-          "$GODOT" --headless --path . res://tests/staff_role_smoke.tscn
-          "$GODOT" --headless --path . res://tests/technical_builder_smoke.tscn
-          "$GODOT" --headless --path . res://tests/technical_layout_migration.tscn
-          "$GODOT" --headless --path . res://tests/profile_screen_smoke.tscn
-          "$GODOT" --headless --path . res://tests/responsive_ui_smoke.tscn
-          "$GODOT" --headless --path . res://tests/pwa_delivery_smoke.tscn
-          "$GODOT" --headless --path . res://tests/ui_glyph_audit.tscn
-          "$GODOT" --headless --path . res://tests/asset_load_check.tscn
-          "$GODOT" --headless --path . res://tests/service_smoke.tscn
-          "$GODOT" --headless --path . res://tests/customer_flow_smoke.tscn
-          "$GODOT" --headless --path . res://tests/maintenance_smoke.tscn
-          "$GODOT" --headless --path . res://tests/navigation_adversarial.tscn
-          "$GODOT" --headless --path . res://tests/customer_exit_flow.tscn
-          "$GODOT" --headless --path . res://tests/dish_visual_consistency.tscn
-          "$GODOT" --headless --path . res://tests/status_bubble-smoke.tscn
-          "$GODOT" --headless --path . res://tests/runtime_system_gaps_smoke.tscn
-          "$GODOT" --headless --path . res://tests/capture_m10_acceptance.tscn
-          "$GODOT" --headless --path . res://tests/agent_stress.tscn
+          chmod +x "$GODOT_LINUX"
+          "$GODOT_LINUX" --headless --path . --import
+          mkdir -p builds/pwa "$RUNNER_TEMP/release-evidence"
+          "$GODOT_LINUX" --headless --path . --export-release PWA builds/pwa/index.html
+          GODOT_ACTUAL="$($GODOT_LINUX --version)"
+          python3 tools/release/prepare_pwa_artifact.py \
+            --project . --build builds/pwa --commit "$GITHUB_SHA" \
+            --godot-version "$GODOT_ACTUAL" --release "$RELEASE_ID" \
+            --mode release --require-clean
+          python3 tools/release/verify_pwa_artifact.py \
+            --build builds/pwa --require-publishable \
+            --max-total-mib 65 --max-wasm-mib 42 --max-pck-mib 25 \
+            --evidence "$RUNNER_TEMP/release-evidence/artifact-verification.json"
 
-      - name: Esporta la PWA
-        shell: bash
-        run: |
-          mkdir -p builds/pwa
-          ".godot-bin/Godot_v${GODOT_VERSION}_linux.x86_64" \
-            --headless --path . --export-release PWA builds/pwa/index.html
-          touch builds/pwa/.nojekyll
-          python3 - <<'PY'
-          import datetime
-          import json
-          import os
-          import pathlib
-          import re
-          import shutil
-          import struct
-
-          build = pathlib.Path("builds/pwa")
-          info = {
-              "built_at_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-              "commit": os.environ.get("GITHUB_SHA", ""),
-              "dirty": False,
-              "source_state": "clean",
-              "mode": "release",
-              "offline_cache": "runtime-cache-after-first-controlled-load",
-          }
-          (build / "build-info.json").write_text(
-              json.dumps(info, ensure_ascii=False, indent=2),
-              encoding="utf-8",
-          )
-
-          shutil.copyfile("web/pwa_icon_192.png", build / "index.192x192.png")
-          manifest_path = build / "index.manifest.json"
-          manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-          manifest["orientation"] = "any"
-          manifest["id"] = "./"
-          manifest["scope"] = "./"
-          manifest["icons"] = [
-              icon for icon in manifest.get("icons", [])
-              if icon.get("sizes") != "192x192"
-          ]
-          manifest["icons"].append({
-              "sizes": "192x192",
-              "src": "index.192x192.png",
-              "type": "image/png",
-              "purpose": "any",
-          })
-          for icon in manifest["icons"]:
-              icon["purpose"] = "any"
-          manifest["icons"].sort(
-              key=lambda icon: int(icon["sizes"].split("x", maxsplit=1)[0])
-          )
-          manifest_path.write_text(
-              json.dumps(manifest, ensure_ascii=False, separators=(",", ":")),
-              encoding="utf-8",
-          )
-
-          worker_path = build / "index.service.worker.js"
-          worker = worker_path.read_text(encoding="utf-8")
-          if "cache.addAll(CACHED_FILES)" not in worker:
-              raise SystemExit("Service worker Godot non riconosciuto")
-          cached_match = re.search(
-              r"const CACHED_FILES = (?P<files>\[[^\r\n]*\]);",
-              worker,
-          )
-          cacheable_match = re.search(
-              r"const CACHEABLE_FILES = (?P<files>\[[^\r\n]*\]);",
-              worker,
-          )
-          if cached_match is None or cacheable_match is None:
-              raise SystemExit("Liste cache del service worker non trovate")
-          cached = json.loads(cached_match.group("files"))
-          cacheable = json.loads(cacheable_match.group("files"))
-          for asset in (
-              "index.manifest.json",
-              "index.144x144.png",
-              "index.180x180.png",
-              "index.192x192.png",
-              "index.512x512.png",
-              "build-info.json",
-          ):
-              if asset not in cached:
-                  cached.append(asset)
-          replacement = (
-              "const CACHED_FILES = "
-              + json.dumps(cached, separators=(",", ":"))
-              + ";"
-          )
-          worker = (
-              worker[:cached_match.start()]
-              + replacement
-              + worker[cached_match.end():]
-          )
-          bootstrap = """
-
-          // DeGustibus first-install control: claim the already-open page only when
-          // there is no previous active worker. Later updates keep waiting for the
-          // explicit "Aggiorna e riavvia" action.
-          self.addEventListener('install', (event) => {
-              if (!self.registration.active) {
-                  event.waitUntil(self.skipWaiting());
-              }
-          });
-          self.addEventListener('activate', (event) => {
-              event.waitUntil(self.clients.claim());
-          });
-          """
-          if "// DeGustibus first-install control" not in worker:
-              worker += bootstrap
-          worker_path.write_text(worker, encoding="utf-8")
-
-          required = (
-              "index.html",
-              "index.js",
-              "index.wasm",
-              "index.pck",
-              "index.service.worker.js",
-              "index.manifest.json",
-              "index.192x192.png",
-              "index.512x512.png",
-              "build-info.json",
-          )
-          missing = [name for name in required if not (build / name).is_file()]
-          if missing:
-              raise SystemExit(f"File PWA mancanti: {', '.join(missing)}")
-          if manifest["orientation"] != "any":
-              raise SystemExit("Il manifest forza ancora l'orientamento")
-          sizes = {icon["sizes"] for icon in manifest["icons"]}
-          if not {"192x192", "512x512"}.issubset(sizes):
-              raise SystemExit("Icone installazione 192/512 mancanti")
-          if not {"index.wasm", "index.pck"}.issubset(cacheable):
-              raise SystemExit("WASM/PCK non sono cache-on-demand")
-          for name, expected in (
-              ("index.192x192.png", (192, 192)),
-              ("index.512x512.png", (512, 512)),
-          ):
-              png = (build / name).read_bytes()
-              if png[:8] != b"\x89PNG\r\n\x1a\n":
-                  raise SystemExit(f"{name} non è un PNG")
-              dimensions = struct.unpack(">II", png[16:24])
-              if dimensions != expected:
-                  raise SystemExit(
-                      f"{name}: dimensioni {dimensions}, attese {expected}"
-                  )
-          total_bytes = sum(
-              path.stat().st_size for path in build.iterdir() if path.is_file()
-          )
-          print(f"PWA artifact verificato: {total_bytes / 1024 / 1024:.1f} MiB")
-          summary = os.environ.get("GITHUB_STEP_SUMMARY")
-          if summary:
-              with open(summary, "a", encoding="utf-8") as handle:
-                  handle.write(
-                      "### PWA\n"
-                      f"- Artifact: **{total_bytes / 1024 / 1024:.1f} MiB**\n"
-                      "- Manifest: orientamento libero, icone 192/512 verificate\n"
-                      "- Offline: shell precached; WASM/PCK cache-on-demand\n"
-                      f"- Commit: `{info['commit']}` (clean)\n"
-                  )
-          PY
-
-      - name: Configura GitHub Pages
-        uses: actions/configure-pages@v5
-
-      - name: Carica la PWA
-        uses: actions/upload-pages-artifact@v4
+      - name: Conserva artifact verificato per release e rollback
+        uses: actions/upload-artifact@v4
         with:
+          name: ${{ env.RELEASE_ARTIFACT }}
           path: builds/pwa
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Conserva budget e metadati
+        uses: actions/upload-artifact@v4
+        with:
+          name: pwa-export-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-evidence
+          if-no-files-found: error
+          retention-days: 90
+
+  reuse:
+    name: 2R · Riusa artifact di rollback
+    needs: verify
+    if: github.event_name == 'workflow_dispatch' && inputs.rollback_run_id != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Scarica strumenti di verifica correnti
+        uses: actions/checkout@v4
+
+      - name: Recupera artifact immutato dal run richiesto
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.RELEASE_ARTIFACT }}
+          path: release/pwa
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ inputs.rollback_run_id }}
+
+      - name: Riapre i gate hard sul rollback
+        run: |
+          python3 tools/release/verify_pwa_artifact.py \
+            --build release/pwa --require-publishable \
+            --max-total-mib 65 --max-wasm-mib 42 --max-pck-mib 25
+
+      - name: Espone lo stesso artifact ai gate successivi
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.RELEASE_ARTIFACT }}
+          path: release/pwa
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 90
+
+  browser-smoke:
+    name: 3 · Smoke Chromium e WebKit
+    needs: [verify, export, reuse]
+    if: always() && needs.verify.result == 'success' && (needs.export.result == 'success' || needs.reuse.result == 'success')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Scarica strumenti di smoke
+        uses: actions/checkout@v4
+
+      - name: Scarica l'esatto artifact verificato
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.RELEASE_ARTIFACT }}
+          path: release/pwa
+
+      - name: Verifica nuovamente hash logici e budget
+        run: |
+          python3 tools/release/verify_pwa_artifact.py \
+            --build release/pwa --require-publishable \
+            --max-total-mib 65 --max-wasm-mib 42 --max-pck-mib 25
+
+      - name: Installa browser riproducibili
+        run: |
+          python3 -m pip install --disable-pip-version-check playwright==1.59.0
+          python3 -m playwright install --with-deps chromium webkit
+
+      - name: Avvia PWA e prova entrambi i motori
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/release-evidence"
+          python3 -m http.server 4173 --bind 127.0.0.1 --directory release/pwa \
+            >"$RUNNER_TEMP/release-evidence/http-server.log" 2>&1 &
+          SERVER_PID=$!
+          trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
+          python3 tools/release/browser_smoke.py \
+            --base-url http://127.0.0.1:4173 \
+            --evidence "$RUNNER_TEMP/release-evidence/browser-smoke.json"
+
+      - name: Conserva evidence browser
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pwa-browser-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-evidence
+          if-no-files-found: error
+          retention-days: 90
 
   deploy:
-    name: Pubblica
-    needs: build
+    name: 4 · Gate iPad e pubblicazione
+    needs: browser-smoke
+    if: github.event_name == 'workflow_dispatch' && inputs.publish && inputs.ipad_evidence != '' && needs.browser-smoke.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment:
@@ -294,6 +299,34 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
 
     steps:
+      - name: Registra il gate manuale iPad (non automatizzato)
+        run: |
+          echo "Evidence test fisico iPad 60 minuti: ${{ inputs.ipad_evidence }}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Scarica strumenti di verifica
+        uses: actions/checkout@v4
+
+      - name: Scarica lo stesso artifact passato dai browser
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.RELEASE_ARTIFACT }}
+          path: release/pwa
+
+      - name: Ultimo controllo fail-fast, senza re-export
+        run: |
+          python3 tools/release/verify_pwa_artifact.py \
+            --build release/pwa --require-publishable \
+            --max-total-mib 65 --max-wasm-mib 42 --max-pck-mib 25
+
+      - name: Configura GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Prepara il medesimo artifact per Pages
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: release/pwa
+          include-hidden-files: true
+
       - name: Pubblica su GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4

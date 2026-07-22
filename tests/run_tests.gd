@@ -1,5 +1,7 @@
 extends Node
 
+const SERVICE_STRESS_FIXTURE := preload("res://tests/fixtures/service_stress_fixture.gd")
+
 var failures: Array[String] = []
 var checks := 0
 
@@ -17,6 +19,8 @@ func _run() -> void:
 	_test_graphics_profiles()
 	_test_stock_consumption()
 	_test_reorder()
+	GameState.reset_to_defaults(false)
+	SERVICE_STRESS_FIXTURE.apply()
 	var world := RestaurantWorld.new()
 	add_child(world)
 	await get_tree().process_frame
@@ -81,7 +85,13 @@ func _test_registry() -> void:
 	_expect(_atlas_has_transparent_cell_corners(GameIcons.NAVIGATION_SHEET, 4, 2), "navigation cells have transparent backgrounds")
 	var lock_image := GameIcons.LOCK_TEXTURE.get_image()
 	_expect(not lock_image.is_empty() and lock_image.get_pixel(0, 0).a < 0.01, "supplied lock icon has a transparent background")
-	_expect(ResourceLoader.exists("res://assets/ui/fonts/FredokaOne-Regular.ttf") and GameFonts.medium().variation_embolden < GameFonts.semibold().variation_embolden and GameFonts.semibold().variation_embolden < GameFonts.bold().variation_embolden, "Fredoka One is embedded with cartoony Medium, SemiBold and Bold hierarchy")
+	_expect(
+		ResourceLoader.exists("res://assets/ui/fonts/Fredoka-Variable.ttf")
+		and int(GameFonts.medium().variation_opentype.get("wght", 0)) == 500
+		and int(GameFonts.semibold().variation_opentype.get("wght", 0)) == 600
+		and int(GameFonts.bold().variation_opentype.get("wght", 0)) == 700,
+		"Fredoka embeds the authored Medium, SemiBold and Bold variable-font hierarchy"
+	)
 	var preparation_icons := 0
 	for preparation: Dictionary in DataRegistry.preparations:
 		if not String(preparation.get("icon", "")).is_empty() and ResourceLoader.exists(String(preparation.icon)):
@@ -680,8 +690,15 @@ func _test_customer_lifecycle(world: RestaurantWorld) -> void:
 	_expect(_force_party_to_sidewalk(abandoning) and not world.customer_owns_table(abandoning, abandoning_table_uid), "an abandoned table becomes available after the impatient party crosses the exit in overlapping lanes")
 	var checkpoint_person: CustomerPersonAgent = abandoning.people[0]
 	var blocked_checkpoint := world.cell_to_world(Vector2i(world.entrance_cell.x, RestaurantWorld.ROAD_ROWS[0]))
+	var checkpoint_origin := checkpoint_person.global_position
 	abandoning._force_person_checkpoint(checkpoint_person, blocked_checkpoint, "watchdog_safe")
-	_expect(checkpoint_person.global_position.is_equal_approx(checkpoint_person.destination) and checkpoint_person.is_at("watchdog_safe") and checkpoint_person.global_position.distance_to(blocked_checkpoint) > 0.78, "the doorway watchdog uses its safe fallback as the arrived destination instead of deadlocking short of the original checkpoint")
+	_expect(
+		checkpoint_person.global_position.is_equal_approx(checkpoint_origin)
+		and checkpoint_person.destination.distance_to(blocked_checkpoint) > 0.78
+		and checkpoint_person.target_tag == "watchdog_safe"
+		and not checkpoint_person.navigation_failed,
+		"the doorway watchdog replans toward a safe fallback without teleporting the guest"
+	)
 	world.release_table(replacement)
 	for departing: CustomerAgent in [abandoning, replacement]:
 		SimulationManager.unregister_customer(departing, false)
@@ -854,6 +871,11 @@ func _test_progression_and_menu_load(_world: RestaurantWorld) -> void:
 func _test_recipe_tasks_and_station_reservation() -> void:
 	GameState.reset_to_defaults(false)
 	SimulationManager.reset_service_stats()
+	var production_world := SimulationManager.world
+	# This is a task-graph unit test. Live standby capsules belong to the
+	# separate navigation suite and must not make a deterministic station claim
+	# depend on the exact starter layout.
+	SimulationManager.bind_world(null)
 	GameState.set_restaurant_state("open")
 	var before_tomato := int(GameState.stock.tomato.amount)
 	var order := SimulationManager.create_order("margherita", "table_test", null)
@@ -883,6 +905,7 @@ func _test_recipe_tasks_and_station_reservation() -> void:
 		if SimulationManager.tasks[task_id].state == "completed":
 			duplicate_count += 1
 	_expect(duplicate_count == order.task_ids.size(), "each work task completes once")
+	SimulationManager.bind_world(production_world)
 
 
 func _test_staff_scheduler_spread(world: RestaurantWorld) -> void:
@@ -936,7 +959,11 @@ func _test_service_assignment() -> void:
 	var dummy := Node.new()
 	add_child(dummy)
 	var service := SimulationManager.request_service(dummy, "take_order", Vector3.ZERO)
-	var waiter: Dictionary = GameState.employees[3]
+	var waiter: Dictionary = {}
+	for employee: Dictionary in DataRegistry.employee_data.get("hired", []):
+		if String(employee.get("role", "")) == "waiter":
+			waiter = employee
+			break
 	var claimed := SimulationManager.claim_service_task(waiter)
 	_expect(claimed.id == service.id and claimed.state == "reserved", "waiter reserves service task")
 	var second := SimulationManager.claim_service_task(waiter)
@@ -976,7 +1003,7 @@ func _test_save_load() -> void:
 	_expect(GameState.money == 8765, "serialized save state loads successfully")
 	_expect(GameState.money == 8765 and int(GameState.stock.tomato.amount) == 23, "save restores money and stock")
 	_expect(int(GameState.progress.customers_served) == 7 and String(GameState.employees[0].preferred_station) == "pizza_oven", "save restores progression and preferred station")
-	_expect(GameState.layout.size() > 10 and GameState.employees.size() >= 5, "save preserves layout and staff")
+	_expect(GameState.layout.size() > 10 and GameState.employees.size() == 3, "save preserves the starter layout and staff")
 	var legacy_state := serialized_state.duplicate(true)
 	legacy_state.save_version = 6
 	legacy_state.layout = [{"uid":"legacy_oven", "item":"oven", "cell":[5, 10], "rotation":0}]

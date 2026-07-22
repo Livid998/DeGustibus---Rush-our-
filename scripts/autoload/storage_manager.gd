@@ -157,26 +157,159 @@ func forecast_usage(additional_items: Dictionary = {}) -> Dictionary:
 	return result
 
 
+## Returns the capacity-safe subset of a requested delivery. Existing stock and
+## (by default) both pending batches are treated as already occupying space.
+## Allocation is deterministic so the same save and cart always yield the same
+## accepted/rejected split.
+func plan_delivery(requested_items: Dictionary, include_pending: bool = true) -> Dictionary:
+	var requested := _amounts_from_items(requested_items)
+	var occupied := usage_snapshot()
+	if include_pending:
+		_add_item_units(occupied, pending_items("normal"))
+		_add_item_units(occupied, pending_items("urgent"))
+	var accepted: Dictionary = {}
+	var rejected: Dictionary = {}
+	var remaining_units := _empty_storage_totals()
+	for storage_type: String in STORAGE_TYPES:
+		remaining_units[storage_type] = maxi(
+			int(_capacity.get(storage_type, 0)) - int(occupied.get(storage_type, 0)),
+			0
+		)
+	var ingredient_ids: Array = requested.keys()
+	ingredient_ids.sort()
+	for ingredient_value: Variant in ingredient_ids:
+		var ingredient_id := String(ingredient_value)
+		var amount := maxi(int(requested.get(ingredient_id, 0)), 0)
+		var metadata := DataRegistry.storage_metadata_for_ingredient(ingredient_id)
+		var storage_type := String(metadata.storage_type)
+		var units_per_item := maxi(int(metadata.storage_units), 1)
+		var accepted_amount := mini(amount, int(remaining_units.get(storage_type, 0)) / units_per_item)
+		if accepted_amount > 0:
+			accepted[ingredient_id] = accepted_amount
+			remaining_units[storage_type] = int(remaining_units.get(storage_type, 0)) - accepted_amount * units_per_item
+		if accepted_amount < amount:
+			rejected[ingredient_id] = amount - accepted_amount
+	var accepted_forecast := occupied.duplicate(true)
+	_add_item_units(accepted_forecast, accepted)
+	var requested_forecast := occupied.duplicate(true)
+	_add_item_units(requested_forecast, requested)
+	var blocked_types: Array[String] = []
+	for ingredient_id: String in rejected:
+		var storage_type := String(DataRegistry.storage_metadata_for_ingredient(ingredient_id).storage_type)
+		if not blocked_types.has(storage_type):
+			blocked_types.append(storage_type)
+	return {
+		"valid": not accepted.is_empty(),
+		"fully_accepted": not requested.is_empty() and rejected.is_empty(),
+		"requested_items": requested,
+		"accepted_items": accepted,
+		"rejected_items": rejected,
+		"forecast": accepted_forecast,
+		"requested_forecast": requested_forecast,
+		"capacity": capacity_snapshot(),
+		"remaining_units": remaining_units,
+		"blocked_types": blocked_types,
+	}
+
+
+func max_orderable_amount(ingredient_id: String, additional_items: Dictionary = {}, include_pending: bool = true) -> int:
+	if not DataRegistry.ingredients_by_id.has(ingredient_id):
+		return 0
+	var occupied := usage_snapshot()
+	if include_pending:
+		_add_item_units(occupied, pending_items("normal"))
+		_add_item_units(occupied, pending_items("urgent"))
+	_add_item_units(occupied, _amounts_from_items(additional_items))
+	var metadata := DataRegistry.storage_metadata_for_ingredient(ingredient_id)
+	var storage_type := String(metadata.storage_type)
+	var units_per_item := maxi(int(metadata.storage_units), 1)
+	var free_units := maxi(int(_capacity.get(storage_type, 0)) - int(occupied.get(storage_type, 0)), 0)
+	return free_units / units_per_item
+
+
 func validate_delivery_capacity(additional_items: Dictionary) -> Dictionary:
-	var additions := _amounts_from_items(additional_items)
+	var plan := plan_delivery(additional_items)
+	var additions: Dictionary = plan.requested_items
 	var added_units := _empty_storage_totals()
 	_add_item_units(added_units, additions)
-	var forecast := forecast_usage(additions)
+	return {
+		"valid": bool(plan.fully_accepted),
+		"forecast": plan.requested_forecast,
+		"capacity": capacity_snapshot(),
+		"added_units": added_units,
+		"blocked_types": plan.blocked_types,
+		"accepted_items": plan.accepted_items,
+		"rejected_items": plan.rejected_items,
+	}
+
+
+func capacity_snapshot_for_layout(layout_records: Array) -> Dictionary:
+	var result := _empty_storage_totals()
+	for record_value: Variant in layout_records:
+		if not record_value is Dictionary:
+			continue
+		var definition: Dictionary = DataRegistry.build_by_id.get(String((record_value as Dictionary).get("item", "")), {})
+		var contribution: Variant = definition.get("storage_capacity", {})
+		if not contribution is Dictionary:
+			continue
+		for storage_type: String in STORAGE_TYPES:
+			result[storage_type] = int(result[storage_type]) + maxi(int((contribution as Dictionary).get(storage_type, 0)), 0)
+	return result
+
+
+## Builder guard: call this with the proposed layout before committing a
+## removal. Pending paid deliveries are included by default.
+func validate_storage_capacity_for_layout(layout_records: Array, include_pending: bool = true) -> Dictionary:
+	var proposed_capacity := capacity_snapshot_for_layout(layout_records)
+	var required := usage_snapshot()
+	if include_pending:
+		_add_item_units(required, pending_items("normal"))
+		_add_item_units(required, pending_items("urgent"))
 	var blocked_types: Array[String] = []
 	for storage_type: String in STORAGE_TYPES:
-		# Existing overflow of one storage class must not prevent buying an item
-		# belonging to the other class.
-		if int(added_units.get(storage_type, 0)) <= 0:
-			continue
-		if int(forecast.get(storage_type, 0)) > int(_capacity.get(storage_type, 0)):
+		if int(required.get(storage_type, 0)) > int(proposed_capacity.get(storage_type, 0)):
 			blocked_types.append(storage_type)
 	return {
 		"valid": blocked_types.is_empty(),
-		"forecast": forecast,
-		"capacity": capacity_snapshot(),
-		"added_units": added_units,
-		"blocked_types": blocked_types
+		"capacity": proposed_capacity,
+		"required": required,
+		"blocked_types": blocked_types,
 	}
+
+
+func can_remove_storage_item(layout_uid: String, include_pending: bool = true) -> Dictionary:
+	var removed_uids: Dictionary = {layout_uid: true}
+	var changed := true
+	while changed:
+		changed = false
+		for record: Dictionary in GameState.layout:
+			var uid := String(record.get("uid", ""))
+			var support_uid := String(record.get("support_uid", ""))
+			if not uid.is_empty() and removed_uids.has(support_uid) and not removed_uids.has(uid):
+				removed_uids[uid] = true
+				changed = true
+	var proposed: Array = []
+	var found := false
+	for record: Dictionary in GameState.layout:
+		var uid := String(record.get("uid", ""))
+		if uid == layout_uid:
+			found = true
+		if removed_uids.has(uid):
+			continue
+		proposed.append(record.duplicate(true))
+	if not found:
+		return {
+			"valid": false,
+			"capacity": capacity_snapshot(),
+			"required": forecast_usage() if include_pending else usage_snapshot(),
+			"blocked_types": [],
+			"reason": "not_found",
+			"removed_uids": [],
+		}
+	var result := validate_storage_capacity_for_layout(proposed, include_pending)
+	result.reason = "" if bool(result.valid) else "capacity"
+	result.removed_uids = removed_uids.keys()
+	return result
 
 
 func reserve_recipe_for_order(order_id: String, recipe_or_id: Variant) -> bool:
@@ -349,6 +482,234 @@ func is_recipe_producible(recipe_or_id: Variant) -> bool:
 	return true
 
 
+func _continuation_paths_snapshot() -> Dictionary:
+	var active_recipe_ids: Array[String] = []
+	var producible_recipe_ids: Array[String] = []
+	var pending_recipe_ids: Array[String] = []
+	var orderable_recipe_ids: Array[String] = []
+	var menu_action_recipe_ids: Array[String] = []
+	for recipe: Dictionary in DataRegistry.recipes:
+		var recipe_id := String(recipe.get("id", ""))
+		var state: Dictionary = GameState.menu.get(recipe_id, {})
+		if not bool(state.get("unlocked", false)):
+			continue
+		var is_active_option := bool(state.get("active", false)) and not bool(state.get("manual_paused", false))
+		if is_active_option:
+			active_recipe_ids.append(recipe_id)
+		if is_recipe_producible(recipe):
+			if is_active_option:
+				producible_recipe_ids.append(recipe_id)
+			else:
+				menu_action_recipe_ids.append(recipe_id)
+			continue
+		var requirements := DataRegistry.recipe_raw_requirements(recipe)
+		var missing_after_pending: Dictionary = {}
+		var pending_can_complete := true
+		for ingredient_id: String in requirements:
+			var required := int(requirements[ingredient_id])
+			var eventual := available_amount(ingredient_id) + pending_amount(ingredient_id, "all")
+			if eventual < required:
+				pending_can_complete = false
+				missing_after_pending[ingredient_id] = required - eventual
+		if pending_can_complete:
+			if is_active_option:
+				pending_recipe_ids.append(recipe_id)
+			else:
+				menu_action_recipe_ids.append(recipe_id)
+			continue
+		var ingredients_unlocked := true
+		var purchase_cost := 0.0
+		for ingredient_id: String in missing_after_pending:
+			if not bool(GameState.stock.get(ingredient_id, {}).get("unlocked", false)):
+				ingredients_unlocked = false
+				break
+			purchase_cost += float(DataRegistry.ingredients_by_id.get(ingredient_id, {}).get("cost", 0.0)) * int(missing_after_pending[ingredient_id])
+		var purchase_plan := plan_delivery(missing_after_pending)
+		if ingredients_unlocked and bool(purchase_plan.fully_accepted) and GameState.can_afford(int(ceil(purchase_cost))):
+			if is_active_option:
+				orderable_recipe_ids.append(recipe_id)
+			else:
+				menu_action_recipe_ids.append(recipe_id)
+	var active_path_exists := not producible_recipe_ids.is_empty() or not pending_recipe_ids.is_empty() or not orderable_recipe_ids.is_empty()
+	# An inactive/paused recipe is a valid self-service escape only when the
+	# player has no active menu. It must not hide recovery for an active recipe
+	# whose inventory is genuinely saturated, otherwise service and auto-reorder
+	# can remain stuck behind an unrelated inactive dish.
+	var menu_only_escape := active_recipe_ids.is_empty() and not menu_action_recipe_ids.is_empty()
+	return {
+		"soft_locked": not active_path_exists and not menu_only_escape,
+		"active_recipe_ids": active_recipe_ids,
+		"producible_recipe_ids": producible_recipe_ids,
+		"pending_recipe_ids": pending_recipe_ids,
+		"orderable_recipe_ids": orderable_recipe_ids,
+		"menu_action_recipe_ids": menu_action_recipe_ids,
+	}
+
+
+## Single source of truth for the "can this save continue?" warning. A future
+## paid delivery counts as recoverable; a recipe that requires a locked
+## ingredient does not.
+func soft_lock_snapshot() -> Dictionary:
+	recalculate_layout_capacity()
+	var continuation := _continuation_paths_snapshot()
+	var recovery_plan := _build_recovery_plan(continuation)
+	var soft_locked := bool(continuation.get("soft_locked", false))
+	return {
+		"soft_locked": soft_locked,
+		"active_recipe_ids": (continuation.get("active_recipe_ids", []) as Array).duplicate(),
+		"producible_recipe_ids": (continuation.get("producible_recipe_ids", []) as Array).duplicate(),
+		"pending_recipe_ids": (continuation.get("pending_recipe_ids", []) as Array).duplicate(),
+		"orderable_recipe_ids": (continuation.get("orderable_recipe_ids", []) as Array).duplicate(),
+		"menu_action_recipe_ids": (continuation.get("menu_action_recipe_ids", []) as Array).duplicate(),
+		"capacity": capacity_snapshot(),
+		"usage": usage_snapshot(),
+		"forecast": forecast_usage(),
+		"overflow": overflow_snapshot(),
+		"discardable_items": _discardable_stock_snapshot(),
+		"recovery_available": soft_locked and bool(recovery_plan.get("eligible", false)),
+		"recovery_plan": recovery_plan,
+	}
+
+
+## Builds a deterministic, non-mutating emergency repair. The executor lives in
+## EconomyManager so preview and confirmation use the exact same payload.
+func build_recovery_plan() -> Dictionary:
+	recalculate_layout_capacity()
+	return _build_recovery_plan(_continuation_paths_snapshot())
+
+
+func _build_recovery_plan(continuation: Dictionary) -> Dictionary:
+	var soft_locked := bool(continuation.get("soft_locked", false))
+	var selected_recipe: Dictionary = {}
+	var selected_score := INF
+	for recipe: Dictionary in DataRegistry.recipes:
+		var recipe_id := String(recipe.get("id", ""))
+		var state: Dictionary = GameState.menu.get(recipe_id, {})
+		if not bool(state.get("unlocked", false)):
+			continue
+		var active_penalty := 0.0 if bool(state.get("active", false)) and not bool(state.get("manual_paused", false)) else 1000000.0
+		var score := active_penalty + DataRegistry.estimate_recipe_cost(recipe)
+		if selected_recipe.is_empty() or score < selected_score or (is_equal_approx(score, selected_score) and recipe_id < String(selected_recipe.get("id", ""))):
+			selected_recipe = recipe
+			selected_score = score
+	if selected_recipe.is_empty():
+		return {
+			"eligible": false,
+			"viable": false,
+			"reason": "no_unlocked_recipe",
+			"recipe_id": "",
+			"cancel_batches": [],
+			"discard_items": {},
+			"grant_items": {},
+		}
+	var recipe_id := String(selected_recipe.get("id", ""))
+	var requirements := DataRegistry.recipe_raw_requirements(selected_recipe)
+	var grant_items: Dictionary = {}
+	var required_units := _empty_storage_totals()
+	for ingredient_id: String in requirements:
+		var missing := maxi(int(requirements[ingredient_id]) - available_amount(ingredient_id), 0)
+		if missing <= 0:
+			continue
+		grant_items[ingredient_id] = missing
+		var metadata := DataRegistry.storage_metadata_for_ingredient(ingredient_id)
+		required_units[String(metadata.storage_type)] = int(required_units.get(String(metadata.storage_type), 0)) + missing * maxi(int(metadata.storage_units), 1)
+	var cancel_batches: Array[String] = []
+	var pending_refund := 0
+	for batch_kind: String in ["normal", "urgent"]:
+		var batch := _batch_for_kind(GameState.pending_delivery_batch, batch_kind)
+		var items := _amounts_from_items(batch.get("items", {}))
+		if items.is_empty():
+			continue
+		cancel_batches.append(batch_kind)
+		pending_refund += _recovery_batch_paid_cost(batch)
+	var simulated_usage := usage_snapshot()
+	var deficit := _empty_storage_totals()
+	for storage_type: String in STORAGE_TYPES:
+		deficit[storage_type] = maxi(
+			int(simulated_usage.get(storage_type, 0)) + int(required_units.get(storage_type, 0)) - int(_capacity.get(storage_type, 0)),
+			0
+		)
+	var discard_items: Dictionary = {}
+	var candidates: Array[Dictionary] = []
+	for ingredient_id: String in GameState.stock:
+		var metadata := DataRegistry.storage_metadata_for_ingredient(ingredient_id)
+		var storage_type := String(metadata.storage_type)
+		if int(deficit.get(storage_type, 0)) <= 0:
+			continue
+		var keep_amount := int(requirements.get(ingredient_id, 0))
+		var discardable := maxi(available_amount(ingredient_id) - keep_amount, 0)
+		if discardable <= 0:
+			continue
+		candidates.append({
+			"ingredient_id": ingredient_id,
+			"storage_type": storage_type,
+			"storage_units": maxi(int(metadata.storage_units), 1),
+			"amount": discardable,
+			"is_recipe_input": requirements.has(ingredient_id),
+			"average_cost": float(GameState.stock[ingredient_id].get("average_cost", 0.0)),
+		})
+	candidates.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+		if bool(a.is_recipe_input) != bool(b.is_recipe_input):
+			return not bool(a.is_recipe_input)
+		if not is_equal_approx(float(a.average_cost), float(b.average_cost)):
+			return float(a.average_cost) < float(b.average_cost)
+		return String(a.ingredient_id) < String(b.ingredient_id)
+	)
+	for candidate: Dictionary in candidates:
+		var storage_type := String(candidate.storage_type)
+		var units_needed := int(deficit.get(storage_type, 0))
+		if units_needed <= 0:
+			continue
+		var units_per_item := int(candidate.storage_units)
+		var amount := mini(int(candidate.amount), ceili(float(units_needed) / float(units_per_item)))
+		if amount <= 0:
+			continue
+		discard_items[String(candidate.ingredient_id)] = amount
+		deficit[storage_type] = maxi(units_needed - amount * units_per_item, 0)
+	var viable := true
+	for storage_type: String in STORAGE_TYPES:
+		if int(deficit.get(storage_type, 0)) > 0:
+			viable = false
+			break
+	var already_used := bool(GameState.progress.get("emergency_recovery_used", false))
+	var eligible := soft_locked and viable and not already_used
+	var reason := ""
+	if already_used:
+		reason = "already_used"
+	elif not soft_locked:
+		reason = "not_soft_locked"
+	elif not viable:
+		reason = "insufficient_capacity"
+	return {
+		"eligible": eligible,
+		"viable": viable,
+		"soft_locked": soft_locked,
+		"reason": reason,
+		"recipe_id": recipe_id,
+		"activate_recipe": not bool(GameState.menu.get(recipe_id, {}).get("active", false)),
+		"resume_recipe": bool(GameState.menu.get(recipe_id, {}).get("manual_paused", false)),
+		"cancel_batches": cancel_batches,
+		"pending_refund": pending_refund,
+		"discard_items": discard_items,
+		"grant_items": grant_items,
+		"capacity": capacity_snapshot(),
+		"usage": usage_snapshot(),
+	}
+
+
+func _recovery_batch_paid_cost(batch: Dictionary) -> int:
+	if not bool(batch.get("paid", false)):
+		return 0
+	if batch.has("paid_cost"):
+		return maxi(int(batch.get("paid_cost", 0)), 0)
+	var reconstructed := 0.0
+	for ingredient_id: String in batch.get("items", {}):
+		var item: Variant = batch.items[ingredient_id]
+		if item is Dictionary:
+			reconstructed += maxi(int((item as Dictionary).get("amount", 0)), 0) * maxf(float((item as Dictionary).get("unit_cost", 0.0)), 0.0)
+	return int(ceil(reconstructed))
+
+
 func refresh_auto_sold_out() -> void:
 	if _refreshing_auto_sold_out or not is_instance_valid(GameState):
 		return
@@ -475,6 +836,15 @@ func _new_reservation(requirements: Dictionary, consumed: Dictionary) -> Diction
 		"remaining": requirements.duplicate(true),
 		"consumed": consumed.duplicate(true)
 	}
+
+
+func _discardable_stock_snapshot() -> Dictionary:
+	var result: Dictionary = {}
+	for ingredient_id: String in GameState.stock:
+		var amount := available_amount(ingredient_id)
+		if amount > 0:
+			result[ingredient_id] = amount
+	return result
 
 
 func _add_item_units(target: Dictionary, items: Dictionary) -> void:

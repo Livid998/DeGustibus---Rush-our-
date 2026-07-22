@@ -86,24 +86,26 @@ func _test_v10_technical_kitchen_migration() -> void:
 	var first_layout := GameState.layout.duplicate(true)
 	var migrated_payload := GameState.serialize().duplicate(true)
 	GameState.deserialize(migrated_payload)
-	_expect(GameState.layout == first_layout, "caricare nuovamente un save v11 non duplica supporti o cappe")
+	_expect(GameState.layout == first_layout, "caricare nuovamente un save gia migrato non duplica supporti o cappe")
 
 	GameState.deserialize(payload)
 	_expect(GameState.layout == first_layout, "la stessa migrazione v10 produce sempre lo stesso layout")
-	_expect(int(GameState.serialize().save_version) == 11, "il salvataggio migrato viene serializzato come v11")
+	_expect(int(GameState.serialize().save_version) == 12, "il salvataggio migrato viene serializzato come v12")
 
 
 func _test_v11_default_layout() -> void:
 	GameState.reset_to_defaults(false)
-	var dessert := _record("dessert_1")
+	var pizza_oven := _record("pizza_1")
 	_expect(
-		String(dessert.get("support_uid", "")) == "support_dessert_1"
-		and String(_record("support_dessert_1").get("item", "")) == "worktable",
-		"il layout nuovo nasce con la gelatiera gia appoggiata sul banco"
+		String(pizza_oven.get("support_uid", "")) == "support_pizza_1"
+		and String(_record("support_pizza_1").get("item", "")) == "prep_counter",
+		"il layout starter nasce con il forno pizza correttamente appoggiato sul banco da due slot"
 	)
 	_expect(
-		_hoods_for("stove_1").size() == 1 and _hoods_for("multi_1").size() == 1,
-		"il layout nuovo nasce con entrambi i fornelli ventilati"
+		_record("stove_1").is_empty()
+		and _record("multi_1").is_empty()
+		and _record("dessert_1").is_empty(),
+		"il layout starter non include attrezzature estranee alle due ricette iniziali"
 	)
 
 
