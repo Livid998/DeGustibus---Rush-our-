@@ -120,7 +120,7 @@ func _ready() -> void:
 		"smoke Python prova ripristino result e policy errori browser"
 	)
 
-	for job_marker: String in ["verify:", "export:", "reuse:", "browser-smoke:", "deploy:"]:
+	for job_marker: String in ["verify:", "export:", "reuse:", "browser-smoke:", "deploy-test:", "deploy-manual:"]:
 		_expect(job_marker in workflow, "workflow separa il job %s" % job_marker.trim_suffix(":"))
 	_expect(
 		"pwa-release-ready" in workflow
@@ -158,6 +158,9 @@ func _ready() -> void:
 			and "github.event_name == 'push'" in workflow
 			and "inputs.channel == 'test'" in workflow
 			and "inputs.channel == 'beta'" in workflow
+			and "deploy-test:" in workflow
+			and "deploy-manual:" in workflow
+			and "always() && github.event_name == 'push'" in workflow
 			and "upload-pages-artifact@v4" in workflow
 			and workflow.count("include-hidden-files: true") >= 2,
 		"Pages pubblica test da main e mantiene evidence iPad per la beta"

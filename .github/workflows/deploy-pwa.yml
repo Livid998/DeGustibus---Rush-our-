@@ -296,19 +296,51 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
-  deploy:
-    name: 4 · Pubblicazione test / gate iPad beta
+  deploy-test:
+    name: 4T · Pubblicazione automatica test
     needs: browser-smoke
-    if: >-
-      needs.browser-smoke.result == 'success' &&
-      (
-        github.event_name == 'push' ||
-        (
-          github.event_name == 'workflow_dispatch' &&
-          inputs.publish &&
-          (inputs.channel == 'test' || (inputs.channel == 'beta' && inputs.ipad_evidence != ''))
-        )
-      )
+    if: ${{ always() && github.event_name == 'push' && needs.browser-smoke.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Registra il canale test
+        run: echo "Canale test PWA - non promosso a closed beta." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Scarica strumenti di verifica
+        uses: actions/checkout@v4
+
+      - name: Scarica lo stesso artifact passato dai browser
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.RELEASE_ARTIFACT }}
+          path: release/pwa
+
+      - name: Ultimo controllo fail-fast, senza re-export
+        run: |
+          python3 tools/release/verify_pwa_artifact.py \
+            --build release/pwa --require-publishable \
+            --max-total-mib 65 --max-wasm-mib 42 --max-pck-mib 25
+
+      - name: Configura GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Prepara il medesimo artifact per Pages
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: release/pwa
+
+      - name: Pubblica su GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+  deploy-manual:
+    name: 4M · Pubblicazione manuale / gate beta
+    needs: browser-smoke
+    if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.publish && (inputs.channel == 'test' || (inputs.channel == 'beta' && inputs.ipad_evidence != '')) && needs.browser-smoke.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment:
@@ -317,12 +349,15 @@ jobs:
 
     steps:
       - name: Registra il canale pubblicato
+        env:
+          RELEASE_CHANNEL: ${{ inputs.channel }}
+          IPAD_EVIDENCE: ${{ inputs.ipad_evidence }}
         run: |
-          if [ "${{ github.event_name }}" = "push" ] || [ "${{ inputs.channel }}" = "test" ]; then
-            echo "Canale: test PWA (non promosso a closed beta)." >> "$GITHUB_STEP_SUMMARY"
+          if [ "$RELEASE_CHANNEL" = "test" ]; then
+            echo "Canale test PWA - non promosso a closed beta." >> "$GITHUB_STEP_SUMMARY"
           else
             echo "Canale: closed beta." >> "$GITHUB_STEP_SUMMARY"
-            echo "Evidence test fisico iPad 60 minuti: ${{ inputs.ipad_evidence }}" >> "$GITHUB_STEP_SUMMARY"
+            echo "Evidence test fisico iPad 60 minuti: $IPAD_EVIDENCE" >> "$GITHUB_STEP_SUMMARY"
           fi
 
       - name: Scarica strumenti di verifica
