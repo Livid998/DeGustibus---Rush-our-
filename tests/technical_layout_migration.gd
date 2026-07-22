@@ -86,11 +86,11 @@ func _test_v10_technical_kitchen_migration() -> void:
 	var first_layout := GameState.layout.duplicate(true)
 	var migrated_payload := GameState.serialize().duplicate(true)
 	GameState.deserialize(migrated_payload)
-	_expect(GameState.layout == first_layout, "caricare nuovamente un save v11 non duplica supporti o cappe")
+	_expect(GameState.layout == first_layout, "caricare nuovamente un save gia migrato non duplica supporti o cappe")
 
 	GameState.deserialize(payload)
 	_expect(GameState.layout == first_layout, "la stessa migrazione v10 produce sempre lo stesso layout")
-	_expect(int(GameState.serialize().save_version) == 11, "il salvataggio migrato viene serializzato come v11")
+	_expect(int(GameState.serialize().save_version) == 12, "il salvataggio migrato viene serializzato come v12")
 
 
 func _test_v11_default_layout() -> void:

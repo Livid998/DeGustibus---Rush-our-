@@ -14,6 +14,9 @@ var debug_content: VBoxContainer
 var toast_label: Label
 var tutorial_panel: PanelContainer
 var tutorial_label: Label
+var readiness_dialog: ConfirmationDialog
+var readiness_cta_button: Button
+var _readiness_cta_action := ""
 var money_label: Label
 var reputation_label: Label
 var state_button: Button
@@ -84,17 +87,6 @@ const QUALITY_DEFECT_LABELS := {
 	"burned": "Piatto bruciato",
 	"poor_presentation": "Presentazione debole",
 }
-const TUTORIAL_STEPS := [
-	"Sposta un tavolo in modalità costruzione.",
-	"Aggiungi una sedia alla sala.",
-	"Controlla e bilancia il menu attivo.",
-	"Attiva il riordino automatico del pomodoro.",
-	"Apri il ristorante.",
-	"Osserva il primo ticket al pass.",
-	"Controlla il carico delle postazioni."
-]
-
-
 func _ready() -> void:
 	process_mode = Node.PROCESS_MODE_ALWAYS
 	_build_theme()
@@ -110,10 +102,22 @@ func setup(value_world: RestaurantWorld) -> void:
 	world = value_world
 	world.build_system.selection_changed.connect(_on_selection_changed)
 	world.build_system.preview_changed.connect(_on_preview_changed)
+	world.layout_object_moved.connect(_on_layout_object_moved)
+	world.layout_object_added.connect(_on_layout_object_added)
 	world.camera_rig.view_changed.connect(func(_quadrant: int): _refresh_camera_controls())
 	build_hud.setup(self, world)
 	_refresh_camera_controls()
 	show_screen("Ristorante")
+
+
+func _on_layout_object_moved(object: PlacedObject, previous_cell: Vector2i) -> void:
+	if object != null and is_instance_valid(object) and object.item_id.begins_with("table") and object.grid_cell != previous_cell:
+		TutorialManager.record_event("table_moved", {"uid": object.uid})
+
+
+func _on_layout_object_added(object: PlacedObject) -> void:
+	if object != null and is_instance_valid(object) and object.item_id in ["chair", "stool"] and not object.support_uid.is_empty():
+		TutorialManager.record_event("chair_placed", {"uid": object.uid, "table_uid": object.support_uid})
 
 
 func _process(delta: float) -> void:
@@ -183,8 +187,8 @@ func show_screen(screen_name: String, sound: bool = true) -> void:
 	_restore_current_scroll(screen_name)
 	if sound:
 		AudioManager.play_feedback()
-	if screen_name == "Statistiche" and not GameState.tutorial.complete:
-		advance_tutorial_to(6)
+	if screen_name == "Statistiche":
+		TutorialManager.record_event("station_load_viewed")
 
 
 func close_screen() -> void:
@@ -375,13 +379,7 @@ func show_toast(message: String, tone: String = "info") -> void:
 
 
 func advance_tutorial_to(step: int) -> void:
-	if bool(GameState.tutorial.get("skipped", false)) or bool(GameState.tutorial.get("complete", false)):
-		return
-	if step >= int(GameState.tutorial.step):
-		GameState.tutorial.step = mini(step + 1, TUTORIAL_STEPS.size())
-		if int(GameState.tutorial.step) >= TUTORIAL_STEPS.size():
-			GameState.tutorial.complete = true
-		_update_tutorial()
+	TutorialManager.record_legacy_step(step)
 
 
 func _build_shell() -> void:
@@ -399,6 +397,7 @@ func _build_shell() -> void:
 	_build_debug_panel()
 	_build_toast()
 	_build_tutorial()
+	_build_readiness_dialog()
 	build_hud = BuildHUD.new()
 	root.add_child(build_hud)
 	_build_camera_controls()
@@ -885,10 +884,52 @@ func _build_tutorial() -> void:
 	tutorial_label.add_theme_font_size_override("font_size", 14)
 	tutorial_label.add_theme_color_override("font_color", Color("263f42"))
 	box.add_child(tutorial_label)
-	var skip := make_button("Salta", func(): GameState.tutorial.skipped = true; _update_tutorial(), "ghost")
+	var skip := make_button("Salta", TutorialManager.skip, "ghost")
 	skip.custom_minimum_size = Vector2(68, 34)
 	skip.size_flags_horizontal = Control.SIZE_SHRINK_END
 	box.add_child(skip)
+
+
+func _build_readiness_dialog() -> void:
+	readiness_dialog = ConfirmationDialog.new()
+	readiness_dialog.title = "Checklist prima dell'apertura"
+	readiness_dialog.exclusive = true
+	readiness_dialog.get_ok_button().text = "Chiudi"
+	readiness_dialog.get_cancel_button().visible = false
+	readiness_cta_button = readiness_dialog.add_button("Risolvi il primo problema", true)
+	readiness_cta_button.pressed.connect(_activate_readiness_cta)
+	root.add_child(readiness_dialog)
+
+
+func _show_opening_readiness(readiness: Dictionary) -> void:
+	if readiness_dialog == null:
+		return
+	var lines := PackedStringArray(["Prima di aprire risolvi questi punti:"])
+	var blockers: Array = readiness.get("blockers", [])
+	for issue: Dictionary in blockers:
+		lines.append("- %s" % String(issue.get("message", "Problema non specificato")))
+	var warnings: Array = readiness.get("warnings", [])
+	if not warnings.is_empty():
+		lines.append("")
+		lines.append("Avvisi non bloccanti:")
+		for issue: Dictionary in warnings:
+			lines.append("- %s" % String(issue.get("message", "")))
+	readiness_dialog.dialog_text = "\n".join(lines)
+	_readiness_cta_action = ""
+	if not blockers.is_empty():
+		var cta: Dictionary = (blockers[0] as Dictionary).get("cta", {})
+		_readiness_cta_action = String(cta.get("action", ""))
+		readiness_cta_button.text = String(cta.get("label", "Risolvi il primo problema"))
+	readiness_cta_button.visible = not _readiness_cta_action.is_empty()
+	readiness_dialog.popup_centered(Vector2i(580, 420))
+
+
+func _activate_readiness_cta() -> void:
+	readiness_dialog.hide()
+	if _readiness_cta_action == "builder":
+		open_builder()
+	elif _readiness_cta_action in SCREENS:
+		show_screen(_readiness_cta_action)
 
 
 func _build_debug_actions() -> void:
@@ -916,8 +957,7 @@ func _build_debug_actions() -> void:
 func _toggle_restaurant() -> void:
 	match GameState.restaurant_state:
 		"closed":
-			if SimulationManager.open_restaurant():
-				advance_tutorial_to(4)
+			SimulationManager.open_restaurant()
 		"open":
 			SimulationManager.request_close()
 		"closing":
@@ -1104,10 +1144,20 @@ func _update_pass() -> void:
 func _update_tutorial() -> void:
 	if tutorial_panel == null:
 		return
-	var step := int(GameState.tutorial.get("step", 0))
-	tutorial_panel.visible = not bool(GameState.tutorial.get("skipped", false)) and not bool(GameState.tutorial.get("complete", false)) and step < TUTORIAL_STEPS.size()
+	var tutorial := TutorialManager.snapshot()
+	var current_index := int(tutorial.get("current_index", 0))
+	tutorial_panel.visible = (
+		not bool(tutorial.get("skipped", false))
+		and not bool(tutorial.get("complete", false))
+		and current_index < int(tutorial.get("total_steps", 0))
+	)
 	if tutorial_panel.visible:
-		tutorial_label.text = "ONBOARDING %d/%d  ·  %s" % [step + 1, TUTORIAL_STEPS.size(), TUTORIAL_STEPS[step]]
+		var current: Dictionary = tutorial.get("current", {})
+		tutorial_label.text = "ONBOARDING %d/%d - %s" % [
+			current_index + 1,
+			int(tutorial.get("total_steps", 0)),
+			String(current.get("text", "")),
+		]
 
 
 func _connect_state() -> void:
@@ -1143,8 +1193,10 @@ func _connect_state() -> void:
 	# entire management screen after every hire or dismissal.
 	GameState.restaurant_profile_changed.connect(func(_value: Dictionary): _update_profile_summary())
 	GameState.toast_requested.connect(show_toast)
-	SimulationManager.order_created.connect(func(_order: Dictionary): advance_tutorial_to(5); _update_pass())
-	SimulationManager.dish_ready.connect(func(_order: Dictionary): _update_pass())
+	SimulationManager.order_created.connect(func(_order: Dictionary): _update_pass())
+	SimulationManager.dish_ready.connect(func(_order: Dictionary): TutorialManager.record_event("first_dish_ready"); _update_pass())
+	SimulationManager.restaurant_opening_blocked.connect(_show_opening_readiness)
+	TutorialManager.state_changed.connect(func(_snapshot: Dictionary): _update_tutorial())
 
 
 func _on_selection_changed(object: PlacedObject) -> void:

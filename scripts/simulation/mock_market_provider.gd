@@ -11,7 +11,7 @@ func _init() -> void:
 
 func refresh() -> void:
 	_offers.clear()
-	var prep_ids := DataRegistry.preparations_by_id.keys()
+	var prep_ids := DataRegistry.market_preparation_ids()
 	prep_ids.shuffle()
 	for index: int in mini(6, prep_ids.size()):
 		var prep_id: String = prep_ids[index]
@@ -53,10 +53,15 @@ func buy_offer(offer_id: String) -> bool:
 	for offer: Dictionary in _offers:
 		if offer.id != offer_id:
 			continue
-		var total := int(ceil(float(offer.unit_price) * int(offer.amount)))
+		var preparation_id := String(offer.get("preparation_id", ""))
+		var amount := int(offer.get("amount", 0))
+		if not DataRegistry.is_market_preparation(preparation_id) or amount <= 0:
+			return false
+		var total := int(ceil(float(offer.unit_price) * amount))
 		if not GameState.spend(total, "Mercato · %s" % offer.name):
 			return false
-		GameState.purchased_preparations[offer.preparation_id] = int(GameState.purchased_preparations.get(offer.preparation_id, 0)) + int(offer.amount)
+		GameState.purchased_preparations[preparation_id] = int(GameState.purchased_preparations.get(preparation_id, 0)) + amount
+		GameState.mark_save_dirty()
 		_offers.erase(offer)
 		return true
 	return false

@@ -19,7 +19,7 @@ signal cleanliness_state_changed(value: Dictionary)
 signal pest_state_changed(value: Dictionary)
 signal staff_preferences_changed(employee_id: String, preference: Variant)
 
-const SAVE_VERSION := 11
+const SAVE_VERSION := 12
 
 var money: int = 10000
 var reputation: float = 1.0
@@ -34,7 +34,14 @@ var deliveries: Array = []
 var purchased_preparations: Dictionary = {}
 var progress: Dictionary = {"customers_served": 0, "desserts_served": 0, "services_started": 0}
 var settings: Dictionary = {"music": true, "sound": true, "camera_zoom": 24.0, "camera_quadrant": 0, "graphics_quality": "auto"}
-var tutorial: Dictionary = {"step": 0, "skipped": false, "complete": false}
+var tutorial: Dictionary = {
+	"version": 2,
+	"current_step_id": "table_moved",
+	"completed_ids": [],
+	"step": 0,
+	"skipped": false,
+	"complete": false,
+}
 var album_inventory: Dictionary = {}
 var album_discovered: Dictionary = {}
 var reviews: Array = []
@@ -77,7 +84,7 @@ func reset_to_defaults(emit_signals: bool = true) -> void:
 	purchased_preparations.clear()
 	progress = {"customers_served": 0, "desserts_served": 0, "services_started": 0}
 	settings = {"music": true, "sound": true, "camera_zoom": 24.0, "camera_quadrant": 0, "graphics_quality": "auto"}
-	tutorial = {"step": 0, "skipped": false, "complete": false}
+	tutorial = _default_tutorial_state()
 	album_inventory = _default_album_inventory()
 	album_discovered = _default_album_discovered()
 	reviews = []
@@ -132,6 +139,17 @@ func _default_world_clock() -> Dictionary:
 	return {
 		"day": 1,
 		"minute": float(DataRegistry.balance_value("day_cycle.start_minute", 540.0))
+	}
+
+
+func _default_tutorial_state() -> Dictionary:
+	return {
+		"version": 2,
+		"current_step_id": "table_moved",
+		"completed_ids": [],
+		"step": 0,
+		"skipped": false,
+		"complete": false,
 	}
 
 
@@ -487,6 +505,69 @@ func unlock_ingredient(ingredient_id: String, reason: String = "", persist: bool
 	return true
 
 
+func purchase_ingredient_unlock(ingredient_id: String) -> bool:
+	var definition: Dictionary = DataRegistry.ingredients_by_id.get(ingredient_id, {})
+	var entry: Dictionary = stock.get(ingredient_id, {})
+	var rule := DataRegistry.ingredient_unlock_rule(definition)
+	var cost := int(rule.get("cost", 0))
+	if definition.is_empty() or entry.is_empty() or bool(entry.get("unlocked", false)):
+		return false
+	if String(rule.get("type", "")) != "album_purchase" or cost <= 0 or money < cost:
+		return false
+
+	# Nothing below can fail after this validation, so the currency and unlock
+	# state are committed as one transaction and emitted only once.
+	money -= cost
+	entry.unlocked = true
+	album_discovered[ingredient_id] = true
+	money_changed.emit(money)
+	stock_changed.emit(ingredient_id, int(entry.get("amount", 0)))
+	album_discovered_changed.emit(ingredient_id, true)
+	_sync_recipe_unlocks()
+	toast_requested.emit("Nuovo ingrediente: %s · acquisto Album" % String(definition.get("name", ingredient_id)), "income")
+	mark_save_dirty()
+	return true
+
+
+func ingredient_unlock_status(ingredient_id: String) -> Dictionary:
+	var definition: Dictionary = DataRegistry.ingredients_by_id.get(ingredient_id, {})
+	var entry: Dictionary = stock.get(ingredient_id, {})
+	var rule := DataRegistry.ingredient_unlock_rule(definition)
+	var rule_type := String(rule.get("type", ""))
+	var target := 0.0
+	var current := 0.0
+	match rule_type:
+		"album_purchase":
+			target = float(rule.get("cost", 0))
+			current = minf(float(money), target)
+		"customers_served":
+			target = float(rule.get("value", 0))
+			current = float(progress.get("customers_served", 0))
+		"desserts_served":
+			target = float(rule.get("value", 0))
+			current = float(progress.get("desserts_served", 0))
+		"services_started":
+			target = float(rule.get("value", 0))
+			current = float(progress.get("services_started", 0))
+		"reputation":
+			target = float(rule.get("value", 0))
+			current = reputation
+		"build_count":
+			target = float(rule.get("value", 0))
+			var item_id := String(rule.get("item", ""))
+			for record: Dictionary in layout:
+				if String(record.get("item", "")) == item_id:
+					current += 1.0
+	var unlocked := bool(entry.get("unlocked", false))
+	return {
+		"unlocked": unlocked,
+		"rule": rule,
+		"current": current,
+		"target": target,
+		"eligible": unlocked or (target > 0.0 and current >= target),
+	}
+
+
 func record_completed_order(recipe_id: String, _satisfaction: float) -> void:
 	progress.customers_served = int(progress.get("customers_served", 0)) + 1
 	if recipe_id in ["icecream_cone", "mixed_sundae"]:
@@ -500,49 +581,42 @@ func record_completed_order(recipe_id: String, _satisfaction: float) -> void:
 
 func check_progression(persist: bool = true) -> Array[String]:
 	var unlocked: Array[String] = []
-	if int(progress.get("customers_served", 0)) >= 25 and unlock_ingredient("veg_patty", "25 clienti serviti", false):
-		unlocked.append("veg_patty")
-	if reputation >= 2.0 and unlock_ingredient("ham", "Reputazione 2", false):
-		unlocked.append("ham")
-	if int(progress.get("services_started", 0)) >= 1 and unlock_ingredient("egg", "Primo servizio avviato", false):
-		unlocked.append("egg")
-	var dessert_stations := 0
-	for record: Dictionary in layout:
-		if String(record.get("item", "")) == "dessert":
-			dessert_stations += 1
-	if dessert_stations >= 2 and unlock_ingredient("ice_vanilla", "Seconda stazione dessert", false):
-		unlocked.append("ice_vanilla")
-	if reputation >= 3.0 and unlock_ingredient("ice_chocolate", "Reputazione 3", false):
-		unlocked.append("ice_chocolate")
-	if int(progress.get("desserts_served", 0)) >= 10 and unlock_ingredient("ice_strawberry", "10 dessert serviti", false):
-		unlocked.append("ice_strawberry")
+	for ingredient: Dictionary in DataRegistry.ingredients:
+		var ingredient_id := String(ingredient.get("id", ""))
+		if bool(stock.get(ingredient_id, {}).get("unlocked", false)):
+			continue
+		var status := ingredient_unlock_status(ingredient_id)
+		var rule: Dictionary = status.get("rule", {})
+		if String(rule.get("type", "")) == "album_purchase" or not bool(status.get("eligible", false)):
+			continue
+		if unlock_ingredient(ingredient_id, _ingredient_unlock_reason(rule), false):
+			unlocked.append(ingredient_id)
 	if persist and not unlocked.is_empty():
 		SaveManager.save_game()
 	return unlocked
 
 
 func _sync_recipe_unlocks() -> void:
-	var requirements := {
-		"pepperoni_pizza": ["pepperoni"],
-		"veggie_burger": ["veg_patty"],
-		"icecream_cone": ["ice_vanilla"],
-		"mixed_sundae": ["ice_chocolate", "ice_strawberry"]
-	}
-	var changed := false
-	for recipe_id: String in requirements:
-		if not menu.has(recipe_id) or bool(menu[recipe_id].unlocked):
-			continue
-		var ready := true
-		for ingredient_id: String in requirements[recipe_id]:
-			if not stock.has(ingredient_id) or not bool(stock[ingredient_id].unlocked):
-				ready = false
-				break
-		if ready:
-			menu[recipe_id].unlocked = true
-			changed = true
-	if changed:
-		menu_changed.emit()
-		mark_save_dirty()
+	var collection_manager := get_node_or_null("/root/CollectionManager")
+	if collection_manager != null and collection_manager.has_method("sync_recipe_unlocks"):
+		collection_manager.sync_recipe_unlocks()
+
+
+func _ingredient_unlock_reason(rule: Dictionary) -> String:
+	match String(rule.get("type", "")):
+		"customers_served":
+			return "%d clienti serviti" % int(rule.get("value", 0))
+		"desserts_served":
+			return "%d dessert serviti" % int(rule.get("value", 0))
+		"services_started":
+			return "Primo servizio avviato" if int(rule.get("value", 0)) == 1 else "%d servizi avviati" % int(rule.get("value", 0))
+		"reputation":
+			return "Reputazione %s" % str(rule.get("value", 0))
+		"build_count":
+			var item_id := String(rule.get("item", ""))
+			var item_name := String(DataRegistry.build_by_id.get(item_id, {}).get("name", item_id))
+			return "%d x %s" % [int(rule.get("value", 0)), item_name]
+	return "Obiettivo completato"
 
 
 func serialize() -> Dictionary:
@@ -575,6 +649,7 @@ func serialize() -> Dictionary:
 
 func deserialize(data: Dictionary) -> void:
 	var loaded_version := int(data.get("save_version", 0))
+	var progression_refund := 0
 	if loaded_version > SAVE_VERSION:
 		push_warning("Save file is from a newer version; loading known fields")
 	reset_to_defaults(false)
@@ -609,9 +684,19 @@ func deserialize(data: Dictionary) -> void:
 	if data.get("settings") is Dictionary:
 		settings.merge(data.settings, true)
 	if data.get("tutorial") is Dictionary:
-		tutorial.merge(data.tutorial, true)
+		var loaded_tutorial: Dictionary = (data.tutorial as Dictionary).duplicate(true)
+		# Preserve the original legacy shape until TutorialManager can translate
+		# its numeric progress into canonical completed objective IDs.
+		if int(loaded_tutorial.get("version", 0)) < 2:
+			tutorial = loaded_tutorial
+		else:
+			tutorial.merge(loaded_tutorial, true)
 	if data.get("purchased_preparations") is Dictionary:
 		purchased_preparations.merge(data.purchased_preparations, true)
+	if loaded_version < 12:
+		progression_refund = _migrate_progression_v12()
+	else:
+		purchased_preparations = DataRegistry.sanitize_purchased_preparations(purchased_preparations, false).kept
 	if data.get("progress") is Dictionary:
 		progress.merge(data.progress, true)
 	if loaded_version < 10:
@@ -619,8 +704,13 @@ func deserialize(data: Dictionary) -> void:
 	else:
 		_load_casual_state_v10(data)
 	_sync_recipe_unlocks()
+	var tutorial_manager := get_node_or_null("/root/TutorialManager")
+	if tutorial_manager != null and tutorial_manager.has_method("ensure_schema"):
+		tutorial_manager.ensure_schema()
 	set_restaurant_state("closed")
 	_emit_all()
+	if progression_refund > 0:
+		toast_requested.emit("Rimborso semilavorati non utilizzabili: +%d" % progression_refund, "income")
 
 
 func _serialize_stock() -> Dictionary:
@@ -790,6 +880,14 @@ func _normalize_pending_delivery_batch(value: Variant) -> Dictionary:
 	result.remaining = maxf(float(result.get("remaining", DataRegistry.balance_value("delivery.batch_interval_seconds", 300.0))), 0.0)
 	result.paid = bool(result.get("paid", false))
 	return result
+
+
+func _migrate_progression_v12() -> int:
+	var migration := DataRegistry.sanitize_purchased_preparations(purchased_preparations, true)
+	purchased_preparations = (migration.get("kept", {}) as Dictionary).duplicate(true)
+	var refund := maxi(int(migration.get("refund", 0)), 0)
+	money += refund
+	return refund
 
 
 func _migrate_seating_v2() -> void:

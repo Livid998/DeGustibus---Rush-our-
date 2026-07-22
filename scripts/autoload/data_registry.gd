@@ -1,5 +1,14 @@
 extends Node
 
+const INGREDIENT_UNLOCK_RULE_TYPES := [
+	"album_purchase",
+	"customers_served",
+	"desserts_served",
+	"services_started",
+	"reputation",
+	"build_count",
+]
+
 signal registry_loaded
 signal data_validation_failed(errors: Array)
 
@@ -22,6 +31,7 @@ var recipes_by_id: Dictionary = {}
 var stations_by_id: Dictionary = {}
 var suppliers_by_id: Dictionary = {}
 var build_by_id: Dictionary = {}
+var _market_preparation_ids: Array[String] = []
 
 
 func _ready() -> void:
@@ -41,6 +51,7 @@ func _ready() -> void:
 	stations_by_id = _index(stations)
 	suppliers_by_id = _index(suppliers)
 	build_by_id = _index(build_catalog)
+	_market_preparation_ids = _derive_market_preparation_ids()
 	gameplay_balance_valid = _validate_gameplay_balance()
 	if not gameplay_balance_valid:
 		data_validation_failed.emit(balance_validation_errors.duplicate())
@@ -163,6 +174,75 @@ func recipe_raw_requirements(recipe_or_id: Variant) -> Dictionary:
 	return requirements
 
 
+func ingredient_unlock_rule(ingredient_or_id: Variant) -> Dictionary:
+	var ingredient: Dictionary = ingredient_or_id if ingredient_or_id is Dictionary else ingredients_by_id.get(String(ingredient_or_id), {})
+	var rule: Variant = ingredient.get("unlock_rule", {})
+	return (rule as Dictionary).duplicate(true) if rule is Dictionary else {}
+
+
+func ingredient_unlock_requirements(recipe_or_id: Variant) -> Array[String]:
+	var recipe: Dictionary = recipe_or_id if recipe_or_id is Dictionary else recipes_by_id.get(String(recipe_or_id), {})
+	var result: Array[String] = []
+	var configured: Variant = recipe.get("ingredient_unlock_requirements", [])
+	if not configured is Array:
+		return result
+	for ingredient_id: Variant in configured:
+		var normalized := String(ingredient_id)
+		if not normalized.is_empty() and not result.has(normalized):
+			result.append(normalized)
+	return result
+
+
+func market_preparation_ids() -> Array[String]:
+	return _market_preparation_ids.duplicate()
+
+
+func is_market_preparation(preparation_id: String) -> bool:
+	return _market_preparation_ids.has(preparation_id)
+
+
+func preparation_consumers(preparation_id: String) -> Array[String]:
+	var result: Array[String] = []
+	for recipe: Dictionary in recipes:
+		for step: Dictionary in recipe.get("steps", []):
+			if bool(step.get("preppable", false)) and String(step.get("output", "")) == preparation_id:
+				result.append(String(recipe.get("id", "")))
+				break
+	return result
+
+
+func sanitize_purchased_preparations(inventory: Variant, refund_legacy: bool = false) -> Dictionary:
+	var source: Dictionary = inventory if inventory is Dictionary else {}
+	var kept: Dictionary = {}
+	var removed: Dictionary = {}
+	var refund := 0
+	for preparation_id: String in source:
+		var amount := maxi(int(source[preparation_id]), 0)
+		if amount <= 0:
+			continue
+		if is_market_preparation(preparation_id):
+			kept[preparation_id] = amount
+			continue
+		removed[preparation_id] = amount
+		if refund_legacy:
+			var definition: Dictionary = preparations_by_id.get(preparation_id, {})
+			refund += int(ceil(float(definition.get("market_price", 0.0)) * amount))
+	return {"kept": kept, "removed": removed, "refund": refund}
+
+
+func _derive_market_preparation_ids() -> Array[String]:
+	var result: Array[String] = []
+	for recipe: Dictionary in recipes:
+		for step: Dictionary in recipe.get("steps", []):
+			if not bool(step.get("preppable", false)):
+				continue
+			var output_id := String(step.get("output", ""))
+			if preparations_by_id.has(output_id) and not result.has(output_id):
+				result.append(output_id)
+	result.sort()
+	return result
+
+
 func _validate_gameplay_balance() -> bool:
 	balance_validation_errors.clear()
 	_require_balance_number("schema_version", 1.0)
@@ -228,6 +308,22 @@ func _validate_gameplay_balance() -> bool:
 		var metadata := storage_metadata_for_ingredient(ingredient)
 		if int(metadata.storage_units) <= 0:
 			balance_validation_errors.append("ingredient %s has invalid storage_units" % ingredient.get("id", ""))
+		if not bool(ingredient.get("unlocked", false)):
+			_validate_ingredient_unlock_rule(ingredient)
+	for recipe: Dictionary in recipes:
+		var configured_requirements: Variant = recipe.get("ingredient_unlock_requirements", [])
+		if not configured_requirements is Array:
+			balance_validation_errors.append("recipe %s ingredient_unlock_requirements must be an array" % recipe.get("id", ""))
+			continue
+		for ingredient_id: Variant in configured_requirements:
+			if not ingredients_by_id.has(String(ingredient_id)):
+				balance_validation_errors.append("recipe %s requires unknown ingredient unlock %s" % [recipe.get("id", ""), ingredient_id])
+	for preparation_id: String in _market_preparation_ids:
+		var preparation: Dictionary = preparations_by_id.get(preparation_id, {})
+		if float(preparation.get("market_price", 0.0)) <= 0.0:
+			balance_validation_errors.append("market preparation %s needs a positive market_price" % preparation_id)
+		if preparation_consumers(preparation_id).is_empty():
+			balance_validation_errors.append("market preparation %s is not consumed by a preppable step" % preparation_id)
 	var starter: Variant = balance_value("album.starter_inventory", {})
 	if not starter is Dictionary:
 		balance_validation_errors.append("album.starter_inventory must be an object")
@@ -240,6 +336,23 @@ func _validate_gameplay_balance() -> bool:
 	for error: String in balance_validation_errors:
 		push_error("Gameplay balance validation: %s" % error)
 	return balance_validation_errors.is_empty()
+
+
+func _validate_ingredient_unlock_rule(ingredient: Dictionary) -> void:
+	var ingredient_id := String(ingredient.get("id", ""))
+	var rule := ingredient_unlock_rule(ingredient)
+	var rule_type := String(rule.get("type", ""))
+	if rule_type.is_empty() or not INGREDIENT_UNLOCK_RULE_TYPES.has(rule_type):
+		balance_validation_errors.append("ingredient %s has an invalid unlock_rule type" % ingredient_id)
+		return
+	if rule_type == "album_purchase":
+		if int(rule.get("cost", 0)) <= 0:
+			balance_validation_errors.append("ingredient %s album_purchase needs a positive cost" % ingredient_id)
+		return
+	if int(rule.get("value", 0)) <= 0:
+		balance_validation_errors.append("ingredient %s unlock_rule needs a positive value" % ingredient_id)
+	if rule_type == "build_count" and not build_by_id.has(String(rule.get("item", ""))):
+		balance_validation_errors.append("ingredient %s build_count references an unknown item" % ingredient_id)
 
 
 func _require_balance_number(path: String, minimum: float, maximum: float = INF) -> void:

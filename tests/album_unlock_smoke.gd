@@ -11,6 +11,10 @@ func _ready() -> void:
 
 	_test_explicit_costs()
 	_test_atomic_unlock()
+	_test_ingredient_unlock_rules_and_purchase()
+	_test_recipe_progression_authority()
+	_test_progression_reachability()
+	_test_market_preparation_whitelist_and_migration()
 	_test_seeded_rewards_and_pity()
 
 	GameState.deserialize(original_state)
@@ -78,6 +82,89 @@ func _test_atomic_unlock() -> void:
 	GameState.set_album_ingredient_amount("tomato", 7)
 	_expect(int(GameState.album_inventory.tomato) == 7 and int(GameState.stock.tomato.amount) == tomato_stock_before, "album e stock sono inventari indipendenti")
 	_expect(CollectionManager.debug_add("tomato", 2) and CollectionManager.debug_remove("tomato", 1) and int(GameState.album_inventory.tomato) == 8, "i comandi debug aggiungono e rimuovono soltanto dall'album")
+
+
+func _test_ingredient_unlock_rules_and_purchase() -> void:
+	GameState.reset_to_defaults(false)
+	_expect(DataRegistry.gameplay_balance_valid, "le regole di progressione superano la validazione dati")
+	var all_structured := true
+	for ingredient: Dictionary in DataRegistry.ingredients:
+		if bool(ingredient.get("unlocked", false)):
+			continue
+		var rule := DataRegistry.ingredient_unlock_rule(ingredient)
+		all_structured = all_structured and DataRegistry.INGREDIENT_UNLOCK_RULE_TYPES.has(String(rule.get("type", "")))
+	_expect(all_structured, "ogni ingrediente non iniziale ha una regola di sblocco strutturata")
+
+	for ingredient_id: String in ["milk", "pepperoni"]:
+		var definition: Dictionary = DataRegistry.ingredients_by_id[ingredient_id]
+		var rule := DataRegistry.ingredient_unlock_rule(definition)
+		var cost := int(rule.get("cost", 0))
+		_expect(String(rule.get("type", "")) == "album_purchase" and cost == (250 if ingredient_id == "milk" else 350), "%s ha il corretto acquisto Album" % ingredient_id)
+		GameState.stock[ingredient_id].unlocked = false
+		GameState.money = cost - 1
+		var state_before := GameState.serialize().duplicate(true)
+		_expect(not GameState.purchase_ingredient_unlock(ingredient_id), "%s non viene sbloccato senza fondi" % ingredient_id)
+		_expect(GameState.money == int(state_before.money) and GameState.stock[ingredient_id] == state_before.stock[ingredient_id], "l'acquisto fallito di %s e atomico" % ingredient_id)
+		GameState.money = cost
+		_expect(GameState.purchase_ingredient_unlock(ingredient_id), "%s e acquistabile dall'Album live" % ingredient_id)
+		_expect(GameState.money == 0 and bool(GameState.stock[ingredient_id].unlocked) and bool(GameState.album_discovered[ingredient_id]), "l'acquisto di %s addebita una volta e persiste lo sblocco" % ingredient_id)
+		_expect(not GameState.purchase_ingredient_unlock(ingredient_id) and GameState.money == 0, "%s non puo essere acquistato due volte" % ingredient_id)
+
+
+func _test_recipe_progression_authority() -> void:
+	GameState.reset_to_defaults(false)
+	GameState.menu.pepperoni_pizza.unlocked = false
+	GameState.stock.pepperoni.unlocked = false
+	_expect(CollectionManager.sync_recipe_unlocks().is_empty(), "una ricetta resta bloccata finche manca il suo ingrediente fisico")
+	GameState.stock.pepperoni.unlocked = true
+	var granted := CollectionManager.sync_recipe_unlocks()
+	_expect(granted.has("pepperoni_pizza") and bool(GameState.menu.pepperoni_pizza.unlocked), "CollectionManager applica i requisiti ricetta dichiarati nei dati")
+	GameState.stock.pepperoni.unlocked = false
+	CollectionManager.sync_recipe_unlocks()
+	_expect(bool(GameState.menu.pepperoni_pizza.unlocked), "la sincronizzazione non revoca ricette gia sbloccate nei salvataggi")
+
+	GameState.stock.veg_patty.unlocked = false
+	GameState.progress.customers_served = 24
+	_expect(not GameState.check_progression(false).has("veg_patty"), "il progresso strutturato non anticipa la soglia")
+	GameState.progress.customers_served = 25
+	_expect(GameState.check_progression(false).has("veg_patty"), "il progresso strutturato sblocca alla soglia dichiarata")
+
+
+func _test_progression_reachability() -> void:
+	GameState.reset_to_defaults(false)
+	GameState.money = 250
+	_expect(GameState.purchase_ingredient_unlock("milk"), "il ramo dessert puo iniziare acquistando il latte")
+	GameState.layout.append({"uid":"reachability_dessert_2", "item":"dessert", "cell":[15, 12], "rotation":2})
+	var first_unlocks := GameState.check_progression(false)
+	_expect(first_unlocks.has("ice_vanilla") and bool(GameState.menu.icecream_cone.unlocked), "la seconda gelatiera rende raggiungibile il primo dessert senza dipendenze circolari")
+	GameState.reputation = 3.0
+	GameState.progress.desserts_served = 10
+	var later_unlocks := GameState.check_progression(false)
+	_expect(later_unlocks.has("ice_chocolate") and later_unlocks.has("ice_strawberry"), "reputazione e dessert completano gli ingredienti avanzati")
+	_expect(bool(GameState.menu.mixed_sundae.unlocked), "la coppa mista diventa raggiungibile tramite sole regole pubbliche")
+
+
+func _test_market_preparation_whitelist_and_migration() -> void:
+	var expected: Array[String] = ["bun_split", "cheese_grated", "dough_base", "potato_cut", "tomato_sauce"]
+	_expect(DataRegistry.market_preparation_ids() == expected, "il mercato espone soltanto i cinque semilavorati consumabili")
+	var all_consumed := true
+	for preparation_id: String in DataRegistry.market_preparation_ids():
+		all_consumed = all_consumed and not DataRegistry.preparation_consumers(preparation_id).is_empty()
+	_expect(all_consumed, "ogni semilavorato vendibile sostituisce almeno una fase preppable")
+	_expect(not DataRegistry.is_market_preparation("tomato_slices") and not DataRegistry.is_market_preparation("burger_cooked"), "i semilavorati non consumati sono rifiutati")
+
+	var sanitized := DataRegistry.sanitize_purchased_preparations({"dough_base": 3, "tomato_slices": 2, "burger_cooked": 1}, true)
+	_expect(sanitized.kept == {"dough_base": 3}, "la migrazione conserva le preparazioni utilizzabili")
+	_expect(sanitized.removed == {"tomato_slices": 2, "burger_cooked": 1}, "la migrazione identifica tutte le preparazioni legacy")
+	_expect(int(sanitized.refund) == 15, "la migrazione calcola il rimborso pieno ai prezzi di acquisto")
+
+	var legacy := GameState.serialize().duplicate(true)
+	legacy.save_version = 11
+	legacy.money = 100
+	legacy.purchased_preparations = {"dough_base": 3, "tomato_slices": 2, "burger_cooked": 1}
+	GameState.deserialize(legacy)
+	_expect(GameState.purchased_preparations == {"dough_base": 3} and GameState.money == 115, "il caricamento v11 rimborsa e rimuove i semilavorati inutilizzabili")
+	_expect(int(GameState.serialize().save_version) == 12, "il salvataggio migrato viene serializzato come v12")
 
 
 func _test_seeded_rewards_and_pity() -> void:

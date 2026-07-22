@@ -57,7 +57,8 @@ func _run() -> void:
 		var hood := world.add_layout_object("extractor_hood", Vector2i(target.cell), int(target.rotation), String(target.support_uid), int(target.attachment_slot))
 		await get_tree().process_frame
 		_expect(hood != null and stove.is_operational() and world.restaurant_opening_blockers().is_empty() and warning_label != null and not warning_label.visible, "attaching the hood enables the stove and clears its warning")
-		_expect(SimulationManager.open_restaurant() and GameState.restaurant_state == "open", "the same custom restaurant opens once every heat station is ventilated")
+		var full_readiness := SimulationManager.opening_readiness()
+		_expect(not SimulationManager.open_restaurant() and GameState.restaurant_state == "closed" and not bool(full_readiness.get("ready", true)), "ventilation clears its technical blocker while the authoritative checklist still rejects this deliberately incomplete test restaurant")
 		SimulationManager.close_immediately()
 
 		if hood != null:

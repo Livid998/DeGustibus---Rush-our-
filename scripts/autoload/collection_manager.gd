@@ -76,6 +76,26 @@ func unlock_recipe(recipe_id: String) -> bool:
 	return true
 
 
+func sync_recipe_unlocks() -> Array[String]:
+	var unlocked: Array[String] = []
+	for recipe: Dictionary in DataRegistry.recipes:
+		var recipe_id := String(recipe.get("id", ""))
+		if recipe_id.is_empty() or bool(GameState.menu.get(recipe_id, {}).get("unlocked", false)):
+			continue
+		var requirements := DataRegistry.ingredient_unlock_requirements(recipe)
+		if requirements.is_empty():
+			continue
+		var ready := true
+		for ingredient_id: String in requirements:
+			if not bool(GameState.stock.get(ingredient_id, {}).get("unlocked", false)):
+				ready = false
+				break
+		if ready and GameState.set_recipe_unlocked(recipe_id, true):
+			unlocked.append(recipe_id)
+			recipe_unlocked.emit(recipe_id)
+	return unlocked
+
+
 func add_album_ingredient(ingredient_id: String, amount: int, source: String = "debug") -> bool:
 	if amount <= 0 or not DataRegistry.ingredients_by_id.has(ingredient_id):
 		return false

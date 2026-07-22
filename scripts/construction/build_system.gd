@@ -101,6 +101,21 @@ func sell_selected() -> bool:
 	if selected_object == null or not is_instance_valid(selected_object) or not can_edit_definition(selected_object.definition):
 		return false
 	var attached := world.attached_objects(selected_object.uid)
+	var removes_storage := not (selected_object.definition.get("storage_capacity", {}) as Dictionary).is_empty()
+	for dependent: PlacedObject in attached:
+		removes_storage = removes_storage or not (dependent.definition.get("storage_capacity", {}) as Dictionary).is_empty()
+	if removes_storage:
+		var storage_guard := StorageManager.can_remove_storage_item(selected_object.uid)
+		if not bool(storage_guard.get("valid", false)):
+			var blocked_names: Array[String] = []
+			for storage_type_value: Variant in storage_guard.get("blocked_types", []):
+				var storage_type := String(storage_type_value)
+				blocked_names.append("refrigerata" if storage_type == "refrigerated" else "ambiente")
+			GameState.toast_requested.emit(
+				"Deposito necessario: stock e consegne supererebbero la capacita %s" % ", ".join(blocked_names),
+				"warning"
+			)
+			return false
 	var removal_cost := maxi(int(selected_object.definition.get("removal_cost", 0)), 0)
 	if removal_cost > 0:
 		if not GameState.spend(removal_cost, "Rimozione %s" % selected_object.definition.name):

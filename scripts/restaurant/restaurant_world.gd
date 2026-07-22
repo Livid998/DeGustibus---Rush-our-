@@ -4,6 +4,8 @@ extends Node3D
 signal ambience_changed(snapshot: Dictionary)
 signal pest_warning_changed(active: bool, context: Dictionary)
 signal storage_fill_visuals_changed(snapshot: Dictionary)
+signal layout_object_added(object: PlacedObject)
+signal layout_object_moved(object: PlacedObject, previous_cell: Vector2i)
 
 const GRID_SIZE := Vector2i(18, 14)
 const CELL_SIZE := 2.0
@@ -836,6 +838,8 @@ func add_layout_object(item_id: String, cell: Vector2i, rotation_steps: int, sup
 	_refresh_operational_stations()
 	_rebuild_astar()
 	GameState.layout_changed.emit()
+	if object != null:
+		layout_object_added.emit(object)
 	return object
 
 
@@ -859,6 +863,7 @@ func remove_placed_object(object: PlacedObject, remove_record: bool = true) -> v
 func move_layout_object(object: PlacedObject, cell: Vector2i, rotation_steps: int, support_uid: String = "", attachment_slot: int = -1) -> void:
 	if object == null or not is_instance_valid(object):
 		return
+	var previous_cell := object.grid_cell
 	var rotation_delta := posmod(rotation_steps - object.rotation_steps, 4)
 	set_object_occupancy(object, false)
 	object.set_layout_state(cell, rotation_steps, support_uid, attachment_slot)
@@ -879,6 +884,7 @@ func move_layout_object(object: PlacedObject, cell: Vector2i, rotation_steps: in
 	_refresh_operational_stations()
 	_rebuild_astar()
 	GameState.layout_changed.emit()
+	layout_object_moved.emit(object, previous_cell)
 
 
 func _update_layout_record(object: PlacedObject) -> void:
@@ -1150,6 +1156,107 @@ func restaurant_opening_blockers() -> Array[String]:
 	for station: PlacedObject in unventilated_heat_stations():
 		result.append("%s in cella %d,%d: manca una cappa aspirante" % [String(station.definition.get("name", station.item_id)), station.grid_cell.x, station.grid_cell.y])
 	return result
+
+
+func restaurant_opening_readiness() -> Dictionary:
+	return OpeningReadinessService.evaluate(self)
+
+
+func opening_seating_snapshot() -> Dictionary:
+	var physical_tables := 0
+	var physical_seats := 0
+	var reachable_tables := 0
+	var reachable_seats := 0
+	var unreachable_table_uids: Array[String] = []
+	for object: PlacedObject in placed_objects.values():
+		if object == null or not is_instance_valid(object) or not object.item_id.begins_with("table"):
+			continue
+		physical_tables += 1
+		var seats := _seat_assignments_for_table(object)
+		physical_seats += seats.size()
+		if seats.is_empty() or _table_access_positions(object).is_empty():
+			unreachable_table_uids.append(object.uid)
+			continue
+		reachable_tables += 1
+		reachable_seats += seats.size()
+	return {
+		"physical_tables": physical_tables,
+		"physical_seats": physical_seats,
+		"reachable_tables": reachable_tables,
+		"reachable_seats": reachable_seats,
+		"unreachable_table_uids": unreachable_table_uids,
+	}
+
+
+func opening_access_snapshot() -> Dictionary:
+	var entrance_present := false
+	for object: PlacedObject in placed_objects.values():
+		if object != null and is_instance_valid(object) and object.item_id == "door" and object.grid_cell == entrance_cell:
+			entrance_present = true
+			break
+	var inside_target := Vector2i(-1, -1)
+	for object: PlacedObject in placed_objects.values():
+		if object == null or not is_instance_valid(object) or not object.item_id.begins_with("table"):
+			continue
+		var positions := _table_access_positions(object)
+		if not positions.is_empty():
+			inside_target = world_to_cell(positions[0])
+			break
+	if inside_target == Vector2i(-1, -1):
+		inside_target = _nearest_open_cell(Vector2i(entrance_cell.x, entrance_cell.y + 2))
+	var outside_target := Vector2i(entrance_cell.x, EXIT_ROW)
+	var entrance_open := astar.is_in_boundsv(entrance_cell) and not astar.is_point_solid(entrance_cell)
+	return {
+		"entrance_present": entrance_present,
+		"entrance_reachable": entrance_open and not _grid_path(entrance_cell, inside_target).is_empty(),
+		"exit_reachable": entrance_open and astar.is_in_boundsv(outside_target) and not _grid_path(entrance_cell, outside_target).is_empty(),
+		"entrance_cell": entrance_cell,
+	}
+
+
+func opening_station_snapshot(required_station_ids: Array[String]) -> Dictionary:
+	var missing: Array[String] = []
+	var inoperative: Array[String] = []
+	var unreachable: Array[String] = []
+	var operational: Array[String] = []
+	for station_id: String in required_station_ids:
+		var instances: Array[PlacedObject] = []
+		for object: PlacedObject in placed_objects.values():
+			if object != null and is_instance_valid(object) and object.station_id == station_id:
+				instances.append(object)
+		if instances.is_empty():
+			missing.append(station_id)
+			continue
+		var any_operational := false
+		var any_reachable := false
+		for station: PlacedObject in instances:
+			if not station_is_operational(station):
+				continue
+			any_operational = true
+			for access_cell: Vector2i in station_access_cells(station.definition, station.grid_cell, station.rotation_steps, station.support_uid, station.attachment_slot):
+				if (
+					_station_front_connection_open(station.definition, access_cell, station.rotation_steps)
+					and astar.is_in_boundsv(access_cell)
+					and not astar.is_point_solid(access_cell)
+					and not _grid_path(entrance_cell, access_cell).is_empty()
+				):
+					any_reachable = true
+					break
+			if any_reachable:
+				break
+		if not any_operational:
+			inoperative.append(station_id)
+		elif not any_reachable:
+			unreachable.append(station_id)
+		else:
+			operational.append(station_id)
+	return {
+		"required": required_station_ids.duplicate(),
+		"operational": operational,
+		"missing": missing,
+		"inoperative": inoperative,
+		"unreachable": unreachable,
+	}
 
 
 func _refresh_operational_stations() -> void:

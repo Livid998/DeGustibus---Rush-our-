@@ -5,6 +5,9 @@ signal delivery_arrived(delivery: Dictionary)
 signal delivery_rejected(reason: String, details: Dictionary)
 signal delivery_cart_changed(cart: Dictionary)
 signal delivery_batch_changed(batch: Dictionary)
+signal delivery_cancelled(summary: Dictionary)
+signal stock_discarded(summary: Dictionary)
+signal recovery_applied(summary: Dictionary)
 signal payroll_processed(summary: Dictionary)
 
 var delivery_cart: Dictionary = {}
@@ -66,16 +69,21 @@ func delivery_cart_snapshot() -> Dictionary:
 
 func delivery_preview(items: Dictionary = {}, urgent: bool = false) -> Dictionary:
 	var normalized := _normalize_purchase_items(delivery_cart if items.is_empty() else items)
-	var capacity := StorageManager.validate_delivery_capacity(normalized)
-	var cost := _delivery_cost(normalized, urgent)
+	var plan := StorageManager.plan_delivery(normalized)
+	var accepted: Dictionary = plan.accepted_items
+	var cost := _delivery_cost(accepted, urgent)
 	return {
-		"valid": not normalized.is_empty() and bool(capacity.valid) and GameState.can_afford(cost),
+		"valid": not accepted.is_empty() and GameState.can_afford(cost),
 		"items": normalized,
+		"accepted_items": accepted,
+		"rejected_items": plan.rejected_items,
 		"cost": cost,
-		"capacity_valid": bool(capacity.valid),
-		"forecast": capacity.forecast,
-		"capacity": capacity.capacity,
-		"blocked_types": capacity.blocked_types,
+		"capacity_valid": bool(plan.valid),
+		"fully_accepted": bool(plan.fully_accepted),
+		"forecast": plan.forecast,
+		"requested_forecast": plan.requested_forecast,
+		"capacity": plan.capacity,
+		"blocked_types": plan.blocked_types,
 		"affordable": GameState.can_afford(cost),
 		"urgent": urgent
 	}
@@ -83,9 +91,12 @@ func delivery_preview(items: Dictionary = {}, urgent: bool = false) -> Dictionar
 
 func confirm_delivery_cart(urgent: bool = false) -> bool:
 	var cart := delivery_cart.duplicate(true)
-	if not _confirm_items(cart, urgent, "Carrello consegna urgente" if urgent else "Carrello prossima consegna"):
+	var plan := StorageManager.plan_delivery(_normalize_purchase_items(cart))
+	var accepted: Dictionary = plan.accepted_items
+	if not _confirm_items(accepted, urgent, "Carrello consegna urgente" if urgent else "Carrello prossima consegna"):
 		return false
-	clear_delivery_cart()
+	delivery_cart = (plan.rejected_items as Dictionary).duplicate(true)
+	delivery_cart_changed.emit(delivery_cart.duplicate(true))
 	return true
 
 
@@ -110,9 +121,11 @@ func _confirm_items(items: Dictionary, urgent: bool, reason: String) -> bool:
 		delivery_rejected.emit("empty", {})
 		return false
 	var preview := delivery_preview(normalized, urgent)
-	if not bool(preview.capacity_valid):
+	var accepted: Dictionary = preview.accepted_items
+	if accepted.is_empty():
 		delivery_rejected.emit("capacity", preview)
-		GameState.toast_requested.emit("Capacita insufficiente all'arrivo della consegna", "warning")
+		if reason != "Riordino automatico":
+			GameState.toast_requested.emit("Capacita insufficiente all'arrivo della consegna", "warning")
 		return false
 	var cost := int(preview.cost)
 	if not GameState.spend(cost, reason):
@@ -126,8 +139,8 @@ func _confirm_items(items: Dictionary, urgent: bool, reason: String) -> bool:
 		batch.id = "%s_%d_%d" % ["urgent" if urgent else "batch", Time.get_ticks_msec(), _batch_serial]
 	if urgent and was_empty:
 		batch.remaining = float(DataRegistry.balance_value("delivery.urgent_delivery_seconds", 30.0))
-	for ingredient_id: String in normalized:
-		var amount := int(normalized[ingredient_id])
+	for ingredient_id: String in accepted:
+		var amount := int(accepted[ingredient_id])
 		var unit_cost := _unit_cost(ingredient_id, urgent)
 		var current: Dictionary = batch.get("items", {}).get(ingredient_id, {})
 		var previous_amount := int(current.get("amount", 0))
@@ -138,6 +151,7 @@ func _confirm_items(items: Dictionary, urgent: bool, reason: String) -> bool:
 			"unit_cost": ((previous_cost * previous_amount) + unit_cost * amount) / float(maxi(merged_amount, 1))
 		}
 	batch.paid = true
+	batch.paid_cost = maxi(int(batch.get("paid_cost", 0)), 0) + cost
 	if urgent:
 		root.urgent = batch
 	else:
@@ -145,6 +159,7 @@ func _confirm_items(items: Dictionary, urgent: bool, reason: String) -> bool:
 		root.items = batch.items
 		root.remaining = batch.remaining
 		root.paid = true
+		root.paid_cost = batch.paid_cost
 	_publish_batch(root)
 	delivery_created.emit(batch.duplicate(true))
 	return true
@@ -161,6 +176,7 @@ func advance_delivery_time(real_seconds: float, speed_multiplier: float = 1.0) -
 			root.id = ""
 			root.items = {}
 			root.paid = false
+			root.paid_cost = 0
 		normal_remaining += normal_interval
 		if normal_interval <= 0.0:
 			normal_remaining = 0.0
@@ -191,6 +207,111 @@ func next_delivery_for_ingredient(ingredient_id: String) -> Dictionary:
 	return StorageManager.pending_delivery_summary(ingredient_id)
 
 
+func discard_stock(ingredient_id: String, requested_amount: int) -> Dictionary:
+	return _discard_stock_with_rate(ingredient_id, requested_amount, 0.20, "Smaltimento stock")
+
+
+func cancel_pending_batch(batch_kind: String, recovery: bool = false) -> Dictionary:
+	if batch_kind not in ["normal", "urgent"]:
+		return {"success": false, "reason": "invalid_kind", "batch_kind": batch_kind, "refund": 0, "items": {}}
+	var root := _ensure_batch_schema(GameState.pending_delivery_batch)
+	var batch := _batch_for_kind(root, batch_kind)
+	var items: Dictionary = batch.get("items", {})
+	if items.is_empty():
+		return {"success": false, "reason": "empty", "batch_kind": batch_kind, "refund": 0, "items": {}}
+	var paid_cost := _batch_paid_cost(batch)
+	var refund_rate := 1.0 if recovery else 0.80
+	var refund := int(floor(float(paid_cost) * refund_rate))
+	if batch_kind == "urgent":
+		root.urgent = _empty_urgent_batch()
+	else:
+		root.id = ""
+		root.items = {}
+		root.paid = false
+		root.paid_cost = 0
+	_publish_batch(root)
+	if refund > 0:
+		GameState.earn(refund, "Annullamento consegna%s" % (" di recupero" if recovery else ""))
+	var summary := {
+		"success": true,
+		"reason": "",
+		"batch_kind": batch_kind,
+		"refund": refund,
+		"refund_rate": refund_rate,
+		"paid_cost": paid_cost,
+		"items": items.duplicate(true),
+		"recovery": recovery,
+	}
+	delivery_cancelled.emit(summary.duplicate(true))
+	return summary
+
+
+## Executes the latest recovery preview as one logical transaction. It is only
+## available while closed and without runtime reservations, and only once per
+## save, preventing the emergency grant from becoming an economy exploit.
+func apply_recovery_plan() -> Dictionary:
+	var plan := StorageManager.build_recovery_plan()
+	if not bool(plan.get("eligible", false)):
+		return {"success": false, "reason": String(plan.get("reason", "unavailable")), "plan": plan}
+	if GameState.restaurant_state != "closed" or StorageManager.reservation_count() > 0:
+		return {"success": false, "reason": "service_active", "plan": plan}
+	var stock_after: Dictionary = GameState.stock.duplicate(true)
+	for ingredient_id: String in plan.discard_items:
+		if not stock_after.has(ingredient_id):
+			return {"success": false, "reason": "stale_plan", "plan": plan}
+		var entry: Dictionary = stock_after[ingredient_id]
+		var discard_amount := int(plan.discard_items[ingredient_id])
+		if maxi(int(entry.get("amount", 0)) - int(entry.get("reserved", 0)), 0) < discard_amount:
+			return {"success": false, "reason": "stale_plan", "plan": plan}
+		entry.amount = int(entry.get("amount", 0)) - discard_amount
+	for ingredient_id: String in plan.grant_items:
+		if not stock_after.has(ingredient_id):
+			return {"success": false, "reason": "unknown_ingredient", "plan": plan}
+		stock_after[ingredient_id].amount = int(stock_after[ingredient_id].get("amount", 0)) + int(plan.grant_items[ingredient_id])
+	var root := _ensure_batch_schema(GameState.pending_delivery_batch)
+	for batch_kind_value: Variant in plan.cancel_batches:
+		var batch_kind := String(batch_kind_value)
+		if batch_kind == "urgent":
+			root.urgent = _empty_urgent_batch()
+		elif batch_kind == "normal":
+			root.id = ""
+			root.items = {}
+			root.paid = false
+			root.paid_cost = 0
+	var changed_ingredients: Array = []
+	for ingredient_id: String in GameState.stock:
+		if int(GameState.stock[ingredient_id].get("amount", 0)) != int(stock_after.get(ingredient_id, {}).get("amount", 0)):
+			changed_ingredients.append(ingredient_id)
+	GameState.stock = stock_after
+	_publish_batch(root)
+	var refund := maxi(int(plan.get("pending_refund", 0)), 0)
+	if refund > 0:
+		GameState.earn(refund, "Recupero consegne bloccate")
+	if bool(plan.get("activate_recipe", false)):
+		GameState.set_recipe_active(String(plan.recipe_id), true)
+	GameState.progress.emergency_recovery_used = true
+	for ingredient_value: Variant in changed_ingredients:
+		var ingredient_id := String(ingredient_value)
+		GameState.stock_changed.emit(ingredient_id, int(GameState.stock[ingredient_id].amount))
+	GameState.mark_save_dirty()
+	StorageManager.recalculate_usage()
+	StorageManager.refresh_auto_sold_out()
+	if not StorageManager.is_recipe_producible(String(plan.recipe_id)):
+		push_error("Emergency recovery invariant failed for %s" % String(plan.recipe_id))
+		return {"success": false, "reason": "invariant_failed", "plan": plan}
+	var summary := {
+		"success": true,
+		"reason": "",
+		"recipe_id": String(plan.recipe_id),
+		"refund": refund,
+		"discard_items": (plan.discard_items as Dictionary).duplicate(true),
+		"grant_items": (plan.grant_items as Dictionary).duplicate(true),
+		"cancel_batches": (plan.cancel_batches as Array).duplicate(),
+	}
+	recovery_applied.emit(summary.duplicate(true))
+	return summary
+
+
 func _check_auto_reorders() -> void:
 	# Tests, migrations and builder confirmations may replace GameState directly
 	# without emitting layout/stock signals. Recalculate only at this explicit
@@ -207,6 +328,9 @@ func _check_auto_reorders() -> void:
 		var required := int(entry.get("target", 0)) - amount - pending
 		if required <= 0:
 			continue
+		required = mini(required, StorageManager.max_orderable_amount(ingredient_id))
+		if required <= 0:
+			continue
 		# Automatic reorder fills the configured target exactly. Manual orders
 		# still respect the selected lot multiple.
 		_confirm_items({ingredient_id: required}, false, "Riordino automatico")
@@ -214,7 +338,7 @@ func _check_auto_reorders() -> void:
 
 func buy_preparation(preparation_id: String, amount: int) -> bool:
 	var prep: Dictionary = DataRegistry.preparations_by_id.get(preparation_id, {})
-	if prep.is_empty():
+	if prep.is_empty() or amount <= 0 or not DataRegistry.is_market_preparation(preparation_id):
 		return false
 	var cost := int(ceil(float(prep.get("market_price", 5.0)) * amount))
 	if not GameState.spend(cost, "Semilavorato %s" % prep.name):
@@ -332,6 +456,48 @@ func _delivery_cost(items: Dictionary, urgent: bool) -> int:
 	return int(ceil(result))
 
 
+func _batch_paid_cost(batch: Dictionary) -> int:
+	if batch.has("paid_cost"):
+		return maxi(int(batch.get("paid_cost", 0)), 0)
+	var result := 0.0
+	for ingredient_id: String in batch.get("items", {}):
+		var raw: Variant = batch.items[ingredient_id]
+		if not raw is Dictionary:
+			continue
+		var item: Dictionary = raw
+		result += maxi(int(item.get("amount", 0)), 0) * maxf(float(item.get("unit_cost", 0.0)), 0.0)
+	return int(ceil(result))
+
+
+func _discard_stock_with_rate(ingredient_id: String, requested_amount: int, refund_rate: float, reason: String) -> Dictionary:
+	if not GameState.stock.has(ingredient_id) or requested_amount <= 0:
+		return {"success": false, "reason": "invalid", "ingredient_id": ingredient_id, "amount": 0, "refund": 0}
+	var entry: Dictionary = GameState.stock[ingredient_id]
+	var discardable := maxi(int(entry.get("amount", 0)) - int(entry.get("reserved", 0)), 0)
+	var amount := mini(requested_amount, discardable)
+	if amount <= 0:
+		return {"success": false, "reason": "reserved", "ingredient_id": ingredient_id, "amount": 0, "refund": 0}
+	var average_cost := maxf(float(entry.get("average_cost", DataRegistry.ingredients_by_id.get(ingredient_id, {}).get("cost", 0.0))), 0.0)
+	var refund := int(floor(average_cost * amount * clampf(refund_rate, 0.0, 1.0)))
+	entry.amount = int(entry.get("amount", 0)) - amount
+	GameState.stock_changed.emit(ingredient_id, int(entry.amount))
+	GameState.mark_save_dirty()
+	if refund > 0:
+		GameState.earn(refund, reason)
+	var summary := {
+		"success": true,
+		"reason": "",
+		"ingredient_id": ingredient_id,
+		"amount": amount,
+		"requested_amount": requested_amount,
+		"refund": refund,
+		"refund_rate": clampf(refund_rate, 0.0, 1.0),
+		"average_cost": average_cost,
+	}
+	stock_discarded.emit(summary.duplicate(true))
+	return summary
+
+
 func _unit_cost(ingredient_id: String, urgent: bool) -> float:
 	var base := float(DataRegistry.ingredients_by_id.get(ingredient_id, {}).get("cost", 0.0))
 	if urgent:
@@ -362,8 +528,11 @@ func _ensure_batch_schema(value: Dictionary) -> Dictionary:
 		"items": (value.get("items", {}) as Dictionary).duplicate(true) if value.get("items") is Dictionary else {},
 		"remaining": clampf(float(value.get("remaining", interval)), 0.0, interval),
 		"paid": bool(value.get("paid", false)),
+		"paid_cost": maxi(int(value.get("paid_cost", -1)), -1),
 		"urgent": _empty_urgent_batch()
 	}
+	if int(result.paid_cost) < 0:
+		result.paid_cost = _batch_paid_cost({"items": result.items})
 	var urgent_value: Variant = value.get("urgent", {})
 	if urgent_value is Dictionary:
 		var urgent_interval := float(DataRegistry.balance_value("delivery.urgent_delivery_seconds", 30.0))
@@ -371,8 +540,11 @@ func _ensure_batch_schema(value: Dictionary) -> Dictionary:
 			"id": String((urgent_value as Dictionary).get("id", "")),
 			"items": ((urgent_value as Dictionary).get("items", {}) as Dictionary).duplicate(true) if (urgent_value as Dictionary).get("items") is Dictionary else {},
 			"remaining": clampf(float((urgent_value as Dictionary).get("remaining", urgent_interval)), 0.0, urgent_interval),
-			"paid": bool((urgent_value as Dictionary).get("paid", false))
+			"paid": bool((urgent_value as Dictionary).get("paid", false)),
+			"paid_cost": maxi(int((urgent_value as Dictionary).get("paid_cost", -1)), -1)
 		}
+		if int(result.urgent.paid_cost) < 0:
+			result.urgent.paid_cost = _batch_paid_cost({"items": result.urgent.items})
 	return result
 
 
@@ -381,7 +553,8 @@ func _empty_urgent_batch() -> Dictionary:
 		"id": "",
 		"items": {},
 		"remaining": float(DataRegistry.balance_value("delivery.urgent_delivery_seconds", 30.0)),
-		"paid": false
+		"paid": false,
+		"paid_cost": 0
 	}
 
 
@@ -392,7 +565,8 @@ func _batch_for_kind(root: Dictionary, batch_kind: String) -> Dictionary:
 		"id": String(root.get("id", "")),
 		"items": (root.get("items", {}) as Dictionary).duplicate(true),
 		"remaining": float(root.get("remaining", DataRegistry.balance_value("delivery.batch_interval_seconds", 300.0))),
-		"paid": bool(root.get("paid", false))
+		"paid": bool(root.get("paid", false)),
+		"paid_cost": maxi(int(root.get("paid_cost", 0)), 0)
 	}
 
 

@@ -359,6 +359,28 @@ static func _stock(content: VBoxContainer, ui: RestaurantUI) -> void:
 		capacity_row.add_child(capacity_group)
 	content.add_child(capacity_card)
 
+	var integrity := StorageManager.soft_lock_snapshot()
+	if bool(integrity.get("soft_locked", false)):
+		var recovery_card := ui.make_card()
+		var recovery_box := VBoxContainer.new()
+		recovery_box.add_theme_constant_override("separation", 8)
+		recovery_card.add_child(recovery_box)
+		var recovery_title := Label.new()
+		recovery_title.text = "RECUPERO PARTITA NECESSARIO"
+		recovery_title.add_theme_font_override("font", GameFonts.bold())
+		recovery_title.add_theme_color_override("font_color", Color("b94e48"))
+		recovery_box.add_child(recovery_title)
+		var recovery_plan: Dictionary = integrity.get("recovery_plan", {})
+		var recipe_name := String(DataRegistry.recipes_by_id.get(String(recovery_plan.get("recipe_id", "")), {"name":"una ricetta sbloccata"}).name)
+		var recovery_text := Label.new()
+		recovery_text.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		recovery_text.text = "Nessuna ricetta attiva può essere prodotta o rifornita. Il recupero annulla le consegne eccedenti, libera il minimo stock necessario e garantisce una porzione di %s." % recipe_name
+		recovery_box.add_child(recovery_text)
+		var recovery_button := ui.make_button("Mostra e applica recupero", func(): _confirm_storage_recovery(ui, recovery_plan), "red")
+		recovery_button.disabled = not bool(recovery_plan.get("eligible", false))
+		recovery_box.add_child(recovery_button)
+		content.add_child(recovery_card)
+
 	var cart_card := ui.make_card()
 	var cart_box := VBoxContainer.new()
 	cart_box.add_theme_constant_override("separation", 8)
@@ -387,8 +409,12 @@ static func _stock(content: VBoxContainer, ui: RestaurantUI) -> void:
 			var ingredient_name := String(DataRegistry.ingredients_by_id.get(ingredient_id, {"name": ingredient_id}).name)
 			item_names.append("%s x%d" % [ingredient_name, int(cart_items[ingredient_id])])
 		var forecast: Dictionary = normal_preview.forecast
-		cart_description.text = "%s\nCosto normale %d monete · previsto Ambiente %d/%d · Refrigerato %d/%d" % [
+		var accepted_text := _format_delivery_items(normal_preview.get("accepted_items", {}))
+		var rejected_text := _format_delivery_items(normal_preview.get("rejected_items", {}))
+		cart_description.text = "%s\nAccettato: %s%s\nCosto normale %d monete · previsto Ambiente %d/%d · Refrigerato %d/%d" % [
 			", ".join(item_names),
+			accepted_text if not accepted_text.is_empty() else "nessun articolo",
+			" · resta nel carrello: %s" % rejected_text if not rejected_text.is_empty() else "",
 			int(normal_preview.cost),
 			int(forecast.get("ambient", 0)),
 			StorageManager.capacity_for("ambient"),
@@ -423,6 +449,13 @@ static func _stock(content: VBoxContainer, ui: RestaurantUI) -> void:
 	clear_cart.disabled = cart_items.is_empty()
 	cart_controls.add_child(clear_cart)
 	cart_box.add_child(cart_controls)
+	if normal_count > 0 or urgent_count > 0:
+		var cancel_controls := HBoxContainer.new()
+		if normal_count > 0:
+			cancel_controls.add_child(ui.make_button("Annulla batch · rimborso 80%", func(): _confirm_cancel_delivery(ui, "normal"), "ghost"))
+		if urgent_count > 0:
+			cancel_controls.add_child(ui.make_button("Annulla urgente · rimborso 80%", func(): _confirm_cancel_delivery(ui, "urgent"), "ghost"))
+		cart_box.add_child(cancel_controls)
 	content.add_child(cart_card)
 
 	var grid := GridContainer.new()
@@ -560,6 +593,31 @@ static func _stock(content: VBoxContainer, ui: RestaurantUI) -> void:
 		add_cart.custom_minimum_size = Vector2(92, 42)
 		purchase.add_child(add_cart)
 		box.add_child(purchase)
+		var stock_actions := HBoxContainer.new()
+		var orderable := Label.new()
+		orderable.text = "Ordinabili ora: max %d" % StorageManager.max_orderable_amount(ingredient_id, EconomyManager.delivery_cart_snapshot())
+		orderable.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		orderable.add_theme_color_override("font_color", Color("60767a"))
+		stock_actions.add_child(orderable)
+		var dispose_amount := SpinBox.new()
+		dispose_amount.min_value = 1
+		dispose_amount.max_value = maxi(available, 1)
+		dispose_amount.value = mini(maxi(int(entry.lot), 1), maxi(available, 1))
+		dispose_amount.prefix = "Quantità "
+		dispose_amount.custom_minimum_size.x = 130
+		dispose_amount.editable = available > 0
+		stock_actions.add_child(dispose_amount)
+		var dispose_button := ui.make_button("Smaltisci · recupera 20%", func():
+			var summary := EconomyManager.discard_stock(ingredient_id, int(dispose_amount.value))
+			if bool(summary.get("success", false)):
+				ui.show_toast("Stock smaltito · +%d monete" % int(summary.get("refund", 0)), "income")
+			else:
+				ui.show_toast("Quantità non disponibile: lo stock riservato non può essere smaltito", "warning")
+			ui.refresh_screen()
+		, "red")
+		dispose_button.disabled = available <= 0
+		stock_actions.add_child(dispose_button)
+		box.add_child(stock_actions)
 		grid.add_child(card)
 
 
@@ -616,10 +674,25 @@ static func _album(content: VBoxContainer, ui: RestaurantUI) -> void:
 	reward_progress.custom_minimum_size.y = 12
 	reward_box.add_child(reward_progress)
 	var detail_card := ui.make_card()
+	var detail_box := VBoxContainer.new()
+	detail_box.add_theme_constant_override("separation", 8)
+	detail_card.add_child(detail_box)
 	var detail_label := Label.new()
 	detail_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	detail_label.add_theme_color_override("font_color", Color("405f65"))
-	detail_card.add_child(detail_label)
+	detail_box.add_child(detail_label)
+	var unlock_button: Button
+	unlock_button = ui.make_button("Sblocca ingrediente", func():
+		var ingredient_id := String(unlock_button.get_meta("ingredient_id", ""))
+		if ingredient_id.is_empty():
+			return
+		if GameState.purchase_ingredient_unlock(ingredient_id):
+			ui.refresh_screen()
+		else:
+			ui.show_toast("Sblocco non disponibile: controlla fondi e requisito.", "warning")
+	, "yellow")
+	unlock_button.visible = false
+	detail_box.add_child(unlock_button)
 	content.add_child(detail_card)
 	var grid := GridContainer.new()
 	grid.name = "AlbumGrid"
@@ -633,12 +706,13 @@ static func _album(content: VBoxContainer, ui: RestaurantUI) -> void:
 		var ingredient_id := String(ingredient.id)
 		var amount := int(GameState.album_inventory.get(ingredient_id, 0))
 		var discovered := bool(GameState.album_discovered.get(ingredient_id, false)) or amount > 0
+		var known := discovered or String(DataRegistry.ingredient_unlock_rule(ingredient).get("type", "")) == "album_purchase"
 		var card := PanelContainer.new()
 		card.custom_minimum_size = Vector2(155, 160)
 		card.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		var card_style := StyleBoxFlat.new()
 		card_style.bg_color = Color("fffdf7")
-		card_style.border_color = Color("a9cad5") if discovered else Color("c8c3b8")
+		card_style.border_color = Color("a9cad5") if known else Color("c8c3b8")
 		card_style.set_border_width_all(2)
 		card_style.set_corner_radius_all(9)
 		card_style.content_margin_left = 7
@@ -650,7 +724,7 @@ static func _album(content: VBoxContainer, ui: RestaurantUI) -> void:
 		box.add_theme_constant_override("separation", 2)
 		card.add_child(box)
 		var name := Label.new()
-		name.text = String(ingredient.name) if discovered else "???"
+		name.text = String(ingredient.name) if known else "???"
 		name.add_theme_font_override("font", GameFonts.semibold())
 		name.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		name.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
@@ -664,18 +738,16 @@ static func _album(content: VBoxContainer, ui: RestaurantUI) -> void:
 		visual.clip_contents = true
 		var ingredient_icon := _new_icon(GameIcons.ingredient_icon(ingredient), Vector2(138, 98))
 		ingredient_icon.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-		ingredient_icon.tooltip_text = String(ingredient.name) if discovered else "Ingrediente da scoprire"
-		if not discovered:
+		ingredient_icon.tooltip_text = String(ingredient.name) if known else "Ingrediente da scoprire"
+		if not known:
 			ingredient_icon.modulate = Color(0.10, 0.14, 0.15, 0.62)
 		visual.add_child(ingredient_icon)
 		var inspect_button := Button.new()
 		inspect_button.flat = true
 		inspect_button.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-		inspect_button.tooltip_text = "Dettagli %s" % (ingredient.name if discovered else "ingrediente da scoprire")
+		inspect_button.tooltip_text = "Dettagli %s" % (ingredient.name if known else "ingrediente da scoprire")
 		var ingredient_ref := ingredient
-		var amount_ref := amount
-		var discovered_ref := discovered
-		inspect_button.pressed.connect(func(): detail_label.text = _album_detail_text(ingredient_ref, amount_ref, discovered_ref))
+		inspect_button.pressed.connect(func(): _configure_album_detail(detail_label, unlock_button, ingredient_ref, ui))
 		visual.add_child(inspect_button)
 		var quantity := Label.new()
 		quantity.add_theme_font_override("font", GameFonts.bold())
@@ -703,8 +775,46 @@ static func _album(content: VBoxContainer, ui: RestaurantUI) -> void:
 			if bool(GameState.album_discovered.get(String(ingredient.id), false)):
 				first = ingredient
 				break
-		var first_id := String(first.id)
-		detail_label.text = _album_detail_text(first, int(GameState.album_inventory.get(first_id, 0)), bool(GameState.album_discovered.get(first_id, false)))
+		_configure_album_detail(detail_label, unlock_button, first, ui)
+
+
+static func _configure_album_detail(detail_label: Label, unlock_button: Button, ingredient: Dictionary, ui: RestaurantUI) -> void:
+	var ingredient_id := String(ingredient.get("id", ""))
+	var amount := int(GameState.album_inventory.get(ingredient_id, 0))
+	var discovered := bool(GameState.album_discovered.get(ingredient_id, false)) or amount > 0
+	var rule := DataRegistry.ingredient_unlock_rule(ingredient)
+	var purchase_unlock := String(rule.get("type", "")) == "album_purchase"
+	detail_label.text = "%s\nSblocco magazzino: %s" % [_album_detail_text(ingredient, amount, discovered or purchase_unlock), _ingredient_unlock_progress_text(ingredient_id)]
+	unlock_button.visible = purchase_unlock and not bool(GameState.stock.get(ingredient_id, {}).get("unlocked", false))
+	unlock_button.disabled = not GameState.can_afford(int(rule.get("cost", 0)))
+	unlock_button.set_meta("ingredient_id", ingredient_id)
+	if unlock_button.visible:
+		ui.set_button_content(unlock_button, "Sblocca nel magazzino · %d monete" % int(rule.get("cost", 0)))
+
+
+static func _ingredient_unlock_progress_text(ingredient_id: String) -> String:
+	var status := GameState.ingredient_unlock_status(ingredient_id)
+	if bool(status.get("unlocked", false)):
+		return "disponibile"
+	var rule: Dictionary = status.get("rule", {})
+	var current := float(status.get("current", 0.0))
+	var target := float(status.get("target", 0.0))
+	match String(rule.get("type", "")):
+		"album_purchase":
+			return "acquisto Album · %d monete · fondi %d/%d" % [int(target), int(current), int(target)]
+		"customers_served":
+			return "clienti serviti · %d/%d" % [int(current), int(target)]
+		"desserts_served":
+			return "dessert serviti · %d/%d" % [int(current), int(target)]
+		"services_started":
+			return "servizi avviati · %d/%d" % [int(current), int(target)]
+		"reputation":
+			return "reputazione · %.1f/%.1f" % [current, target]
+		"build_count":
+			var item_id := String(rule.get("item", ""))
+			var item_name := String(DataRegistry.build_by_id.get(item_id, {}).get("name", item_id))
+			return "%s costruite · %d/%d" % [item_name, int(current), int(target)]
+	return "sbloccato inizialmente"
 
 
 static func _legacy_album(content: VBoxContainer, ui: RestaurantUI) -> void:
@@ -931,6 +1041,8 @@ static func _market(content: VBoxContainer, ui: RestaurantUI) -> void:
 	offer_grid.add_theme_constant_override("v_separation", 10)
 	content.add_child(offer_grid)
 	for offer: Dictionary in ui.market_provider.get_offers():
+		if not DataRegistry.is_market_preparation(String(offer.get("preparation_id", ""))):
+			continue
 		var card := ui.make_card()
 		var row := HBoxContainer.new()
 		row.add_theme_constant_override("separation", 10)
@@ -950,8 +1062,8 @@ static func _market(content: VBoxContainer, ui: RestaurantUI) -> void:
 		row.add_child(ui.make_button("Compra", func(): ui.market_provider.buy_offer(offer_id); ui.refresh_screen(), "green"))
 		offer_grid.add_child(card)
 	var total_preparations := 0
-	for amount: int in GameState.purchased_preparations.values():
-		total_preparations += amount
+	for preparation_id: String in DataRegistry.market_preparation_ids():
+		total_preparations += int(GameState.purchased_preparations.get(preparation_id, 0))
 	content.add_child(ui.make_section("Negozi NPC", "%d semilavorati disponibili: quelli acquistati sostituiscono realmente le fasi preparabili delle ricette." % total_preparations))
 	var shop_grid := GridContainer.new()
 	shop_grid.name = "MarketShopGrid"
@@ -962,7 +1074,7 @@ static func _market(content: VBoxContainer, ui: RestaurantUI) -> void:
 	content.add_child(shop_grid)
 	var shops := [
 		{"name":"PANETTIERE", "description":"Impasti e pane pronti", "ids":["dough_base", "bun_split"]},
-		{"name":"LABORATORIO GASTRONOMICO", "description":"Tagli e preparazioni professionali", "ids":["tomato_sauce", "tomato_slices", "mushroom_cut", "onion_chopped", "cheese_grated", "cheese_slice", "burger_cooked", "veg_burger_cooked", "lettuce_cut", "potato_cut", "steak_pieces"]}
+		{"name":"LABORATORIO GASTRONOMICO", "description":"Preparazioni realmente utilizzabili", "ids":["tomato_sauce", "cheese_grated", "potato_cut"]}
 	]
 	for shop: Dictionary in shops:
 		var shop_card := ui.make_card()
@@ -973,6 +1085,8 @@ static func _market(content: VBoxContainer, ui: RestaurantUI) -> void:
 		shop_title.add_theme_color_override("font_color", Color("265b61"))
 		shop_box.add_child(shop_title)
 		for prep_id_value: String in shop.ids:
+			if not DataRegistry.is_market_preparation(prep_id_value):
+				continue
 			var prep: Dictionary = DataRegistry.preparations_by_id[prep_id_value]
 			var prep_row := HBoxContainer.new()
 			prep_row.add_theme_constant_override("separation", 8)
@@ -1100,7 +1214,7 @@ static func _settings(content: VBoxContainer, ui: RestaurantUI) -> void:
 	tutorial_status.add_theme_color_override("font_color", Color("52686b"))
 	tutorial_box.add_child(tutorial_status)
 	var restart := ui.make_button("Ricomincia il tutorial", func():
-		GameState.tutorial = {"step": 0, "skipped": false, "complete": false}
+		TutorialManager.restart()
 		SaveManager.save_game()
 		ui._update_tutorial()
 		ui.show_toast("Tutorial riavviato")
@@ -1114,6 +1228,49 @@ static func _settings(content: VBoxContainer, ui: RestaurantUI) -> void:
 	, "green")
 	tutorial_box.add_child(save_now)
 	content.add_child(tutorial)
+
+
+static func _confirm_storage_recovery(ui: RestaurantUI, plan: Dictionary) -> void:
+	var dialog := ConfirmationDialog.new()
+	dialog.title = "Ripara il salvataggio"
+	var recipe_name := String(DataRegistry.recipes_by_id.get(String(plan.get("recipe_id", "")), {"name":"ricetta sbloccata"}).name)
+	dialog.dialog_text = "Questa operazione è eseguibile una sola volta.\n\nRicetta garantita: %s\nConsegne annullate: %d\nStock da liberare: %s\nIngredienti di emergenza: %s\n\nIl salvataggio corrente verrà aggiornato soltanto se l'intera riparazione riesce." % [
+		recipe_name,
+		(plan.get("cancel_batches", []) as Array).size(),
+		_format_delivery_items(plan.get("discard_items", {})),
+		_format_delivery_items(plan.get("grant_items", {})),
+	]
+	dialog.confirmed.connect(func():
+		var result := EconomyManager.apply_recovery_plan()
+		if bool(result.get("success", false)):
+			SaveManager.save_game()
+			ui.show_toast("Salvataggio riparato: il servizio può ripartire", "income")
+		else:
+			ui.show_toast("Il piano di recupero non è più valido; controlla di nuovo lo stock", "warning")
+		ui.refresh_screen()
+		dialog.queue_free()
+	)
+	dialog.canceled.connect(dialog.queue_free)
+	ui.root.add_child(dialog)
+	dialog.popup_centered(Vector2i(620, 430))
+
+
+static func _confirm_cancel_delivery(ui: RestaurantUI, batch_kind: String) -> void:
+	var dialog := ConfirmationDialog.new()
+	dialog.title = "Annulla consegna"
+	dialog.dialog_text = "Annullare %s? Verrà rimborsato l'80%% dell'importo pagato." % ("la consegna urgente" if batch_kind == "urgent" else "il prossimo batch")
+	dialog.confirmed.connect(func():
+		var result := EconomyManager.cancel_pending_batch(batch_kind)
+		if bool(result.get("success", false)):
+			ui.show_toast("Consegna annullata · +%d monete" % int(result.get("refund", 0)), "income")
+		else:
+			ui.show_toast("La consegna non è più disponibile", "warning")
+		ui.refresh_screen()
+		dialog.queue_free()
+	)
+	dialog.canceled.connect(dialog.queue_free)
+	ui.root.add_child(dialog)
+	dialog.popup_centered()
 
 
 static func _confirm_fire(ui: RestaurantUI, employee_id: String, employee_name: String) -> void:
@@ -1173,6 +1330,23 @@ static func _delivery_item_count(items: Variant) -> int:
 		var value: Variant = (items as Dictionary)[ingredient_id]
 		total += maxi(int((value as Dictionary).get("amount", 0)) if value is Dictionary else int(value), 0)
 	return total
+
+
+static func _format_delivery_items(items: Variant) -> String:
+	if not items is Dictionary or (items as Dictionary).is_empty():
+		return "nessuno"
+	var labels: Array[String] = []
+	var ingredient_ids: Array = (items as Dictionary).keys()
+	ingredient_ids.sort()
+	for ingredient_id_value: Variant in ingredient_ids:
+		var ingredient_id := String(ingredient_id_value)
+		var raw: Variant = (items as Dictionary)[ingredient_id]
+		var amount := int((raw as Dictionary).get("amount", 0)) if raw is Dictionary else int(raw)
+		if amount <= 0:
+			continue
+		var name := String(DataRegistry.ingredients_by_id.get(ingredient_id, {"name":ingredient_id}).name)
+		labels.append("%s x%d" % [name, amount])
+	return ", ".join(labels)
 
 
 static func _format_countdown(seconds: float) -> String:

@@ -10,6 +10,8 @@ signal customer_count_changed(count: int)
 signal statistics_changed
 signal group_review_completed(review: Dictionary)
 signal dish_quality_resolved(order: Dictionary)
+signal restaurant_opening_blocked(readiness: Dictionary)
+signal restaurant_opening_evaluated(readiness: Dictionary)
 
 var simulation_speed: float = 1.0
 var world: Node = null
@@ -84,6 +86,15 @@ func set_speed(value: float) -> void:
 func open_restaurant() -> bool:
 	if GameState.restaurant_state != "closed":
 		return false
+	var readiness := opening_readiness()
+	restaurant_opening_evaluated.emit(readiness.duplicate(true))
+	if not bool(readiness.get("ready", false)):
+		restaurant_opening_blocked.emit(readiness.duplicate(true))
+		GameState.toast_requested.emit(
+			"APERTURA BLOCCATA - %d problemi da risolvere" % (readiness.get("blockers", []) as Array).size(),
+			"warning"
+		)
+		return false
 	if world != null and world.has_method("restaurant_opening_blockers"):
 		var blockers: Array = world.restaurant_opening_blockers()
 		if not blockers.is_empty():
@@ -97,7 +108,31 @@ func open_restaurant() -> bool:
 	GameState.progress.services_started = int(GameState.progress.get("services_started", 0)) + 1
 	GameState.check_progression()
 	GameState.set_restaurant_state("open")
+	TutorialManager.record_event("restaurant_opened")
+	var warnings: Array = readiness.get("warnings", [])
+	if not warnings.is_empty():
+		GameState.toast_requested.emit(
+			"RISTORANTE APERTO - %d avvisi non bloccanti" % warnings.size(),
+			"warning"
+		)
 	return true
+
+
+func opening_readiness() -> Dictionary:
+	if world != null and world.has_method("restaurant_opening_readiness"):
+		return world.call("restaurant_opening_readiness")
+	if world != null:
+		return OpeningReadinessService.evaluate(world)
+	return {
+		"ready": false,
+		"blockers": [{
+			"id": "world_unavailable",
+			"message": "La mappa del ristorante non e disponibile.",
+			"cta": {"action": "Ristorante", "label": "Torna alla mappa"},
+		}],
+		"warnings": [],
+		"context": {},
+	}
 
 
 func request_close() -> void:
