@@ -160,10 +160,19 @@ func _test_runtime_diagnostics() -> void:
 func _test_web_bridge_contract() -> void:
 	var shell := FileAccess.get_file_as_string("res://web/pwa_shell.html")
 	var project := FileAccess.get_file_as_string("res://project.godot")
+	var save_source := FileAccess.get_file_as_string("res://scripts/autoload/save_manager.gd")
+	var diagnostics_source := FileAccess.get_file_as_string("res://scripts/autoload/runtime_diagnostics.gd")
 	_expect("navigator.storage.persisted()" in shell and "navigator.storage.persist()" in shell, "PWA requests durable browser storage")
 	_expect("pagehide" in shell and "visibility-hidden" in shell, "PWA flushes on page hide and backgrounding")
 	_expect("webglcontextlost" in shell and "degustibusRuntime?.emitEvent('webglcontextlost')" in shell, "WebGL context loss reaches local diagnostics")
 	_expect("URL.createObjectURL" in shell and "downloadText" in shell, "save and diagnostics JSON can be downloaded locally")
+	_expect(
+		"_web_persistence_api.call(" not in save_source
+			and "_web_runtime_api.call(" not in diagnostics_source
+			and ".registerLifecycleCallback(" in save_source
+			and ".registerEventCallback(" in diagnostics_source,
+		"JavaScriptObject methods are invoked directly instead of routing through a missing JS call() member"
+	)
 	_expect('RuntimeDiagnostics="*res://scripts/autoload/runtime_diagnostics.gd"' in project, "runtime diagnostics is active in every build")
 
 

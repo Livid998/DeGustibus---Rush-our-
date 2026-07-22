@@ -132,7 +132,7 @@ func download_export(filename: String = "degustibus-diagnostics.json") -> Dictio
 	var clean_filename := filename.get_file()
 	if clean_filename.is_empty():
 		clean_filename = "degustibus-diagnostics.json"
-	_web_runtime_api.call("downloadText", clean_filename, payload)
+	_web_runtime_api.downloadText(clean_filename, payload)
 	return {"success": true, "error": "", "payload": ""}
 
 
@@ -184,7 +184,7 @@ func _setup_web_bridge() -> void:
 	if _web_runtime_api == null:
 		return
 	_web_event_callback = bridge.call("create_callback", Callable(self, "_on_web_event"))
-	_web_runtime_api.call("registerEventCallback", _web_event_callback)
+	_web_runtime_api.registerEventCallback(_web_event_callback)
 
 
 func _on_web_event(arguments: Array) -> void:

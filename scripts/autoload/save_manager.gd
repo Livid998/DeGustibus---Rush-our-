@@ -85,7 +85,7 @@ func download_export(filename: String = "degustibus-save.json") -> Dictionary:
 	var clean_filename := filename.get_file()
 	if clean_filename.is_empty():
 		clean_filename = "degustibus-save.json"
-	_web_persistence_api.call("downloadText", clean_filename, payload)
+	_web_persistence_api.downloadText(clean_filename, payload)
 	return {"success": true, "error": "", "payload": ""}
 
 
@@ -95,7 +95,7 @@ func request_import_picker() -> Dictionary:
 	if _web_import_callback == null:
 		var bridge: Object = Engine.get_singleton("JavaScriptBridge")
 		_web_import_callback = bridge.call("create_callback", Callable(self, "_on_web_import_selected"))
-	_web_persistence_api.call("selectJsonFile", _web_import_callback, MAX_IMPORT_BYTES)
+	_web_persistence_api.selectJsonFile(_web_import_callback, MAX_IMPORT_BYTES)
 	return {"success": true, "pending": true, "error": ""}
 
 
@@ -822,8 +822,8 @@ func _setup_web_persistence() -> void:
 	if _web_persistence_api == null:
 		return
 	_web_lifecycle_callback = bridge.call("create_callback", Callable(self, "_on_web_lifecycle"))
-	_web_persistence_api.call("registerLifecycleCallback", _web_lifecycle_callback)
-	_web_persistence_api.call("requestPersistence")
+	_web_persistence_api.registerLifecycleCallback(_web_lifecycle_callback)
+	_web_persistence_api.requestPersistence()
 
 
 func _on_web_lifecycle(arguments: Array) -> void:
